@@ -1,3 +1,4 @@
+import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import express from 'express';
@@ -178,15 +179,16 @@ async function bootstrapServer() {
   });
 
   // Production static SPA build vs Development Vite Middleware
-  if (config.nodeEnv === 'production') {
+  const distPath = path.resolve(process.cwd(), 'dist');
+  const distIndexPath = path.join(distPath, 'index.html');
+  if (config.nodeEnv === 'production' && fs.existsSync(distIndexPath)) {
     app.use('/api', (_req, res) => {
       res.status(404).json({ error: 'API endpoint not found' });
     });
 
-    const distPath = path.resolve(process.cwd(), 'dist');
     app.use(express.static(distPath));
     app.get('*', (_req, res) => {
-      res.sendFile(path.join(distPath, 'index.html'));
+      res.sendFile(distIndexPath);
     });
   } else {
     const { createServer: createViteServer } = await import('vite');
