@@ -348,46 +348,101 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       decryptToken(decodedState.payload.encryptedToken, decodedState.payload.iv, decodedState.payload.authTag)
     ) as { codeVerifier: string; redirectUri: string; userId: number | null };
 
-    const tokenBody = new URLSearchParams({
+    const appId = getActiveDerivAppId();
+    const baseTokenParams = {
       grant_type: 'authorization_code',
-      client_id: getActiveDerivAppId(),
+      client_id: appId,
       code: String(code),
       redirect_uri: verifierJson.redirectUri,
       code_verifier: verifierJson.codeVerifier,
-    });
-    if (config.derivClientSecret) {
-      tokenBody.set('client_secret', config.derivClientSecret);
-    }
-
-    const tokenResp = await fetch(config.derivTokenUrl, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-      body: tokenBody.toString(),
-    });
-    const tokenData = (await tokenResp.json()) as {
-      access_token?: string;
-      scope?: string;
-      error?: string;
-      error_description?: string;
     };
-    if (!tokenResp.ok || !tokenData.access_token) {
-      throw new Error(tokenData.error_description || tokenData.error || 'Deriv OAuth2 token exchange failed');
+
+    const postTokenExchange = async (
+      paramsObj: Record<string, string>,
+      extraHeaders: Record<string, string> = {}
+    ) => {
+      const resp = await fetch(config.derivTokenUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/x-www-form-urlencoded',
+          Accept: 'application/json',
+          ...extraHeaders,
+        },
+        body: new URLSearchParams(paramsObj).toString(),
+      });
+      const json = (await resp.json().catch(() => ({}))) as {
+        access_token?: string;
+        id_token?: string;
+        scope?: string;
+        error?: string;
+        error_description?: string;
+      };
+      return { resp, json };
+    };
+
+    // 1. Try configured client_secret_post if a secret is provided; otherwise pure PKCE ('none')
+    let attempt = config.derivClientSecret
+      ? await postTokenExchange({ ...baseTokenParams, client_secret: config.derivClientSecret })
+      : await postTokenExchange(baseTokenParams);
+
+    const errText = `${attempt.json.error || ''} ${attempt.json.error_description || ''}`.toLowerCase();
+
+    // 2. If Deriv Ory client is configured for 'none' (public PKCE), retry without client_secret
+    if (
+      (!attempt.resp.ok || !attempt.json.access_token) &&
+      config.derivClientSecret &&
+      (errText.includes("'none'") || errText.includes('client_secret_post') || errText.includes('client authentication'))
+    ) {
+      attempt = await postTokenExchange(baseTokenParams);
     }
 
-    const accessToken = tokenData.access_token;
+    // 3. If Deriv Ory client requires 'client_secret_basic', retry with HTTP Basic Auth header
+    const errText2 = `${attempt.json.error || ''} ${attempt.json.error_description || ''}`.toLowerCase();
+    if (
+      (!attempt.resp.ok || !attempt.json.access_token) &&
+      config.derivClientSecret &&
+      errText2.includes('client_secret_basic')
+    ) {
+      const basic = Buffer.from(`${appId}:${config.derivClientSecret}`).toString('base64');
+      attempt = await postTokenExchange(baseTokenParams, { Authorization: `Basic ${basic}` });
+    }
+
+    if (!attempt.resp.ok || !attempt.json.access_token) {
+      throw new Error(attempt.json.error_description || attempt.json.error || 'Deriv OAuth2 token exchange failed');
+    }
+
+    const tokenData = attempt.json;
+    const accessToken = tokenData.access_token!;
     const scopes = tokenData.scope || config.derivOAuthScopes;
 
     let nickname = '';
     let externalId = '';
     let email = '';
+    if (tokenData.id_token) {
+      try {
+        const claimsPart = tokenData.id_token.split('.')[1];
+        if (claimsPart) {
+          const claims = JSON.parse(Buffer.from(claimsPart, 'base64url').toString('utf8')) as {
+            email?: string;
+            sub?: string;
+            name?: string;
+          };
+          if (claims.email) email = claims.email;
+          if (claims.sub) externalId = claims.sub;
+          if (claims.name) nickname = claims.name;
+        }
+      } catch {
+        // ignore malformed id_token
+      }
+    }
     try {
       const nickData = await derivRestRequest<{ nickname?: string; external_id?: string; email?: string }>(
         '/account/v1/nickname',
         accessToken
       );
-      nickname = nickData.nickname || '';
-      externalId = nickData.external_id || '';
-      email = nickData.email || '';
+      nickname = nickData.nickname || nickname;
+      externalId = nickData.external_id || externalId;
+      email = nickData.email || email;
     } catch {
       // ignore if endpoint unavailable
     }

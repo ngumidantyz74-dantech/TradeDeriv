@@ -12,6 +12,7 @@ import {
   pool,
   ensureDatabaseSchema,
   checkDatabaseHealth,
+  requireDb,
   getSetting,
   getCachedSetting,
 } from './server/db.ts';
@@ -112,7 +113,7 @@ async function bootstrapServer() {
   app.use('/api', adminRoutes);
 
   // Root /callback alias for Deriv OAuth redirect URIs
-  app.get(['/callback', '/callback/'], handleDerivOAuthCallback);
+  app.get(['/callback', '/callback/'], requireDb, handleDerivOAuthCallback);
 
   // Realtime WebSocket /ws
   const wss = new WebSocketServer({ server, path: '/ws' });

@@ -15,12 +15,29 @@ function isNonLocalDatabase(connectionString: string): boolean {
   }
 }
 
+function sanitizeConnectionStringForPg(connectionString: string): string {
+  if (!connectionString) return connectionString;
+  try {
+    const u = new URL(connectionString);
+    if (u.searchParams.has('sslmode')) {
+      u.searchParams.delete('sslmode');
+    }
+    if (u.searchParams.has('uselibpqcompat')) {
+      u.searchParams.delete('uselibpqcompat');
+    }
+    return u.toString();
+  } catch {
+    return connectionString.replace(/([?&])(sslmode|uselibpqcompat)=[^&]*(&|$)/gi, '$1').replace(/[?&]$/, '');
+  }
+}
+
 export const databaseConfigured = Boolean(config.databaseUrl);
+const nonLocalDb = isNonLocalDatabase(config.databaseUrl);
 
 export const pool: Pool | null = databaseConfigured
   ? new Pool({
-      connectionString: config.databaseUrl,
-      ssl: isNonLocalDatabase(config.databaseUrl) ? { rejectUnauthorized: false } : undefined,
+      connectionString: nonLocalDb ? sanitizeConnectionStringForPg(config.databaseUrl) : config.databaseUrl,
+      ssl: nonLocalDb ? { rejectUnauthorized: false } : undefined,
       connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 30000,
       max: 15,
