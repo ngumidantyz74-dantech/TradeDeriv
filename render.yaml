@@ -1,0 +1,47 @@
+services:
+  - type: web
+    name: tradederiv
+    runtime: node
+    plan: starter
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: PORT
+        value: "10000"
+      - key: DATABASE_URL
+        sync: false
+      - key: JWT_SECRET
+        generateValue: true
+      - key: BOT_GATE_JWT_SECRET
+        generateValue: true
+      - key: TOKEN_ENCRYPTION_KEY
+        generateValue: true
+      - key: DERIV_APP_ID
+        sync: false
+      - key: DERIV_CLIENT_SECRET
+        sync: false
+      - key: DERIV_OAUTH_URL
+        value: https://auth.deriv.com/oauth2/auth
+      - key: DERIV_OAUTH_REDIRECT_URI
+        sync: false
+      - key: DERIV_OAUTH_SCOPES
+        value: trade account_manage
+      - key: DERIV_WS_URL
+        value: wss://red.derivws.com/websockets/v3
+      - key: FRONTEND_URL
+        sync: false
+      - key: VITE_DERIV_APP_ID
+        sync: false
+      - key: ADMIN_PRIVATE_SLUG
+        value: pf-ops-9482
+      - key: VITE_ADMIN_PRIVATE_SLUG
+        value: pf-ops-9482
+      - key: BREVO_API_KEY
+        sync: false
+      - key: BREVO_SENDER_EMAIL
+        value: noreply@tradederiv.app
+      - key: BREVO_SENDER_NAME
+        value: TradeDeriv

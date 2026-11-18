@@ -1,0 +1,214 @@
+Build a complete, production-grade full-stack third-party Deriv trading, wallet/cashier, crypto exchange, and automated bot platform named "TradeDeriv" (Node.js + Express + TypeScript + PostgreSQL + React + Vite + Tailwind CSS + Lightweight Charts).
+
+====================================================================
+1. BRANDING, LOGO & EXACT VISUAL / COLOR SYSTEM (FROM SCREENSHOTS)
+====================================================================
+- App Name & Brand: TradeDeriv
+- Logo Design: Geometric dark navy (#0F1F38) stylized "TD" monogram intersected diagonally from bottom-left to top-right by a bold coral-red (#FF444F) upward arrow, beside "Trade" in deep navy (#0F1F38) and "Deriv" in coral red (#FF444F).
+- Exact Color Palette & Surfaces:
+  * Light Canvas Background: #FFFFFF (Pure White) & #F8F9FB (Subtle Off-White)
+  * Elevated Light Cards / Pills / Input Wells: #F4F5F7 & #EEF1F5 (16px–20px border radius, clean 1px #E5E7EB borders)
+  * Dark Header Hero Cards, Promo Banners & Dark Theme Surfaces: #151820 / #181C25 / #1A1D26 with #2A2F3D hairline borders
+  * Primary Brand Accent & Primary Action CTAs ("Open account", "Log in", "Deposit now", "Trade", "+ Deposit", "+ Add funds", active bottom nav state): Coral Red #FF444F (hover #E63946)
+  * Primary Text Ink: #0E1117 on light surfaces, #FFFFFF on dark hero banners; Secondary/Muted Slate #64748B
+  * Positive / Profit / Buy Crypto CTA: Emerald #00A878 / #10B981
+  * Negative / Loss / Sell: Crimson #FF444F / #EF4444
+  * MT5 / CFD Account Badges (STD / Gold / Swap-Free): Royal Blue #1958B7
+  * Typography: Clean geometric sans-serif for UI + `font-mono tabular-nums` on every price, balance, lot size, stake, pip, percentage, and P/L figure.
+  * Light & Dark Theme Support: Default crisp editorial light canvas with dark hero cards (matching the screenshots) plus instant Dark Theme toggle in preferences (`localStorage` + `dark:` Tailwind classes).
+  * Currency Display Switcher: Global `USD | KSH` toggle backed by configurable `kesRate` (default 130.0) in PostgreSQL `application_settings`.
+
+====================================================================
+2. EXACT FULL USER FLOW & DERIV-CLONE SCREENS (NO BACKEND CONFIG SCREENS SHOWN)
+====================================================================
+A. Landing Hero Screen (Matches Deriv Landing Screenshot):
+- Full-bleed dark editorial trader portrait hero with top bar containing TradeDeriv logo on the left, pill-outlined "Log in" button and menu drawer toggle on the right.
+- Bottom overlay: "Trading for" eyebrow, "Anyone Anywhere Anytime" bold display title, "Widest range of products, markets, platforms with 24/7 customer support." subcopy, full-width #FF444F pill CTA button "Open account", and Trustpilot 5-star badge row.
+- Silent OAuth2 Redirect Flow: Clicking "Log in" or "Open account" navigates directly to official Deriv OAuth2 (`auth.deriv.com/oauth2/auth` with PKCE S256 or `prompt=registration` for signup). Users sign in with Google, Facebook, Apple, or Email/Phone on Deriv's official consent screen and redirect straight back to `/api/deriv/oauth/callback` (or `/callback`), which exchanges the code, syncs all Real & Demo accounts into PostgreSQL, issues a JWT, and lands the user directly inside the TradeDeriv dashboard. Users NEVER see raw API token / App ID configuration modals.
+
+B. Persistent Navigation Shell:
+- Mobile: Fixed 5-tab bottom navigation bar (`Home`, `CFDs`, `Exchange`, `Options`, `Portfolio`) with Coral Red #FF444F active icon & text.
+- Desktop / Tablet: Responsive top/side workspace shell exposing the 5 primary hubs (`Home`, `CFDs`, `Exchange`, `Options`, `Portfolio`) plus quick tools (`MT5 TradingView`, `Bot Builder`, `Trading Bots`, `Market Analyser`, `Bulk Trader`, `Martingale Risk Calculator`, `Copy Trading`, `Reports`, `Learning Hub`, `Notifications`, `Profile & Security`), top live scrolling announcement ticker (`tickerText`), user initials avatar (opens Profile & Security), global search, eye balance-privacy toggle, notification bell with unread badge, and `Real | Demo` segmented pill switcher.
+
+C. Screen 1 — Home Hub:
+- Dark Hero Card: "Make your first deposit" with 2-step progress indicator, Coral Red "Deposit now" pill CTA, and 3D candlestick artwork.
+- "Ways to deposit" horizontal scrollable chips: `Mobile Money`, `Payment Agent`, `M-Pesa`, `Crypto`.
+- "My trading accounts" horizontal card strip: `Options (0.00 USD)`, `CFDs | Standard (0.00 USD)`, `Deriv Exchange (0.00 USDT)`.
+- Dark promo card: "New Crash/Boom trades — Trade the spikes with Rise/Fall. Now in demo."
+- "Explore TradeDeriv" 3x2 circular icon grid: `Exchange`, `Options`, `TradingView`, `Swap-Free`, `P2P`, `More` (opens Bots, Market Analyser, Bulk Trader, Risk Calculator).
+- "Highlights" horizontal promotional carousel.
+
+D. Screen 2 — CFDs / MT5 Hub:
+- Dark Hero Banner: `Real | Demo` pill switcher, "Total trading value" in bold USD + refresh button, and circular Coral Red `Trade` button launching MT5 TradingView.
+- "My accounts" section: Displays linked `MT5 STD CFDs | Standard` + balance, and supports activating new MT5 accounts (`mt5_new_account`).
+- "Featured" dark card: "MT5 Gold — Specialised account for gold and metals" with `Activate now` CTA.
+- "Available accounts" 2-column grid (`cTrader` Copy Trading, `Zero Spread`, `Swap-Free`, `Financial`) with a `Compare` modal.
+
+E. Screen 3 — Crypto Exchange Hub:
+- Dark Hero Banner: "Estimated total value" in USDT + refresh, circular Coral Red `+ Add funds` button, and outline `Send` button.
+- "Buy & sell crypto" swap/order card: Base coin pills (`ETH`, `BTC`, `USDC`, `USDT`), pair selector (`LTC/ETH`, etc.), live spot balance, amount input with unit flip, calculated output preview, allocation pills (`25%`, `50%`, `75%`, `100%`), full-width `#00A878 Buy` / `#FF444F Sell` button, and `Advanced mode (Limit orders, order book, charts)` expandable view.
+- Dark promo banner: "Trade bigger, hold longer — Open positions worth up to 50x your balance, long or short. Hold as long as you like - no expiry."
+- "Markets" table: Search input (`Search 38 pairs`), filter pills (`Trending | Gainers | Losers`), and rows with coin icon, pair & 24h volume, 24h inline sparkline chart, price, and % change (`DOGE/USDT`, `ADA/USDT`, `XRP/USDT`, `DOGE/BTC`, `TRX/USDT`).
+
+F. Screen 4 — Options, TradingView, Market Analyser & Bots Hub:
+- Dark Hero Banner: `Real | Demo` pill switcher, "Total trading value" in USD, circular Coral Red `Trade` button + outline `Reset balance` button (calls `/api/orders/reset-balance` to reset virtual workspace balance to 10,000.00 USD).
+- "Most traded markets" 2-column cards (`Volatility 15 (1s)`, `Volatility 100 (1s)`, `Volatility 10 (1s)`, `Volatility 25 (1s)`, `Volatility 75 (1s)`, `View all`) with live streaming price, 5m inline sparkline, and green/red % delta.
+- "Platforms" stack (`Deriv Trader`, `Deriv Bot`, `SmartTrader` + integrated `MT5 TradingView`, `Bot Builder`, `Trading Bots`, `Market Analyser`, `Bulk Trader`).
+- "Trade types" filter pills (`Deriv Trader | Deriv Bot | SmartTrader`) and 3-column grid: `Rise/Fall`, `Higher/Lower`, `Matches/Differs`, `Even/Odd`, `Accumulators`, `Over/Under`, `Multipliers`, `Touch/No Touch`, `Vanillas`, `Turbos`.
+
+G. Screen 5 — Portfolio, Cashier & Wallet Hub:
+- Top horizontal sub-tabs: `Overview | Wallet | Partners | Trading | P2P`.
+- Dark Hero Banner: "Estimated total value" in USD + refresh, 3 circular quick actions: `+ Deposit` (Coral Red), `⇄ Transfer`, `- Withdraw`.
+- "Other payment methods" vertical card list: `USD (bank, card, e-wallet, crypto)`, `Payment agent (deposit/withdraw in local currency via verified local agent)`, `P2P (buy/sell USD with other traders)`, `Crypto (fund with USDT, USDC, BTC, ETH)`.
+- "Trading" breakdown list: `Options`, `Standard MT5`, `Deriv Exchange` balances + instant internal transfer modal between Wallet and Trading accounts.
+
+H. Screen 6 — Profile, Verification, Security & Account Management:
+- Dark Header: Avatar circle, user Full Name, copyable Client ID (`01a0....826c`), mobile app promo banner.
+- Grouped clean white menu cards:
+  * `About you`: Personal details, Home address, Additional information, Tax information (Deriv `get_settings` / `set_settings`).
+  * `Verification`: Proof of identity, Proof of address (`get_account_status`).
+  * `Assessment`: Financial assessment (`financial_assessment`).
+  * `Security`: Set password, Email address, Change phone number, Passkeys, Two-factor authentication, Close account (`account_closure`).
+  * `API management`: Connected apps, API Token, Explore Deriv API (`api_token`, `app_list` view/revoke).
+  * `Preferences`: Language & Preferred/Local currency (`USD | KSH`).
+  * `Support`: Help centre, Live chat, and bottom outlined `Log out` button.
+
+====================================================================
+3. HOW EVERY EXISTING ENGINE & TRADING TOOL WORKS INTERNALLY
+====================================================================
+1. Dual-Gateway Deriv Connection & Execution Architecture (`account-data.ts`, `deriv-client.ts`, `trade-execution.ts`, `websocket.ts`):
+   - **WebSocket Cluster Race**: `DerivWebSocket` races official endpoints (`wss://red.derivws.com/websockets/v3`, `wss://ws.derivws.com/websockets/v3`, `wss://green.derivws.com/websockets/v3`, `wss://blue.derivws.com/websockets/v3`, `wss://ws.binaryws.com/websockets/v3`) using `Promise.any`, remembers `lastWorkingEndpoint`, maintains 30s keepalive pings, and auto-reconnects with exponential backoff.
+   - **OAuth2 PKCE + Replay Guard**: Generates 32-byte `codeVerifier` + `S256` `codeChallenge`, AES-256-GCM encrypts `{ codeVerifier, redirectUri }` into JWT `state` with a one-time `jti` (stored in replay-guard map for 20 mins), exchanges authorization `code` at `POST https://auth.deriv.com/oauth2/token`, fetches accounts via `GET https://api.derivws.com/trading/v1/options/accounts` and nickname via `GET https://api.derivws.com/account/v1/nickname`. Supports both new `ory_at_...` OAuth2 tokens and legacy `?acct1=...&token1=...` callbacks.
+   - **AES-256-GCM Token Vault**: Every user Deriv token is encrypted with AES-256-GCM (`encrypted_token`, `token_iv`, `token_auth_tag`) in `account_authorizations` and decrypted strictly server-side right before trade/sync calls.
+   - **OTP Gateway vs Classic WebSocket Trade Execution**:
+     * For `ory_at_...` OAuth2 tokens or PATs: calls `POST https://api.derivws.com/trading/v1/options/accounts/:id/otp` to obtain a one-time WebSocket URL (`OtpDerivClient`), using `underlying_symbol` field.
+     * For classic tokens: authorizes on `DerivWebSocket` (`{ authorize: token }`) using `symbol` field, falling back to PAT OTP if rejected.
+     * For Multiplier orders (`MULTUP` / `MULTDOWN`): queries `contracts_for` to validate `multiplier_range` (auto-snapping to accepted multipliers like 100/50/160 or parsing error messages for accepted values), converts price/USD/pips/% SL & TP into `limit_order: { take_profit, stop_loss }` USD values (enforcing SL < stake and >= 0.50 USD), sends `proposal` -> `buy`, updates `connected_accounts.last_known_balance`, broadcasts WebSocket `account_updated`, and inserts into `virtual_orders`. Automatically falls back to `CALL`/`PUT` (5 ticks) if multipliers are unsupported on the selected symbol.
+
+2. MT5 TradingView Terminal (`MT5TradingView.tsx`, `OrderTicket.tsx`, `MarketWatchPanel.tsx`, `IndicatorsPanel.tsx`, `DrawingToolbar.tsx`, `TimeframesBar.tsx`):
+   - **Chart Engine**: Built with `lightweight-charts` (`CandlestickSeries` + `LineSeries`), supporting all Deriv timeframes (`1t` / `1m` / `2m` / `3m` / `5m` / `10m` / `15m` / `30m` / `1h` / `2h` / `4h` / `8h` / `1d`), client-side overlays (**SMA 20**, **EMA 50**, **Bollinger Bands**), interactive **Drawing Toolbar** (Crosshair, Horizontal Price Line click-to-place, Undo, Redo, Show/Hide Drawings, Clear All), and live price lines (`Entry`, `TP`, `SL`) drawn directly on the chart.
+   - **MarketWatchPanel**: Displays all 70+ Deriv symbols with category tabs (`All`, `Synthetic`, `Forex`, `Crypto`, `Metals/Cmd`, `Indices`), search bar, `★` watchlist filter synced to PostgreSQL `watchlists`, and live `Bid | Ask` columns. Resilient 3-tier loading: DB `market_instruments` -> Deriv `active_symbols` (4.5s timeout, no deprecated `product_type`) -> curated 70+ official Deriv symbols catalog fallback.
+   - **OrderTicket (Lots + 4-Mode USD SL/TP + Bulk Open/Close)**:
+     * **Volume, Lots**: `0.01` to `100.00` lots (`0.01` step <1.0, `0.10` step >=1.0), quick presets (`0.01`, `0.05`, `0.10`, `0.50`, `1.00`), synced 1:100 with USD Margin/Stake (`1.00 lot = $100`), plus leverage multipliers (`x50`, `x100`, `x200`, `x400`).
+     * **Modes**: `MT5 Market`, `Over/Under` (digit barrier 0–9, tick duration 1–10), `Rise/Fall`.
+     * **Bulk Order Count**: Dropdown (`1`, `2`, `3`, `5`, `10` positions at once, up to 25 via API).
+     * **Stop Loss & Take Profit**: Toggleable switches with 4-unit selector (`Price`, `USD`, `Loss/Profit in %`, `Pips`) **defaulting to USD currency amount**, live auto-conversion when switching units, max-loss validation against stake, and Risk:Reward presets (`1:1`, `1:1.5`, `1:2`).
+   - **Bottom MT5 Terminal Dock**: Shows live `Balance`, `Equity`, `Margin`, `Free Margin`, `Floating P/L`, tabs for `Open Positions`, `History`, and `Exposure Summary`, plus 7 Bulk Close buttons (`Close All`, `Close Profitable`, `Close Losing`, `Close All BUY`, `Close All SELL`, `Close Over`, `Close Under`).
+
+3. Zero-Delay Bot Engine, Bot Builder & Seeded Strategies (`bot-engine-service.ts`, `BotBuilderPage.tsx`, `TradingBotsPage.tsx`):
+   - **Zero Password Gate**: Directly accessible without any unlock modal or `requireBotAnalyserGate` middleware.
+   - **Instant Startup & Tick Evaluator**: `startBotSession` immediately subscribes to the symbol, fetches the last **25 historical ticks** (`fetchTickHistory(..., 25)`), stores up to 20 prices, and fires `evaluateAndExecuteBotTick` immediately on the latest price with **zero tick-waiting delay**.
+   - **Signal Modes**: Supports `DIGITOVER`, `DIGITUNDER`, `DIGITEVEN`, `DIGITODD`, `DIGITDIFF`, `DIGITMATCH`, `CALL`/`PUT` (momentum vs 5-tick average), and `MULTUP`/`MULTDOWN`.
+   - **Live TP/SL Monitoring & Martingale**: `attachTickEvaluator` listens to every live Deriv tick, checks all `OPEN` rows in `virtual_orders` for TP/SL price hits (preventing duplicate closes via `closingOrderLocks`), closes real Deriv contracts via `closeDerivContract` (or credits/debits `virtual_workspace_balance` in virtual mode), increments session wins/losses/P/L, doubles/multiplies stake by `martingale` factor on loss (resetting to `baseStake` on win), creates DB notifications, broadcasts `order_closed` / `bot_order_opened` over WebSocket, and supports instant `Close All Bot Orders`.
+   - **Bot Builder**: Supports Blockly XML import (`<field name="SYMBOL_LIST">`, `<field name="AMOUNT">`) and XML export, custom contract type/barrier/duration/TP%/SL%/Martingale inputs, and live telemetry polling.
+   - **Pre-Seeded Strategies Catalog (`bot_strategies`)**: `07_Over_Hit_n_Run`, `AutoDifferbylegoo`, `MagicRecovery`, `Autovolt5Probot1`, `AlphaVersion2026Edition`, `SignalSniperAutoBot` across `Free Bots`, `Scalper Bots`, and `SpeedBots`.
+
+4. Live Market Analyser, Bulk Trader & Martingale Risk Calculator (`AnalysisToolPage.tsx`, `BulkTraderPage.tsx`, `RiskCalculatorPage.tsx`):
+   - **Market Analyser**: Connects browser WebSocket directly to Deriv (`fetchDerivTickHistoryDirect` + `subscribeDerivTicksDirect` with `/api/market/digit-analysis` fallback), renders 4 sub-tabs (`Dcircles` 0–9 circular digit distribution heatmap highlighting hottest green & coldest red digits, `Signals` with **RSI(14)** & trend bias, `Over/Under` barrier probability bars, `Rise/Fall` parity & directional streaks), plus 1-click instant trade execution buttons.
+   - **Bulk Trader**: Live digit/parity feed + concurrent batch execution (`1–25` orders via `POST /api/orders/bulk`) for `Even/Odd`, `Over/Under`, and `Rise/Fall`, plus instant bulk-close controls.
+   - **Martingale Risk Calculator**: Takes Initial Capital (USD) and computes exact `Stake (2% of Capital)`, `Take Profit (5x Stake)`, and `Stop Loss (4 Consecutive Losses Sum = 15x Stake)`.
+   - **Copy Trading / Portfolio Sync, Reports, Notifications & Learning Hub**: Live account & scope monitor, filterable order & Deriv statement ledger, notification inbox with read-state sync, and educational guides.
+
+====================================================================
+4. ALL OFFICIAL DERIV THIRD-PARTY APP ENDPOINTS (AUTH, TRADE, CASHIER, ACCOUNT, COMMISSIONS)
+====================================================================
+A. Official Deriv OAuth2 & Identity:
+- `GET https://auth.deriv.com/oauth2/auth` (OAuth 2.0 + PKCE `S256`, supports `prompt=registration`)
+- `POST https://auth.deriv.com/oauth2/token` (Server-side code -> `access_token` exchange)
+- `GET https://oauth.deriv.com/oauth2/authorize` (Legacy multi-account token callback)
+- `GET https://api.derivws.com/account/v1/nickname`
+
+B. Official Deriv Trading & Market WebSockets / REST (`https://api.derivws.com` & `wss://red|ws|green|blue.derivws.com/websockets/v3`):
+- `GET /trading/v1/options/accounts` (OAuth2 user real & demo accounts/balances)
+- `POST /trading/v1/options/accounts/:account_id/otp` (Mint one-time authenticated WebSocket URL)
+- WS Calls: `authorize`, `active_symbols` (`{ active_symbols: "brief" }`), `ticks`, `ticks_history`, `contracts_for`, `proposal` (with `limit_order` SL/TP), `buy`, `sell`, `proposal_open_contract`, `statement`, `balance`.
+
+C. Official Deriv Cashier, Deposit, Withdraw, Transfer, Payment Agent & P2P Endpoints:
+- REST (`https://api.derivws.com`):
+  * `GET /wallet/v1/transactions/:wallet_type`
+  * `POST /wallet/v1/transfers/validate`
+  * `POST /wallet/v1/transfers/platforms`
+  * `GET /payment-agents/v1/clients/me`
+  * `POST /payment-agents/v1/withdraw/verification_code`
+  * `POST /payment-agents/v1/withdraw`
+  * `GET /payment-agents/v1/withdraw/:request_id`
+  * `POST /payment-agents/v1/transfer`
+- WebSocket Cashier & Account Management:
+  * `{ cashier: "deposit" | "withdraw", provider: "doughflow", verification_code }`
+  * `{ verify_email: email, type: "payment_withdraw" | "paymentagent_withdraw" | "reset_password" }`
+  * `{ transfer_between_accounts: 1, account_from, account_to, amount, currency }`
+  * `{ paymentagent_list: country, currency }`, `{ paymentagent_withdraw: 1, ... }`, `{ paymentagent_transfer: 1, ... }`
+  * `{ p2p_advert_list: 1 }`, `{ p2p_order_create: 1, advert_id, amount }`, `{ p2p_order_info: 1, id }`
+  * `{ new_account_real: 1, ... }`, `{ new_account_virtual: 1, ... }`
+  * `{ mt5_login_list: 1 }`, `{ mt5_new_account: 1, ... }`, `{ mt5_deposit: 1, ... }`, `{ mt5_withdrawal: 1, ... }`
+  * `{ get_settings: 1 }`, `{ set_settings: 1, ... }`, `{ get_account_status: 1 }`, `{ api_token: 1 }`, `{ account_closure: 1 }`
+
+D. Official Deriv Owner Commissions & App Markup:
+- WS Calls (using owner's encrypted Read+Admin token):
+  * `{ app_markup_statistics: 1, date_from, date_to }`
+  * `{ app_markup_details: 1, date_from, date_to, limit, sort: "DESC" }`
+  * `{ app_list: 1 }`
+
+====================================================================
+5. ALL TRADEDERIV BACKEND REST & WEBSOCKET ENDPOINTS
+====================================================================
+- Health, Settings & Realtime:
+  * `GET /api/health`
+  * `GET /api/settings/public`
+  * `WS /ws?token=<jwt>`
+- Auth, Profile, KYC & Account Management:
+  * `POST /api/auth/register`, `POST /api/auth/login`, `GET /api/auth/me`, `GET /api/auth/verify-email`, `POST /api/auth/forgot-password`, `POST /api/auth/reset-password`
+  * `GET /api/account/profile-details`, `PUT /api/account/profile-details`
+  * `POST /api/account/create-trading-account`, `GET /api/account/api-tokens`, `POST /api/account/api-tokens`, `DELETE /api/account/api-tokens/:token`, `POST /api/account/close`
+- Deriv OAuth2 & Account Linking:
+  * `GET /api/deriv/oauth-url/public`, `GET /api/deriv/oauth-url`
+  * `GET /api/deriv/oauth/callback` (and root alias `GET /callback`)
+  * `POST /api/deriv/oauth/exchange`, `POST /api/deriv/connect`
+  * `GET /api/deriv/accounts`, `POST /api/deriv/accounts/:id/sync`, `POST /api/deriv/accounts/:id/disconnect`, `POST /api/deriv/accounts/:id/revoke`
+  * `GET /api/deriv/statement/:accountId`
+- Cashier, Deposits, Withdrawals, Transfers, Payment Agents & P2P:
+  * `GET /api/cashier/wallets`, `GET /api/cashier/transactions`
+  * `POST /api/cashier/deposit`, `POST /api/cashier/withdraw/request-code`, `POST /api/cashier/withdraw`
+  * `POST /api/cashier/transfer`
+  * `GET /api/cashier/payment-agents`, `POST /api/cashier/payment-agents/withdraw`
+  * `GET /api/cashier/p2p/adverts`, `POST /api/cashier/p2p/orders`
+- Market Data, Crypto Exchange & Market Analyser:
+  * `GET /api/market/instruments`, `GET /api/market/candles`, `GET /api/market/digit-analysis`
+  * `GET /api/exchange/pairs`, `POST /api/exchange/order`
+- Orders, Bulk Trading, Zero-Delay Bots, Watchlists & Notifications:
+  * `GET /api/orders`, `POST /api/orders`, `POST /api/orders/bulk`, `POST /api/orders/bulk-close`, `POST /api/orders/:id/close`, `POST /api/orders/reset-balance`
+  * `GET /api/bots/strategies`, `POST /api/bots/run`, `POST /api/bots/stop`, `POST /api/bots/close-all`, `GET /api/bots/status`
+  * `GET /api/watchlists`, `POST /api/watchlists`, `DELETE /api/watchlists/:symbol`
+  * `GET /api/notifications`, `PATCH /api/notifications/:id/read`
+
+====================================================================
+6. MIS-STYLE OWNER ADMIN PANEL & FULL CRUD ENDPOINTS (/pf-ops-9482)
+====================================================================
+Build a responsive executive Management Information System (MIS) Owner Admin Panel at a private configurable slug (`ADMIN_PRIVATE_SLUG`), featuring desktop sidebar + mobile drawer, `Return to Trader Site` button, `Sign Out Owner` button, first-run Admin Bootstrap setup, and full CRUD across all platform tables:
+- MIS Overview Dashboard: KPI cards (Total Users, Active Real vs Demo Accounts, Open & Closed Trade Volume, Realized P/L, Deposit/Withdrawal/Transfer Volume, Live App Markup USD, Affiliate Payouts).
+- Commissions & App Markup Tab: Live query of `app_markup_statistics`, `app_markup_details`, and `app_list` via owner's encrypted Read+Admin token, domain verification & `app_markup_percentage > 0%` diagnostic alert, Affiliate/IB link & tier configuration, date filters, and audit table.
+- Full CRUD Tabs:
+  * Users CRUD (Create, Edit profile/role/status/virtual balance, Suspend/Activate, Delete)
+  * Connected Deriv Accounts CRUD (Connect via token, Sync live balance, Adjust tracked balance, Disconnect, Revoke, Delete)
+  * Bot Strategies CRUD (Create, Edit JSON config/symbol/category/rating/premium, Delete)
+  * Orders & Trades Oversight (Inspect all manual/bot/Deriv orders, Force Close, Delete)
+  * Cashier & Wallet Transactions Ledger (Filter deposits, withdrawals, transfers, P2P, statuses)
+  * Site Branding, Global Settings & Admin Credentials (App Name, Ticker Text, KES Rate, Maintenance Mode, Registration toggle, Default Virtual Balance)
+  * Announcements CRUD (Broadcast & Delete)
+  * Administrator Audit Logs & Brevo Email Delivery Logs
+- Admin Endpoints:
+  * `GET /api/admin/bootstrap-status`, `POST /api/admin/bootstrap`, `POST /api/admin/login`, `GET /api/admin/overview`
+  * `PUT /api/admin/settings/admin-credentials`, `PUT /api/admin/settings/branding`, `PUT /api/admin/settings/global`
+  * `GET /api/admin/commissions`, `PUT /api/admin/commissions/config`
+  * `POST /api/admin/users`, `PATCH /api/admin/users/:id`, `PATCH /api/admin/users/:id/role`, `PATCH /api/admin/users/:id/status`, `PATCH /api/admin/users/:id/virtual-balance`, `DELETE /api/admin/users/:id`
+  * `POST /api/admin/connected-accounts/connect`, `PATCH /api/admin/connected-accounts/:id/balance`, `POST /api/admin/connected-accounts/:id/sync`, `POST /api/admin/connected-accounts/:id/disconnect`, `POST /api/admin/connected-accounts/:id/revoke`, `DELETE /api/admin/connected-accounts/:id`
+  * `POST /api/admin/strategies`, `PATCH /api/admin/strategies/:id`, `DELETE /api/admin/strategies/:id`
+  * `POST /api/admin/orders/:id/close`, `DELETE /api/admin/orders/:id`
+  * `GET /api/admin/cashier-logs`
+  * `POST /api/admin/announcements`, `DELETE /api/admin/announcements/:id`
+
+====================================================================
+7. POSTGRESQL SCHEMA & SECURITY
+====================================================================
+- Tables: `roles`, `users`, `connected_accounts`, `account_authorizations`, `market_instruments`, `market_data_cache`, `watchlists`, `notifications`, `email_logs`, `application_settings`, `administrator_audit_logs`, `virtual_orders` (including `connected_account_id`, `deriv_contract_id`, `execution_mode`, `contract_type`, `payout`), `bot_strategies`, `cashier_transactions`, `security_logs`.
+- Security: Parameterized SQL queries, `helmet`, `cors`, JWT authentication (`requireAuth`), RBAC (`requireAdmin`), AES-256-GCM encryption for all stored Deriv tokens/secrets (never returned in API responses or logs), Brevo transactional emails (`welcome_verification`, `connection_status`, password reset), and `.env.example` with `DATABASE_URL`, `JWT_SECRET`, `TOKEN_ENCRYPTION_KEY`, `DERIV_APP_ID`, `DERIV_CLIENT_SECRET`, `DERIV_OAUTH_URL`, `DERIV_OAUTH_REDIRECT_URI`, `DERIV_OAUTH_SCOPES`, `DERIV_WS_URL`, `BREVO_API_KEY`, `FRONTEND_URL`, and `ADMIN_PRIVATE_SLUG`.

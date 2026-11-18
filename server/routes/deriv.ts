@@ -1,0 +1,757 @@
+import { Router, type Request } from 'express';
+import jwt from 'jsonwebtoken';
+import bcrypt from 'bcryptjs';
+import { config, getDerivRedirectUri } from '../config.ts';
+import {
+  query,
+  queryOne,
+  execute,
+  requireDb,
+  addNotification,
+  logSecurityEvent,
+  getSetting,
+} from '../db.ts';
+import { encryptToken, decryptToken, generateCodeVerifier, sha256Base64Url, randomId, maskClientId } from '../crypto.ts';
+import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
+import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
+import { sendTransactionalEmail } from '../email-service.ts';
+
+const router = Router();
+const usedStateJtis = new Map<string, number>();
+
+function cleanupReplayGuard(): void {
+  const now = Date.now();
+  for (const [jti, expiresAt] of usedStateJtis.entries()) {
+    if (expiresAt < now) usedStateJtis.delete(jti);
+  }
+}
+
+function buildOAuth2PkceUrls(options: {
+  req?: Request;
+  userId?: number | null;
+  prompt?: 'login' | 'registration';
+  origin?: string;
+}) {
+  cleanupReplayGuard();
+  const appId = getActiveDerivAppId();
+  const redirectUri = getDerivRedirectUri(options.req, options.origin);
+  const codeVerifier = generateCodeVerifier();
+  const codeChallenge = sha256Base64Url(codeVerifier);
+  const jti = randomId(16);
+
+  const encVerifier = encryptToken(JSON.stringify({ codeVerifier, redirectUri, userId: options.userId || null }));
+  const state = jwt.sign({ jti, payload: encVerifier }, config.jwtSecret, { expiresIn: '20m' });
+
+  const params = new URLSearchParams({
+    client_id: appId,
+    redirect_uri: redirectUri,
+    response_type: 'code',
+    scope: config.derivOAuthScopes,
+    code_challenge: codeChallenge,
+    code_challenge_method: 'S256',
+    state,
+  });
+  if (options.prompt === 'registration') {
+    params.set('prompt', 'registration');
+  }
+
+  const pkceUrl = `${config.derivOAuthUrl}?${params.toString()}`;
+  const legacyUrl = `${config.derivLegacyOAuthUrl}?app_id=${encodeURIComponent(appId)}&l=EN&brand=deriv`;
+
+  return { url: pkceUrl, legacyUrl, redirectUri, appId };
+}
+
+/**
+ * Upserts a connected Deriv account for a user while:
+ * 1) Always refreshing the encrypted OAuth/API token in account_authorizations
+ * 2) Preserving DB last_known_balance & balance if balance_locked_by_admin = TRUE
+ *    OR preserveExistingBalances = TRUE (repeat login where user already exists in DB).
+ */
+async function upsertDerivAccountForUser(params: {
+  userId: number;
+  derivLoginId: string;
+  accountType: string;
+  platform: string;
+  currency: string;
+  isVirtual: boolean;
+  balance: number;
+  token: string;
+  authType: 'oauth2' | 'legacy_oauth' | 'pat';
+  scopes: string;
+  preserveExistingBalances: boolean;
+}): Promise<number> {
+  const row = await queryOne<{ id: number; last_known_balance: number; balance_locked_by_admin: boolean }>(
+    `INSERT INTO connected_accounts (
+      user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+      balance, last_known_balance, balance_locked_by_admin, status, scopes, updated_at
+    ) VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, FALSE, 'active', $8, NOW())
+    ON CONFLICT (user_id, deriv_login_id) DO UPDATE SET
+      deriv_account_id = EXCLUDED.deriv_login_id,
+      account_type = EXCLUDED.account_type,
+      platform = EXCLUDED.platform,
+      currency = EXCLUDED.currency,
+      is_virtual = EXCLUDED.is_virtual,
+      balance = CASE
+        WHEN COALESCE(connected_accounts.balance_locked_by_admin, FALSE) = TRUE OR $9 = TRUE
+          THEN connected_accounts.last_known_balance
+        ELSE EXCLUDED.last_known_balance
+      END,
+      last_known_balance = CASE
+        WHEN COALESCE(connected_accounts.balance_locked_by_admin, FALSE) = TRUE OR $9 = TRUE
+          THEN connected_accounts.last_known_balance
+        ELSE EXCLUDED.last_known_balance
+      END,
+      status = 'active',
+      scopes = EXCLUDED.scopes,
+      updated_at = NOW()
+    RETURNING id, last_known_balance, balance_locked_by_admin`,
+    [
+      params.userId,
+      params.derivLoginId,
+      params.accountType,
+      params.platform,
+      params.currency,
+      params.isVirtual,
+      params.balance,
+      params.scopes,
+      params.preserveExistingBalances,
+    ]
+  );
+
+  const accountId = Number(row!.id);
+  const enc = encryptToken(params.token);
+
+  await execute(
+    `INSERT INTO account_authorizations (connected_account_id, user_id, auth_type, encrypted_token, token_iv, token_auth_tag, scopes)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [accountId, params.userId, params.authType, enc.encryptedToken, enc.iv, enc.authTag, params.scopes]
+  );
+
+  return accountId;
+}
+
+/**
+ * Resolves whether this Deriv login belongs to an existing database user (repeat login)
+ * or is a brand-new user (first login).
+ * Repeat login checks BOTH `users.email` AND `connected_accounts.deriv_login_id`.
+ */
+async function ensureUserFromDerivProfile(profile: {
+  email?: string;
+  fullName?: string;
+  nickname?: string;
+  clientId?: string;
+  loginIds?: string[];
+  preferredUserId?: number | null;
+}): Promise<{ user: any; isNew: boolean; preserveExistingBalances: boolean }> {
+  if (profile.preferredUserId) {
+    const existingById = await queryOne<any>('SELECT * FROM users WHERE id = $1', [profile.preferredUserId]);
+    if (existingById) {
+      return { user: existingById, isNew: false, preserveExistingBalances: true };
+    }
+  }
+
+  // 1) Check if email exists in users
+  const candidateEmail = profile.email ? profile.email.trim().toLowerCase() : '';
+  if (candidateEmail) {
+    const existingByEmail = await queryOne<any>('SELECT * FROM users WHERE LOWER(email) = $1', [candidateEmail]);
+    if (existingByEmail) {
+      if (profile.nickname || profile.clientId) {
+        await execute(
+          'UPDATE users SET deriv_nickname = COALESCE($1, deriv_nickname), deriv_client_id = COALESCE($2, deriv_client_id), updated_at = NOW() WHERE id = $3',
+          [profile.nickname || null, profile.clientId || null, existingByEmail.id]
+        );
+      }
+      const fresh = await queryOne<any>('SELECT * FROM users WHERE id = $1', [existingByEmail.id]);
+      return { user: fresh, isNew: false, preserveExistingBalances: true };
+    }
+  }
+
+  // 2) Check if any deriv_login_id already exists in connected_accounts
+  const loginIds = (profile.loginIds || []).filter(Boolean);
+  if (loginIds.length > 0) {
+    const existingConn = await queryOne<{ user_id: number }>(
+      'SELECT user_id FROM connected_accounts WHERE deriv_login_id = ANY($1::text[]) LIMIT 1',
+      [loginIds]
+    );
+    if (existingConn) {
+      const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [existingConn.user_id]);
+      if (existingUser) {
+        return { user: existingUser, isNew: false, preserveExistingBalances: true };
+      }
+    }
+  }
+
+  // 3) Check fallback synthetic email
+  const fallbackLogin = profile.clientId || loginIds[0] || randomId(5);
+  const cleanEmail = (candidateEmail || `${fallbackLogin}@deriv-oauth.local`).toLowerCase();
+  const existingFallback = await queryOne<any>('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+  if (existingFallback) {
+    return { user: existingFallback, isNew: false, preserveExistingBalances: true };
+  }
+
+  // First Login: create new user
+  const globalSettings = await getSetting<{ defaultVirtualBalance?: number }>('global', {});
+  const hash = await bcrypt.hash(randomId(24), 10);
+  const created = await queryOne<any>(
+    `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id)
+     VALUES ($1, $2, $3, 'user', 'active', TRUE, $4, $5, $6)
+     RETURNING *`,
+    [
+      cleanEmail,
+      hash,
+      profile.fullName || profile.nickname || 'Deriv Trader',
+      Number(globalSettings.defaultVirtualBalance ?? 10000),
+      profile.nickname || '',
+      maskClientId(profile.clientId || randomId(8)),
+    ]
+  );
+
+  await addNotification(
+    created.id,
+    'Deriv Account Synced',
+    'Your Deriv trading accounts have been linked automatically.',
+    'account'
+  );
+  return { user: created, isNew: true, preserveExistingBalances: false };
+}
+
+router.get('/deriv/oauth-url/public', (req, res) => {
+  const prompt = req.query.prompt === 'registration' ? 'registration' : 'login';
+  const origin = typeof req.query.origin === 'string' ? req.query.origin : undefined;
+  const result = buildOAuth2PkceUrls({ req, prompt, origin });
+  res.json(result);
+});
+
+router.get('/deriv/oauth-url', requireDb, requireAuth, (req: AuthRequest, res) => {
+  const origin = typeof req.query.origin === 'string' ? req.query.origin : undefined;
+  const result = buildOAuth2PkceUrls({ req, userId: req.user!.id, origin });
+  res.json(result);
+});
+
+export async function handleDerivOAuthCallback(req: any, res: any): Promise<void> {
+  try {
+    const { code, state, error, error_description } = req.query;
+
+    if (error) {
+      res.status(400).send(
+        `<html><body style="font-family:sans-serif;padding:24px;"><h3>Deriv Authorization Cancelled</h3><p>${String(
+          error_description || error
+        )}</p><script>if(window.opener){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:${JSON.stringify(
+          String(error_description || error)
+        )}},'*');setTimeout(()=>window.close(),1200);}</script></body></html>`
+      );
+      return;
+    }
+
+    // Legacy multi-account callback: ?acct1=CR123&token1=a1-xxx&cur1=USD&acct2=VRTC123&token2=a1-yyy&cur2=USD
+    if (req.query.token1 && req.query.acct1) {
+      const entries: Array<{ acct: string; token: string; cur: string }> = [];
+      let idx = 1;
+      while (req.query[`acct${idx}`] && req.query[`token${idx}`]) {
+        entries.push({
+          acct: String(req.query[`acct${idx}`]),
+          token: String(req.query[`token${idx}`]),
+          cur: String(req.query[`cur${idx}`] || 'USD'),
+        });
+        idx++;
+      }
+
+      let email = '';
+      let fullName = 'Deriv Trader';
+      try {
+        const settingsResp = await derivWs.requestWithToken(entries[0].token, { get_settings: 1 }, 4500);
+        if (settingsResp?.get_settings) {
+          email = settingsResp.get_settings.email || '';
+          fullName =
+            `${settingsResp.get_settings.first_name || ''} ${settingsResp.get_settings.last_name || ''}`.trim() ||
+            'Deriv Trader';
+        }
+      } catch {
+        // continue with defaults
+      }
+
+      const session = await ensureUserFromDerivProfile({
+        email,
+        fullName,
+        clientId: entries[0].acct,
+        loginIds: entries.map((e) => e.acct),
+      });
+
+      for (const e of entries) {
+        const isVirtual = e.acct.toUpperCase().startsWith('VR') || e.acct.toUpperCase().startsWith('VRT');
+        let bal = isVirtual ? 10000 : 0;
+        if (!session.preserveExistingBalances) {
+          try {
+            const balResp = await derivWs.requestWithToken(e.token, { balance: 1 }, 4000);
+            if (balResp?.balance?.balance !== undefined) bal = Number(balResp.balance.balance);
+          } catch {
+            // ignore
+          }
+        }
+        await upsertDerivAccountForUser({
+          userId: session.user.id,
+          derivLoginId: e.acct,
+          accountType: isVirtual ? 'Demo Options' : 'Real Options',
+          platform: 'deriv',
+          currency: e.cur,
+          isVirtual,
+          balance: bal,
+          token: e.token,
+          authType: 'legacy_oauth',
+          scopes: config.derivOAuthScopes,
+          preserveExistingBalances: session.preserveExistingBalances,
+        });
+      }
+
+      const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
+      await logSecurityEvent(session.user.id, 'deriv_oauth_legacy_login', req.ip, {
+        accounts: entries.length,
+        isNew: session.isNew,
+        preservedDbBalances: session.preserveExistingBalances,
+      });
+
+      res.send(`
+        <html><body style="font-family:sans-serif;padding:24px;background:#151820;color:#fff;">
+          <p>Connected ${entries.length} Deriv account(s). Redirecting to TradeDeriv...</p>
+          <script>
+            if (window.opener) {
+              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*');
+              window.close();
+            } else {
+              window.location.href = '/#/?oauth_token=' + encodeURIComponent(${JSON.stringify(jwtToken)}) + '&tab=home';
+            }
+          </script>
+        </body></html>
+      `);
+      return;
+    }
+
+    // Modern OAuth2 PKCE callback: ?code=...&state=...
+    if (!code || !state) {
+      res.status(400).json({ error: 'Missing OAuth authorization code or state' });
+      return;
+    }
+
+    const decodedState = jwt.verify(String(state), config.jwtSecret) as {
+      jti: string;
+      payload: { encryptedToken: string; iv: string; authTag: string };
+    };
+
+    cleanupReplayGuard();
+    if (usedStateJtis.has(decodedState.jti)) {
+      res.status(409).json({ error: 'OAuth state replay detected' });
+      return;
+    }
+    usedStateJtis.set(decodedState.jti, Date.now() + 20 * 60 * 1000);
+
+    const verifierJson = JSON.parse(
+      decryptToken(decodedState.payload.encryptedToken, decodedState.payload.iv, decodedState.payload.authTag)
+    ) as { codeVerifier: string; redirectUri: string; userId: number | null };
+
+    const tokenBody = new URLSearchParams({
+      grant_type: 'authorization_code',
+      client_id: getActiveDerivAppId(),
+      code: String(code),
+      redirect_uri: verifierJson.redirectUri,
+      code_verifier: verifierJson.codeVerifier,
+    });
+    if (config.derivClientSecret) {
+      tokenBody.set('client_secret', config.derivClientSecret);
+    }
+
+    const tokenResp = await fetch(config.derivTokenUrl, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: tokenBody.toString(),
+    });
+    const tokenData = (await tokenResp.json()) as {
+      access_token?: string;
+      scope?: string;
+      error?: string;
+      error_description?: string;
+    };
+    if (!tokenResp.ok || !tokenData.access_token) {
+      throw new Error(tokenData.error_description || tokenData.error || 'Deriv OAuth2 token exchange failed');
+    }
+
+    const accessToken = tokenData.access_token;
+    const scopes = tokenData.scope || config.derivOAuthScopes;
+
+    let nickname = '';
+    let externalId = '';
+    let email = '';
+    try {
+      const nickData = await derivRestRequest<{ nickname?: string; external_id?: string; email?: string }>(
+        '/account/v1/nickname',
+        accessToken
+      );
+      nickname = nickData.nickname || '';
+      externalId = nickData.external_id || '';
+      email = nickData.email || '';
+    } catch {
+      // ignore if endpoint unavailable
+    }
+
+    let derivAccounts: Array<{
+      account_id: string;
+      balance: number;
+      currency: string;
+      account_type?: string;
+      is_virtual?: boolean;
+    }> = [];
+    try {
+      const accResp = await derivRestRequest<{ data?: any[]; accounts?: any[] }>(
+        '/trading/v1/options/accounts',
+        accessToken
+      );
+      const list = accResp.data || accResp.accounts || (Array.isArray(accResp) ? accResp : []);
+      derivAccounts = list.map((a: any) => ({
+        account_id: String(a.account_id || a.loginid || a.id),
+        balance: Number(a.balance ?? 0),
+        currency: String(a.currency || 'USD'),
+        account_type: String(a.account_type || (a.is_virtual ? 'Demo' : 'Real')),
+        is_virtual: Boolean(a.is_virtual || String(a.account_id || '').toUpperCase().startsWith('VR')),
+      }));
+    } catch {
+      // ignore empty list
+    }
+
+    const session = await ensureUserFromDerivProfile({
+      email,
+      nickname,
+      clientId: externalId || derivAccounts[0]?.account_id,
+      loginIds: derivAccounts.map((a) => a.account_id),
+      preferredUserId: verifierJson.userId,
+    });
+
+    for (const acc of derivAccounts) {
+      await upsertDerivAccountForUser({
+        userId: session.user.id,
+        derivLoginId: acc.account_id,
+        accountType: acc.is_virtual ? 'Demo Options' : 'Real Options',
+        platform: 'deriv',
+        currency: acc.currency,
+        isVirtual: Boolean(acc.is_virtual),
+        balance: acc.balance,
+        token: accessToken,
+        authType: 'oauth2',
+        scopes,
+        preserveExistingBalances: session.preserveExistingBalances,
+      });
+    }
+
+    const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
+    await logSecurityEvent(session.user.id, 'deriv_oauth2_pkce_login', req.ip, {
+      accounts: derivAccounts.length,
+      isNew: session.isNew,
+      preservedDbBalances: session.preserveExistingBalances,
+    });
+
+    res.send(`
+      <html><body style="font-family:sans-serif;padding:24px;background:#151820;color:#fff;">
+        <p>TradeDeriv connected! Redirecting...</p>
+        <script>
+          if (window.opener) {
+            window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*');
+            window.close();
+          } else {
+            window.location.href = '/#/?oauth_token=' + encodeURIComponent(${JSON.stringify(jwtToken)}) + '&tab=home';
+          }
+        </script>
+      </body></html>
+    `);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Deriv OAuth callback error';
+    res.status(500).send(
+      `<html><body style="font-family:sans-serif;padding:24px;"><h3>Connection Error</h3><p>${msg}</p><script>if(window.opener){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:${JSON.stringify(
+        msg
+      )}},'*');}</script></body></html>`
+    );
+  }
+}
+
+router.get(['/deriv/oauth/callback', '/deriv/oauth/callback/'], requireDb, handleDerivOAuthCallback);
+
+router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { accounts } = req.body || {};
+    if (!Array.isArray(accounts) || accounts.length === 0) {
+      res.status(400).json({ error: 'No accounts payload supplied' });
+      return;
+    }
+
+    const existingCount = await queryOne<{ c: string }>(
+      'SELECT COUNT(*)::text as c FROM connected_accounts WHERE user_id = $1',
+      [req.user!.id]
+    );
+    const preserveExistingBalances = Number(existingCount?.c || 0) > 0;
+
+    for (const a of accounts) {
+      if (!a.acct || !a.token) continue;
+      const isVirtual = String(a.acct).toUpperCase().startsWith('VR');
+      let bal = isVirtual ? 10000 : 0;
+      if (!preserveExistingBalances) {
+        try {
+          const resp = await derivWs.requestWithToken(String(a.token), { balance: 1 }, 4000);
+          if (resp?.balance?.balance !== undefined) bal = Number(resp.balance.balance);
+        } catch {
+          // ignore
+        }
+      }
+      await upsertDerivAccountForUser({
+        userId: req.user!.id,
+        derivLoginId: String(a.acct),
+        accountType: isVirtual ? 'Demo Options' : 'Real Options',
+        platform: 'deriv',
+        currency: String(a.cur || 'USD'),
+        isVirtual,
+        balance: bal,
+        token: String(a.token),
+        authType: 'legacy_oauth',
+        scopes: config.derivOAuthScopes,
+        preserveExistingBalances,
+      });
+    }
+
+    const updated = await query(
+      `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+              last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+              status, scopes, updated_at
+       FROM connected_accounts WHERE user_id = $1 ORDER BY id ASC`,
+      [req.user!.id]
+    );
+    res.json({ accounts: updated });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Exchange failed' });
+  }
+});
+
+router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const { token, label } = req.body || {};
+    if (!token) {
+      res.status(400).json({ error: 'Token is required' });
+      return;
+    }
+
+    let derivLoginId = `CR${randomId(3).toUpperCase()}`;
+    let currency = 'USD';
+    let balance = 0;
+    let isVirtual = false;
+
+    const authResp = await derivWs.requestWithToken(String(token), { balance: 1 }, 6000);
+    if (authResp?.balance) {
+      derivLoginId = String(authResp.balance.loginid || derivLoginId);
+      currency = String(authResp.balance.currency || 'USD');
+      balance = Number(authResp.balance.balance || 0);
+      isVirtual = derivLoginId.toUpperCase().startsWith('VR');
+    }
+
+    const alreadyExists = await queryOne<{ id: number }>(
+      'SELECT id FROM connected_accounts WHERE user_id = $1 AND deriv_login_id = $2',
+      [req.user!.id, derivLoginId]
+    );
+
+    const id = await upsertDerivAccountForUser({
+      userId: req.user!.id,
+      derivLoginId,
+      accountType: label || (isVirtual ? 'Demo Options' : 'Real Options'),
+      platform: 'deriv',
+      currency,
+      isVirtual,
+      balance,
+      token: String(token),
+      authType: 'pat',
+      scopes: 'read trade',
+      preserveExistingBalances: Boolean(alreadyExists),
+    });
+
+    const user = await queryOne<{ email: string; full_name: string }>('SELECT email, full_name FROM users WHERE id = $1', [
+      req.user!.id,
+    ]);
+    if (user) {
+      await sendTransactionalEmail({
+        to: user.email,
+        toName: user.full_name,
+        template: 'connection_status',
+        subject: `Deriv Account ${derivLoginId} Connected`,
+        htmlContent: `<p>Your Deriv account <strong>${derivLoginId}</strong> (${currency}) has been linked to TradeDeriv.</p>`,
+      });
+    }
+
+    const account = await queryOne(
+      `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+              last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+              status, scopes, updated_at
+       FROM connected_accounts WHERE id = $1`,
+      [id]
+    );
+    res.json({ account });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to connect Deriv token' });
+  }
+});
+
+router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const sync = req.query.sync === '1';
+  const rows = await query<any>(
+    `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+            last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+            status, scopes, updated_at
+     FROM connected_accounts WHERE user_id = $1 ORDER BY id ASC`,
+    [req.user!.id]
+  );
+
+  if (sync) {
+    for (const acc of rows) {
+      // Never overwrite admin-locked balances during user-triggered ?sync=1
+      if (acc.status !== 'active' || acc.balance_locked_by_admin) continue;
+
+      const auth = await queryOne<{ encrypted_token: string; token_iv: string; token_auth_tag: string }>(
+        'SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE connected_account_id = $1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
+        [acc.id]
+      );
+      if (!auth) continue;
+      try {
+        const rawTok = decryptToken(auth.encrypted_token, auth.token_iv, auth.token_auth_tag);
+        if (rawTok.startsWith('ory_at_')) {
+          const listResp = await derivRestRequest<any>('/trading/v1/options/accounts', rawTok);
+          const list = listResp.data || listResp.accounts || [];
+          const found = list.find((item: any) => String(item.account_id) === acc.deriv_login_id);
+          if (found) {
+            const liveBal = Number(found.balance);
+            acc.balance = liveBal;
+            acc.last_known_balance = liveBal;
+            await execute(
+              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE',
+              [liveBal, acc.id]
+            );
+          }
+        } else {
+          const balResp = await derivWs.requestWithToken(rawTok, { balance: 1 }, 4000);
+          if (balResp?.balance?.balance !== undefined) {
+            const liveBal = Number(balResp.balance.balance);
+            acc.balance = liveBal;
+            acc.last_known_balance = liveBal;
+            await execute(
+              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE',
+              [liveBal, acc.id]
+            );
+          }
+        }
+      } catch {
+        // keep cached balance
+      }
+    }
+  }
+
+  res.json({ accounts: rows });
+});
+
+router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const accId = Number(req.params.id);
+  const acc = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1 AND user_id = $2', [
+    accId,
+    req.user!.id,
+  ]);
+  if (!acc) {
+    res.status(404).json({ error: 'Account not found' });
+    return;
+  }
+
+  // Preserve DB balance when locked by Admin
+  if (!acc.balance_locked_by_admin) {
+    const auth = await queryOne<{ encrypted_token: string; token_iv: string; token_auth_tag: string }>(
+      'SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE connected_account_id = $1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
+      [acc.id]
+    );
+    if (auth) {
+      try {
+        const rawTok = decryptToken(auth.encrypted_token, auth.token_iv, auth.token_auth_tag);
+        const balResp = await derivWs.requestWithToken(rawTok, { balance: 1 }, 4500);
+        if (balResp?.balance?.balance !== undefined) {
+          const b = Number(balResp.balance.balance);
+          await execute(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE',
+            [b, acc.id]
+          );
+        }
+      } catch {
+        // keep existing
+      }
+    }
+  }
+
+  const updated = await queryOne(
+    `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+            last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+            status, scopes, updated_at
+     FROM connected_accounts WHERE id = $1`,
+    [acc.id]
+  );
+  res.json({ account: updated });
+});
+
+router.post('/deriv/accounts/:id/disconnect', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const accId = Number(req.params.id);
+  await execute("UPDATE connected_accounts SET status = 'disconnected', updated_at = NOW() WHERE id = $1 AND user_id = $2", [
+    accId,
+    req.user!.id,
+  ]);
+  await logSecurityEvent(req.user!.id, 'deriv_account_disconnected', req.ip, { accountId: accId });
+  res.json({ ok: true });
+});
+
+router.post('/deriv/accounts/:id/revoke', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const accId = Number(req.params.id);
+  await execute("UPDATE connected_accounts SET status = 'revoked', updated_at = NOW() WHERE id = $1 AND user_id = $2", [
+    accId,
+    req.user!.id,
+  ]);
+  await execute('UPDATE account_authorizations SET revoked_at = NOW() WHERE connected_account_id = $1 AND user_id = $2', [
+    accId,
+    req.user!.id,
+  ]);
+  await logSecurityEvent(req.user!.id, 'deriv_token_revoked', req.ip, { accountId: accId });
+  res.json({ ok: true });
+});
+
+router.get('/deriv/statement/:accountId', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const accId = Number(req.params.accountId);
+  const acc = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1 AND user_id = $2', [
+    accId,
+    req.user!.id,
+  ]);
+  if (!acc) {
+    res.status(404).json({ error: 'Account not found' });
+    return;
+  }
+
+  const auth = await queryOne<{ encrypted_token: string; token_iv: string; token_auth_tag: string }>(
+    'SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE connected_account_id = $1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
+    [acc.id]
+  );
+
+  if (auth) {
+    try {
+      const rawTok = decryptToken(auth.encrypted_token, auth.token_iv, auth.token_auth_tag);
+      if (!rawTok.startsWith('ory_at_')) {
+        const stmt = await derivWs.requestWithToken(rawTok, { statement: 1, description: 1, limit: 50 }, 5000);
+        if (stmt?.statement?.transactions) {
+          res.json({ transactions: stmt.statement.transactions });
+          return;
+        }
+      }
+    } catch {
+      // fallback to local ledger
+    }
+  }
+
+  const localOrders = await query(
+    'SELECT id as transaction_id, symbol, side, stake as amount, pnl, status, opened_at as transaction_time FROM virtual_orders WHERE user_id = $1 ORDER BY id DESC LIMIT 50',
+    [req.user!.id]
+  );
+  res.json({ transactions: localOrders });
+});
+
+export default router;

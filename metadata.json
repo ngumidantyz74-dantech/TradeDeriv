@@ -1,0 +1,6 @@
+{
+  "name": "TradeDeriv",
+  "description": "Full-stack third-party Deriv trading, wallet/cashier, crypto exchange, MT5 TradingView, market analyser, and automated bot platform.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
