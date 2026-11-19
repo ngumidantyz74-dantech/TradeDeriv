@@ -403,12 +403,30 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE connected_accounts ADD COLUMN IF NOT EXISTS scopes TEXT DEFAULT 'trade account_manage';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS virtual_workspace_balance DOUBLE PRECISION NOT NULL DEFAULT 10000.00;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS real_wallets_json TEXT NOT NULL DEFAULT '{"options":0,"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS demo_wallets_json TEXT NOT NULL DEFAULT '{"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS real_exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_nickname TEXT DEFAULT '';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_client_id TEXT DEFAULT '';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS strategy_key TEXT DEFAULT '';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS timeframe TEXT DEFAULT '';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS account_mode TEXT DEFAULT 'demo';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+      ALTER TABLE cashier_transactions ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo';
+    `);
+
+    // Auto-heal misclassified DOT.../VR... demo Deriv accounts from earlier OAuth saves
+    await client.query(`
+      UPDATE connected_accounts
+      SET is_virtual = TRUE,
+          account_type = CASE WHEN account_type = 'Real Options' THEN 'Demo Options' ELSE account_type END,
+          updated_at = NOW()
+      WHERE is_virtual = FALSE
+        AND (
+          UPPER(COALESCE(deriv_login_id, '')) LIKE 'DOT%'
+          OR UPPER(COALESCE(deriv_login_id, '')) LIKE 'VR%'
+          OR LOWER(COALESCE(account_type, '')) LIKE '%demo%'
+        );
     `);
 
     await client.query(`
@@ -541,13 +559,30 @@ async function runSchemaAndSeed(): Promise<void> {
       );
     }
 
-    // Populate in-memory settings cache
+    // Populate in-memory settings cache & auto-sanitize any non-numeric derivAppId saved accidentally
+    const fallbackNumericAppId = /^\d+$/.test(String(config.derivAppId || '').trim())
+      ? String(config.derivAppId).trim()
+      : '1089';
+
     const cachedRows = await client.query<{ key: string; value_json: string }>(
       'SELECT key, value_json FROM application_settings'
     );
     for (const row of cachedRows.rows) {
       try {
-        settingsCache.set(row.key, JSON.parse(row.value_json));
+        const parsed = JSON.parse(row.value_json);
+        if (
+          (row.key === 'global' || row.key === 'commissions') &&
+          parsed &&
+          typeof parsed.derivAppId === 'string' &&
+          !/^\d+$/.test(parsed.derivAppId.trim())
+        ) {
+          parsed.derivAppId = fallbackNumericAppId;
+          await client.query(
+            'UPDATE application_settings SET value_json = $1, updated_at = NOW() WHERE key = $2',
+            [JSON.stringify(parsed), row.key]
+          );
+        }
+        settingsCache.set(row.key, parsed);
       } catch {
         // ignore invalid JSON
       }
@@ -586,16 +621,22 @@ export async function requireDb(_req: Request, res: Response, next: NextFunction
   }
 }
 
-export async function checkDatabaseHealth(): Promise<{ configured: boolean; connected: boolean }> {
+export async function checkDatabaseHealth(): Promise<{
+  ok: boolean;
+  configured: boolean;
+  connected: boolean;
+  latencyMs: number;
+}> {
   if (!pool) {
-    return { configured: false, connected: false };
+    return { ok: false, configured: false, connected: false, latencyMs: 0 };
   }
+  const t0 = Date.now();
   try {
     await ensureDatabaseSchema();
     await pool.query('SELECT 1');
-    return { configured: true, connected: true };
+    return { ok: true, configured: true, connected: true, latencyMs: Date.now() - t0 };
   } catch {
-    return { configured: true, connected: false };
+    return { ok: false, configured: true, connected: false, latencyMs: Date.now() - t0 };
   }
 }
 

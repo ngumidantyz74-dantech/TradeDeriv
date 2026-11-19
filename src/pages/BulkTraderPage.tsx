@@ -27,7 +27,11 @@ export const BulkTraderPage: React.FC = () => {
   const live = ticks[symbol];
   const inst = instruments.find((i) => i.symbol === symbol);
   const price = live?.quote ?? inst?.price ?? 1000;
-  const openOrders = orders.filter((o) => o.status === 'OPEN');
+  const openOrders = orders.filter(
+    (o) =>
+      o.status === 'OPEN' &&
+      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+  );
 
   const handleBulkFire = async (side: string, overrideType?: string) => {
     setExecuting(true);
@@ -43,12 +47,13 @@ export const BulkTraderPage: React.FC = () => {
           multiplier,
           slUsd: Number(slUsd) || null,
           tpUsd: Number(tpUsd) || null,
+          accountMode,
           executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });
       await Promise.all([refreshOrders(), refreshAll()]);
-      showToast(`Executed ${res.count} concurrent ${side} orders on ${symbol}`, 'success');
+      showToast(`Executed ${res.count} concurrent ${side} orders on ${symbol} (${accountMode.toUpperCase()})`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Bulk execution failed', 'error');
     } finally {
@@ -75,6 +80,13 @@ export const BulkTraderPage: React.FC = () => {
         <div>
           <div className="flex items-center gap-2 text-xs text-[#FF444F] font-semibold mb-1">
             <Zap className="w-4 h-4" /> High-Throughput Batch Desk
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                accountMode === 'real' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-[#00A878]/20 text-[#00A878]'
+              }`}
+            >
+              {accountMode} Mode
+            </span>
           </div>
           <h1 className="font-display text-2xl font-bold">Bulk Trader (1–25 Concurrent Orders)</h1>
         </div>

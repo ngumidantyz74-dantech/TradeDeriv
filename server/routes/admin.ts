@@ -22,6 +22,7 @@ import {
   type AuthRequest,
 } from '../middleware/auth.ts';
 import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
+import { isVirtualDerivAccount } from './deriv.ts';
 import { closeOrderById } from '../trade-execution.ts';
 
 const router = Router();
@@ -197,36 +198,48 @@ router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
 });
 
 router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
-  const totalUsersRow = await queryOne<{ c: number }>('SELECT COUNT(*)::int as c FROM users');
+  const totalUsersRow = await queryOne<{ c: number }>(
+    "SELECT COUNT(*)::int as c FROM users WHERE role NOT IN ('owner', 'admin')"
+  );
   const realAccountsRow = await queryOne<{ c: number }>(
-    "SELECT COUNT(*)::int as c FROM connected_accounts WHERE is_virtual = FALSE AND status = 'active'"
+    `SELECT COUNT(*)::int as c FROM connected_accounts ca
+     JOIN users u ON ca.user_id = u.id
+     WHERE ca.is_virtual = FALSE AND ca.status = 'active' AND u.role NOT IN ('owner', 'admin')`
   );
   const demoAccountsRow = await queryOne<{ c: number }>(
-    "SELECT COUNT(*)::int as c FROM connected_accounts WHERE is_virtual = TRUE AND status = 'active'"
+    `SELECT COUNT(*)::int as c FROM connected_accounts ca
+     JOIN users u ON ca.user_id = u.id
+     WHERE ca.is_virtual = TRUE AND ca.status = 'active' AND u.role NOT IN ('owner', 'admin')`
   );
   const orderStats =
     (await queryOne<any>(
       `SELECT
         COUNT(*)::int as "totalOrders",
-        COALESCE(SUM(CASE WHEN status = 'OPEN' THEN 1 ELSE 0 END), 0)::int as "openOrders",
-        COALESCE(SUM(stake), 0) as "grossVolume",
-        COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN pnl ELSE 0 END), 0) as "realizedPnl"
-       FROM virtual_orders`
+        COALESCE(SUM(CASE WHEN vo.status = 'OPEN' THEN 1 ELSE 0 END), 0)::int as "openOrders",
+        COALESCE(SUM(vo.stake), 0) as "grossVolume",
+        COALESCE(SUM(CASE WHEN vo.status = 'CLOSED' THEN vo.pnl ELSE 0 END), 0) as "realizedPnl"
+       FROM virtual_orders vo
+       JOIN users u ON vo.user_id = u.id
+       WHERE u.role NOT IN ('owner', 'admin')`
     )) || {};
 
   const cashierStats =
     (await queryOne<any>(
       `SELECT
-        COALESCE(SUM(CASE WHEN tx_type = 'deposit' THEN amount ELSE 0 END), 0) as "totalDeposits",
-        COALESCE(SUM(CASE WHEN tx_type = 'withdrawal' THEN amount ELSE 0 END), 0) as "totalWithdrawals",
-        COALESCE(SUM(CASE WHEN tx_type = 'transfer' THEN amount ELSE 0 END), 0) as "totalTransfers"
-       FROM cashier_transactions`
+        COALESCE(SUM(CASE WHEN ct.tx_type = 'deposit' THEN ct.amount ELSE 0 END), 0) as "totalDeposits",
+        COALESCE(SUM(CASE WHEN ct.tx_type = 'withdrawal' THEN ct.amount ELSE 0 END), 0) as "totalWithdrawals",
+        COALESCE(SUM(CASE WHEN ct.tx_type = 'transfer' THEN ct.amount ELSE 0 END), 0) as "totalTransfers"
+       FROM cashier_transactions ct
+       JOIN users u ON ct.user_id = u.id
+       WHERE u.role NOT IN ('owner', 'admin')`
     )) || {};
 
   const users = await query(
     `SELECT id, email, full_name, phone, country, role, status, email_verified, preferred_currency,
-            virtual_workspace_balance, deriv_client_id, created_at
-     FROM users ORDER BY id DESC LIMIT 200`
+            virtual_workspace_balance, real_wallets_json, deriv_client_id, created_at
+     FROM users
+     WHERE role NOT IN ('owner', 'admin')
+     ORDER BY id DESC LIMIT 200`
   );
   const connectedAccounts = await query(
     `SELECT ca.id, ca.user_id, ca.deriv_login_id, ca.deriv_account_id, ca.account_type, ca.platform, ca.currency,
@@ -236,6 +249,7 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
             u.email as user_email, u.full_name as user_name
      FROM connected_accounts ca
      JOIN users u ON ca.user_id = u.id
+     WHERE u.role NOT IN ('owner', 'admin')
      ORDER BY ca.id DESC LIMIT 200`
   );
   const strategies = await query('SELECT * FROM bot_strategies ORDER BY id DESC');
@@ -243,6 +257,7 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
     `SELECT vo.*, u.email as user_email
      FROM virtual_orders vo
      JOIN users u ON vo.user_id = u.id
+     WHERE u.role NOT IN ('owner', 'admin')
      ORDER BY vo.id DESC LIMIT 200`
   );
   const auditLogs = await query('SELECT * FROM administrator_audit_logs ORDER BY id DESC LIMIT 100');
@@ -310,8 +325,17 @@ router.put('/admin/settings/branding', requireDb, requireAdmin, async (req: Auth
 });
 
 router.put('/admin/settings/global', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  const payload = { ...(req.body || {}) };
+  if (payload.derivAppId !== undefined) {
+    const cleanId = String(payload.derivAppId).trim();
+    if (!/^\d+$/.test(cleanId)) {
+      res.status(400).json({ error: 'Deriv App ID must be numeric (digits only, e.g. 1089 or your numeric Deriv App ID).' });
+      return;
+    }
+    payload.derivAppId = cleanId;
+  }
   const current = await getSetting('global', {});
-  const updated = { ...current, ...(req.body || {}) };
+  const updated = { ...current, ...payload };
   await setSetting('global', updated);
   await logAdminAction(req.user!.id, 'update_global_settings', 'application_settings', 'global', updated);
   res.json({ global: updated });
@@ -361,7 +385,9 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
 
   res.json({
     config: {
-      derivAppId: commConfig.derivAppId || getActiveDerivAppId(),
+      derivAppId: /^\d+$/.test(String(commConfig.derivAppId || '').trim())
+        ? String(commConfig.derivAppId).trim()
+        : getActiveDerivAppId(),
       markupPercentage: Number(commConfig.markupPercentage ?? 2.0),
       affiliateLink: commConfig.affiliateLink || 'https://track.deriv.com/_tradederiv_ib/',
       affiliateTierRate: Number(commConfig.affiliateTierRate ?? 30.0),
@@ -390,6 +416,14 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
 
 router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const { derivAppId, markupPercentage, affiliateLink, affiliateTierRate, ownerAdminToken } = req.body || {};
+  if (derivAppId !== undefined && String(derivAppId).trim() !== '') {
+    if (!/^\d+$/.test(String(derivAppId).trim())) {
+      res.status(400).json({
+        error: 'Deriv App ID must be a numeric ID (digits only, e.g. 1089 or your numeric Deriv App ID), never an OAuth secret or token.',
+      });
+      return;
+    }
+  }
   const current = await getSetting<any>('commissions', {});
   const updated = {
     ...current,
@@ -516,6 +550,43 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, async 
   res.json({ ok: true, user });
 });
 
+router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  if (!checkReauthHeader(req, res)) return;
+  const id = Number(req.params.id);
+  const balance = Number(req.body?.balance);
+  if (Number.isNaN(balance) || balance < 0) {
+    res.status(400).json({ error: 'Valid non-negative Real balance is required' });
+    return;
+  }
+
+  const existing = await queryOne<any>('SELECT id, real_wallets_json FROM users WHERE id = $1', [id]);
+  if (!existing) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  const rw = (() => {
+    try {
+      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
+    } catch {
+      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+    }
+  })();
+  rw.options = Number(balance.toFixed(2));
+
+  await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [JSON.stringify(rw), id]);
+  await execute(
+    `UPDATE connected_accounts
+     SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+     WHERE user_id = $2 AND is_virtual = FALSE AND platform = 'deriv'`,
+    [rw.options, id]
+  );
+
+  derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: rw });
+  await logAdminAction(req.user!.id, 'update_real_balance', 'users', String(id), { balance: rw.options });
+  res.json({ ok: true, real_wallets: rw });
+});
+
 router.delete('/admin/users/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   if (id === req.user!.id) {
@@ -539,7 +610,7 @@ router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, async 
     const loginid = String(resp?.balance?.loginid || `CR${randomId(3).toUpperCase()}`);
     const currency = String(resp?.balance?.currency || 'USD');
     const balance = Number(resp?.balance?.balance || 0);
-    const isVirtual = loginid.toUpperCase().startsWith('VR');
+    const isVirtual = isVirtualDerivAccount(loginid, accountType, Boolean(resp?.balance?.is_virtual));
 
     const account = await queryOne<any>(
       `INSERT INTO connected_accounts (
@@ -811,12 +882,14 @@ router.get('/admin/cashier-logs', requireDb, requireAdmin, async (req, res) => {
     ? await query(
         `SELECT ct.*, u.email as user_email FROM cashier_transactions ct
          JOIN users u ON ct.user_id = u.id
-         WHERE ct.tx_type = $1 ORDER BY ct.id DESC LIMIT 200`,
+         WHERE ct.tx_type = $1 AND u.role NOT IN ('owner', 'admin')
+         ORDER BY ct.id DESC LIMIT 200`,
         [txType]
       )
     : await query(
         `SELECT ct.*, u.email as user_email FROM cashier_transactions ct
          JOIN users u ON ct.user_id = u.id
+         WHERE u.role NOT IN ('owner', 'admin')
          ORDER BY ct.id DESC LIMIT 200`
       );
   res.json({ transactions: rows });

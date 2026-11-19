@@ -9,7 +9,15 @@ import { derivWs } from '../deriv-client.ts';
 
 const router = Router();
 
-function formatPublicUser(u: any) {
+function parseWalletJson<T>(raw: string | null | undefined, fallback: T): T {
+  try {
+    return { ...fallback, ...(JSON.parse(raw || '{}') || {}) };
+  } catch {
+    return { ...fallback };
+  }
+}
+
+export function formatPublicUser(u: any) {
   return {
     id: u.id,
     email: u.email,
@@ -23,13 +31,29 @@ function formatPublicUser(u: any) {
     preferred_language: u.preferred_language || 'EN',
     display_theme: u.display_theme || 'light',
     virtual_workspace_balance: Number(u.virtual_workspace_balance ?? 10000),
-    exchange_balances: (() => {
-      try {
-        return JSON.parse(u.exchange_balances_json || '{}');
-      } catch {
-        return { USDT: 0, USDC: 0, BTC: 0, ETH: 0 };
-      }
-    })(),
+    real_wallets: parseWalletJson(u.real_wallets_json, {
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    }),
+    demo_wallets: parseWalletJson(u.demo_wallets_json, {
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    }),
+    exchange_balances: parseWalletJson(u.exchange_balances_json, {
+      USDT: 0,
+      USDC: 0,
+      BTC: 0,
+      ETH: 0,
+    }),
+    real_exchange_balances: parseWalletJson(u.real_exchange_balances_json, {
+      USDT: 0,
+      USDC: 0,
+      BTC: 0,
+      ETH: 0,
+    }),
     deriv_nickname: u.deriv_nickname || '',
     deriv_client_id: u.deriv_client_id || maskClientId(String(u.id).padStart(8, '0')),
     created_at: u.created_at,
@@ -156,15 +180,18 @@ router.get('/auth/me', requireDb, requireAuth, async (req: AuthRequest, res) => 
     res.status(404).json({ error: 'User not found' });
     return;
   }
-  const accounts = await query(
-    `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
-            last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
-            status, scopes, updated_at
-     FROM connected_accounts
-     WHERE user_id = $1
-     ORDER BY id ASC`,
-    [user.id]
-  );
+  const isOwnerOrAdmin = user.role === 'owner' || user.role === 'admin';
+  const accounts = isOwnerOrAdmin
+    ? []
+    : await query(
+        `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+                last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+                status, scopes, updated_at
+         FROM connected_accounts
+         WHERE user_id = $1
+         ORDER BY id ASC`,
+        [user.id]
+      );
   res.json({ user: formatPublicUser(user), accounts });
 });
 
@@ -345,7 +372,7 @@ router.post('/account/create-trading-account', requireDb, requireAuth, async (re
     };
 
     let createdLoginId = `${platform.toUpperCase()}-${is_virtual ? 'VR' : 'RL'}-${randomId(3).toUpperCase()}`;
-    let balance = is_virtual ? 10000 : 0;
+    let balance = 0;
 
     if (derivToken && !derivToken.startsWith('ory_at_') && platform === 'mt5') {
       try {

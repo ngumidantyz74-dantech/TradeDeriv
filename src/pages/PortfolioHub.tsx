@@ -44,7 +44,7 @@ interface P2PAdvert {
 }
 
 export const PortfolioHub: React.FC = () => {
-  const { user, accounts, accountMode, formatMoney, refreshAll, refreshAccounts, setActiveTab, showToast } = useApp();
+  const { user, accounts, accountMode, setAccountMode, formatMoney, refreshAll, refreshAccounts, setActiveTab, showToast } = useApp();
   const [subTab, setSubTab] = useState<SubTab>('overview');
   const [transactions, setTransactions] = useState<CashierTransaction[]>([]);
   const [agents, setAgents] = useState<PaymentAgent[]>([]);
@@ -73,7 +73,7 @@ export const PortfolioHub: React.FC = () => {
   const loadPortfolioData = useCallback(async () => {
     try {
       const [txRes, agRes, p2pRes, perfRes] = await Promise.all([
-        apiFetch<{ transactions: CashierTransaction[] }>('/api/cashier/transactions'),
+        apiFetch<{ transactions: CashierTransaction[] }>(`/api/cashier/transactions?accountMode=${accountMode}`),
         apiFetch<{ agents: PaymentAgent[] }>('/api/cashier/payment-agents'),
         apiFetch<{ adverts: P2PAdvert[] }>('/api/cashier/p2p/adverts'),
         apiFetch<any>('/api/analytics/performance').catch(() => null),
@@ -87,7 +87,7 @@ export const PortfolioHub: React.FC = () => {
     } catch {
       // ignore initial error
     }
-  }, []);
+  }, [accountMode]);
 
   useEffect(() => {
     loadPortfolioData();
@@ -95,14 +95,38 @@ export const PortfolioHub: React.FC = () => {
 
   const realAcc = accounts.find((a) => !a.is_virtual && a.status === 'active');
   const demoAcc = accounts.find((a) => Boolean(a.is_virtual) && a.status === 'active');
+  const mt5StdAcc = accounts.find(
+    (a) =>
+      a.platform?.includes('mt5') &&
+      !String(a.account_type || '').toLowerCase().includes('gold') &&
+      (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
+  );
+  const mt5GoldAcc = accounts.find(
+    (a) =>
+      a.platform?.includes('mt5') &&
+      String(a.account_type || '').toLowerCase().includes('gold') &&
+      (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
+  );
+
   const optionsBal =
     accountMode === 'real'
-      ? Number(realAcc?.balance || 0)
-      : Number(demoAcc?.balance ?? user?.virtual_workspace_balance ?? 10000);
-  const mt5Acc = accounts.find((a) => a.platform?.includes('mt5'));
-  const mt5Bal = Number(mt5Acc?.balance ?? (accountMode === 'demo' ? 10000 : 0));
-  const exchangeUsdt = Number(user?.exchange_balances?.USDT || 0);
-  const totalWalletUsd = Number(user?.virtual_workspace_balance || 0) + (realAcc ? Number(realAcc.balance) : 0);
+      ? Number(realAcc?.balance ?? user?.real_wallets?.options ?? 0)
+      : Number(user?.virtual_workspace_balance ?? demoAcc?.balance ?? 10000);
+  const mt5StdBal =
+    accountMode === 'real'
+      ? Number(mt5StdAcc?.balance ?? user?.real_wallets?.mt5_standard ?? 0)
+      : Number(mt5StdAcc?.balance ?? user?.demo_wallets?.mt5_standard ?? 0);
+  const mt5GoldBal =
+    accountMode === 'real'
+      ? Number(mt5GoldAcc?.balance ?? user?.real_wallets?.mt5_gold ?? 0)
+      : Number(mt5GoldAcc?.balance ?? user?.demo_wallets?.mt5_gold ?? 0);
+  const exchangeUsdt =
+    accountMode === 'real'
+      ? Number(user?.real_exchange_balances?.USDT ?? user?.real_wallets?.exchange_usdt ?? 0)
+      : Number(user?.exchange_balances?.USDT ?? user?.demo_wallets?.exchange_usdt ?? 0);
+
+  // Strict Real vs Demo total (never combine Real + Demo)
+  const totalWalletUsd = optionsBal + mt5StdBal + mt5GoldBal + exchangeUsdt;
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -117,11 +141,11 @@ export const PortfolioHub: React.FC = () => {
     try {
       const res = await apiFetch<{ cashierUrl?: string }>('/api/cashier/deposit', {
         method: 'POST',
-        body: JSON.stringify({ amount: Number(amount), currency, method }),
+        body: JSON.stringify({ amount: Number(amount), currency, method, accountMode }),
       });
       await Promise.all([refreshAll(), loadPortfolioData()]);
       setModal(null);
-      showToast(`Deposited ${amount} ${currency} via ${method}`, 'success');
+      showToast(`Deposited ${amount} ${currency} (${accountMode.toUpperCase()}) via ${method}`, 'success');
       if (res.cashierUrl) {
         showToast('Deriv cashier link prepared in transaction details', 'info');
       }
@@ -134,15 +158,25 @@ export const PortfolioHub: React.FC = () => {
 
   const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (fromAcc === toAcc) {
+      showToast('Select two different wallets to transfer', 'error');
+      return;
+    }
     setSubmitting(true);
     try {
       await apiFetch('/api/cashier/transfer', {
         method: 'POST',
-        body: JSON.stringify({ account_from: fromAcc, account_to: toAcc, amount: Number(amount), currency: 'USD' }),
+        body: JSON.stringify({
+          account_from: fromAcc,
+          account_to: toAcc,
+          amount: Number(amount),
+          currency: 'USD',
+          accountMode,
+        }),
       });
       await Promise.all([refreshAll(), loadPortfolioData()]);
       setModal(null);
-      showToast(`Transferred $${amount} from ${fromAcc} to ${toAcc}`, 'success');
+      showToast(`Transferred $${Number(amount).toFixed(2)} from ${fromAcc} to ${toAcc}`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Transfer failed', 'error');
     } finally {
@@ -166,13 +200,13 @@ export const PortfolioHub: React.FC = () => {
     try {
       await apiFetch('/api/cashier/withdraw', {
         method: 'POST',
-        body: JSON.stringify({ amount: Number(amount), currency: 'USD', method, verification_code: verifyCode }),
+        body: JSON.stringify({ amount: Number(amount), currency: 'USD', method, verification_code: verifyCode, accountMode }),
       });
       await Promise.all([refreshAll(), loadPortfolioData()]);
       setModal(null);
       setVerifyCode('');
       setHintCode('');
-      showToast(`Withdrawal of $${amount} submitted`, 'success');
+      showToast(`Withdrawal of $${amount} (${accountMode.toUpperCase()}) submitted`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Withdrawal failed', 'error');
     } finally {
@@ -192,6 +226,7 @@ export const PortfolioHub: React.FC = () => {
           amount: Number(amount),
           currency: 'USD',
           verification_code: verifyCode,
+          accountMode,
         }),
       });
       await Promise.all([refreshAll(), loadPortfolioData()]);
@@ -215,6 +250,7 @@ export const PortfolioHub: React.FC = () => {
           advert_id: selectedAdvert.id,
           amount: Number(amount),
           type: selectedAdvert.type,
+          accountMode,
         }),
       });
       await Promise.all([refreshAll(), loadPortfolioData()]);
@@ -253,7 +289,31 @@ export const PortfolioHub: React.FC = () => {
           ))}
         </div>
 
-        <p className="text-xs text-slate-400">Estimated total value</p>
+        <div className="flex items-center justify-between gap-3">
+          <p className="text-xs text-slate-400">
+            Estimated total value ({accountMode === 'real' ? 'Real Wallet' : 'Demo Workspace'})
+          </p>
+          <div className="inline-flex items-center bg-[#232734] p-0.5 rounded-full">
+            <button
+              type="button"
+              onClick={() => setAccountMode('real')}
+              className={`px-3.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                accountMode === 'real' ? 'bg-[#FF444F] text-white' : 'text-slate-400'
+              }`}
+            >
+              Real
+            </button>
+            <button
+              type="button"
+              onClick={() => setAccountMode('demo')}
+              className={`px-3.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                accountMode === 'demo' ? 'bg-white text-[#151820]' : 'text-slate-400'
+              }`}
+            >
+              Demo
+            </button>
+          </div>
+        </div>
         <div className="flex items-center gap-3 mt-1">
           <h1 className="font-mono-num text-3xl sm:text-4xl font-bold">
             {formatMoney(totalWalletUsd, { hideable: true })}
@@ -427,9 +487,24 @@ export const PortfolioHub: React.FC = () => {
                     <span>MT5</span>
                     <span className="text-[7px] opacity-80">STD</span>
                   </span>
-                  <span className="text-sm font-semibold">Standard</span>
+                  <span className="text-sm font-semibold">MT5 Standard</span>
                 </div>
-                <span className="font-mono-num text-sm font-bold">{formatMoney(mt5Bal, { hideable: true })}</span>
+                <span className="font-mono-num text-sm font-bold">{formatMoney(mt5StdBal, { hideable: true })}</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setActiveTab('cfds')}
+                className="w-full px-4 py-4 flex items-center justify-between hover:bg-white/60 dark:hover:bg-white/5 transition-colors cursor-pointer"
+              >
+                <div className="flex items-center gap-3">
+                  <span className="w-9 h-9 rounded-xl bg-[#1958B7] text-white flex flex-col items-center justify-center text-[9px] font-bold leading-none">
+                    <span>MT5</span>
+                    <span className="text-[7px] opacity-80">GLD</span>
+                  </span>
+                  <span className="text-sm font-semibold">MT5 Gold</span>
+                </div>
+                <span className="font-mono-num text-sm font-bold">{formatMoney(mt5GoldBal, { hideable: true })}</span>
               </button>
 
               <button
@@ -701,6 +776,12 @@ export const PortfolioHub: React.FC = () => {
 
             {modal === 'transfer' && (
               <form onSubmit={handleTransfer} className="space-y-4">
+                <div className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs flex items-center justify-between">
+                  <span className="text-slate-500">Active Transfer Scope</span>
+                  <span className={`font-bold uppercase ${accountMode === 'real' ? 'text-[#FF444F]' : 'text-[#00A878]'}`}>
+                    {accountMode} Balances Only
+                  </span>
+                </div>
                 <div>
                   <label className="block text-xs font-semibold text-slate-500 mb-1">From Account</label>
                   <select
@@ -708,9 +789,10 @@ export const PortfolioHub: React.FC = () => {
                     onChange={(e) => setFromAcc(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-sm"
                   >
-                    <option value="USD Wallet">USD Wallet</option>
-                    <option value="Options">Options</option>
-                    <option value="MT5 Standard">MT5 Standard</option>
+                    <option value="USD Wallet">USD Wallet / Options ({optionsBal.toFixed(2)} USD)</option>
+                    <option value="MT5 Standard">MT5 Standard ({mt5StdBal.toFixed(2)} USD)</option>
+                    <option value="MT5 Gold">MT5 Gold ({mt5GoldBal.toFixed(2)} USD)</option>
+                    <option value="TradeDeriv Exchange">TradeDeriv Exchange ({exchangeUsdt.toFixed(2)} USDT)</option>
                   </select>
                 </div>
                 <div>
@@ -720,10 +802,10 @@ export const PortfolioHub: React.FC = () => {
                     onChange={(e) => setToAcc(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-sm"
                   >
-                    <option value="MT5 Standard">MT5 Standard</option>
-                    <option value="Deriv Exchange">TradeDeriv Exchange (USDT)</option>
-                    <option value="Options">Options</option>
-                    <option value="MT5 Gold">MT5 Gold</option>
+                    <option value="MT5 Standard">MT5 Standard ({mt5StdBal.toFixed(2)} USD)</option>
+                    <option value="MT5 Gold">MT5 Gold ({mt5GoldBal.toFixed(2)} USD)</option>
+                    <option value="TradeDeriv Exchange">TradeDeriv Exchange ({exchangeUsdt.toFixed(2)} USDT)</option>
+                    <option value="USD Wallet">USD Wallet / Options ({optionsBal.toFixed(2)} USD)</option>
                   </select>
                 </div>
                 <div>

@@ -212,12 +212,13 @@ export const TradingBotsPage: React.FC = () => {
           takeProfit: s.config?.takeProfit ?? 25,
           stopLoss: s.config?.stopLoss ?? 50,
           maxTrades: s.config?.maxTrades ?? 50,
+          accountMode,
           executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });
       await Promise.all([refreshOrders(), refreshAll()]);
-      showToast(`${s.name} launched in Bot Engine`, 'success');
+      showToast(`${s.name} launched in ${accountMode.toUpperCase()} Bot Engine`, 'success');
       setActiveTab('bot-builder');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Failed to start strategy', 'error');
@@ -279,7 +280,16 @@ export const TradingBotsPage: React.FC = () => {
       {/* Top Switcher */}
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
-          <h1 className="font-display text-2xl font-bold">Algorithmic Strategy Lab & Bots</h1>
+          <div className="flex items-center gap-2">
+            <h1 className="font-display text-2xl font-bold">Algorithmic Strategy Lab & Bots</h1>
+            <span
+              className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                accountMode === 'real' ? 'bg-[#FF444F]/15 text-[#FF444F]' : 'bg-[#00A878]/15 text-[#00A878]'
+              }`}
+            >
+              {accountMode} Mode
+            </span>
+          </div>
           <p className="text-xs text-slate-500 dark:text-slate-400">
             Configure institutional 10-strategy rules, run causal In-Sample / Out-of-Sample backtests on real Deriv candles, or launch prebuilt bots.
           </p>

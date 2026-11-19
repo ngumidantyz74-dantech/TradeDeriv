@@ -6,7 +6,7 @@ import type { ExchangePair } from '../types';
 import { SparklineSvg } from '../components/SparklineSvg';
 
 export const ExchangeHub: React.FC = () => {
-  const { user, refreshAll, showToast, setActiveTab, hideBalances } = useApp();
+  const { user, accountMode, setAccountMode, refreshAll, showToast, setActiveTab, hideBalances } = useApp();
   const [pairs, setPairs] = useState<ExchangePair[]>([]);
   const [filter, setFilter] = useState<'trending' | 'gainers' | 'losers'>('trending');
   const [search, setSearch] = useState('');
@@ -35,7 +35,10 @@ export const ExchangeHub: React.FC = () => {
     loadPairs(filter, search);
   }, [filter, search]);
 
-  const spotBalances = user?.exchange_balances || { USDT: 0, USDC: 0, BTC: 0, ETH: 0 };
+  const spotBalances =
+    accountMode === 'real'
+      ? user?.real_exchange_balances || { USDT: Number(user?.real_wallets?.exchange_usdt ?? 0), USDC: 0, BTC: 0, ETH: 0 }
+      : user?.exchange_balances || { USDT: Number(user?.demo_wallets?.exchange_usdt ?? 0), USDC: 0, BTC: 0, ETH: 0 };
   const totalUsdt =
     Number(spotBalances.USDT || 0) +
     Number(spotBalances.USDC || 0) +
@@ -61,7 +64,10 @@ export const ExchangeHub: React.FC = () => {
       : (amtNum * Number(limitPrice || activePairObj.price)).toFixed(6);
 
   const handlePercent = (pct: number) => {
-    const avail = side === 'BUY' ? quoteBalance || Number(user?.virtual_workspace_balance || 0) : Number(spotBalances[activePairObj.base] || 0);
+    const avail =
+      side === 'BUY'
+        ? quoteBalance || (accountMode === 'demo' ? Number(user?.virtual_workspace_balance || 0) : 0)
+        : Number(spotBalances[activePairObj.base] || 0);
     setAmount(((avail * pct) / 100).toFixed(4));
   };
 
@@ -80,11 +86,12 @@ export const ExchangeHub: React.FC = () => {
           amount: amtNum,
           orderType,
           limitPrice: orderType === 'limit' ? Number(limitPrice) : undefined,
+          accountMode,
         }),
       });
       await refreshAll();
       setAmount('');
-      showToast(`${side} order filled on ${activePairObj.pair}`, 'success');
+      showToast(`${side} order filled on ${activePairObj.pair} (${accountMode.toUpperCase()})`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Exchange order failed', 'error');
     } finally {
@@ -96,7 +103,29 @@ export const ExchangeHub: React.FC = () => {
     <div className="max-w-7xl mx-auto">
       {/* Dark Hero Banner */}
       <section className="bg-[#151820] text-white px-5 sm:px-8 pt-6 pb-7 rounded-b-[28px] lg:rounded-3xl lg:mx-6 lg:mt-6">
-        <p className="text-xs text-slate-400">Estimated total value ›</p>
+        <div className="flex items-center justify-between gap-3 mb-4">
+          <p className="text-xs text-slate-400">Estimated total value ({accountMode.toUpperCase()}) ›</p>
+          <div className="inline-flex items-center bg-[#232734] p-0.5 rounded-full">
+            <button
+              type="button"
+              onClick={() => setAccountMode('real')}
+              className={`px-3.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                accountMode === 'real' ? 'bg-[#FF444F] text-white' : 'text-slate-400'
+              }`}
+            >
+              Real
+            </button>
+            <button
+              type="button"
+              onClick={() => setAccountMode('demo')}
+              className={`px-3.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                accountMode === 'demo' ? 'bg-white text-[#151820]' : 'text-slate-400'
+              }`}
+            >
+              Demo
+            </button>
+          </div>
+        </div>
         <div className="flex items-center gap-3 mt-1">
           <span className="font-mono-num text-2xl sm:text-3xl font-bold">
             {hideBalances ? '••••••' : `${totalUsdt.toFixed(2)} USDT`}

@@ -1,6 +1,21 @@
 import { query, queryOne, execute, addNotification, logSystemError } from './db.ts';
 import { decryptToken } from './crypto.ts';
-import { derivWs, derivRestRequest, OtpDerivClient } from './deriv-client.ts';
+import { derivWs, derivRestRequest, OtpDerivClient, getActiveDerivAppId } from './deriv-client.ts';
+
+function extractDerivOtpWsUrl(otpResp: any): string {
+  const raw = String(
+    otpResp?.url ||
+      otpResp?.ws_url ||
+      otpResp?.data?.url ||
+      otpResp?.data?.ws_url ||
+      otpResp?.otp ||
+      otpResp?.data?.otp ||
+      ''
+  ).trim();
+  if (!raw) return '';
+  if (raw.startsWith('ws://') || raw.startsWith('wss://')) return raw;
+  return `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(getActiveDerivAppId())}&otp=${encodeURIComponent(raw)}`;
+}
 
 export interface PlaceOrderInput {
   userId: number;
@@ -184,11 +199,16 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     }
   }
 
-  const user = await queryOne<{ id: number; virtual_workspace_balance: number }>(
-    'SELECT id, virtual_workspace_balance FROM users WHERE id = $1',
-    [input.userId]
-  );
+  const user = await queryOne<{
+    id: number;
+    role: string;
+    virtual_workspace_balance: number;
+    real_wallets_json: string;
+  }>('SELECT id, role, virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1', [input.userId]);
   if (!user) throw new Error('User not found');
+  if (user.role === 'owner' || user.role === 'admin') {
+    throw new Error('Owner / Admin MIS accounts are for administration only, not trading.');
+  }
 
   await derivWs.ensureSymbolSubscribed(input.symbol);
   const tick = derivWs.getLatestTick(input.symbol);
@@ -236,20 +256,30 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   let actualPayout = 0;
   let accountMode: 'demo' | 'real' = input.accountMode === 'real' ? 'real' : 'demo';
 
-  // If explicit executionMode === 'deriv' or connectedAccountId passed, execute on Deriv & NEVER silently fall back to virtual when executionMode === 'deriv'
   const explicitDeriv = input.executionMode === 'deriv';
+  const targetIsVirtual = accountMode === 'demo';
+  let resolvedConnectedAccountId: number | null = null;
+
   if (explicitDeriv || input.connectedAccountId) {
-    const fallbackAcc = input.connectedAccountId
-      ? { id: input.connectedAccountId }
-      : await queryOne<{ id: number }>(
-          "SELECT id FROM connected_accounts WHERE user_id = $1 AND status = 'active' ORDER BY id ASC LIMIT 1",
-          [input.userId]
+    const requestedAcc = input.connectedAccountId
+      ? await queryOne<{ id: number; is_virtual: boolean }>(
+          "SELECT id, is_virtual FROM connected_accounts WHERE id = $1 AND user_id = $2 AND status = 'active'",
+          [input.connectedAccountId, input.userId]
+        )
+      : await queryOne<{ id: number; is_virtual: boolean }>(
+          "SELECT id, is_virtual FROM connected_accounts WHERE user_id = $1 AND is_virtual = $2 AND status = 'active' ORDER BY id ASC LIMIT 1",
+          [input.userId, targetIsVirtual]
         );
 
-    const targetAccId = fallbackAcc?.id;
+    const matchingAcc = requestedAcc && Boolean(requestedAcc.is_virtual) === targetIsVirtual ? requestedAcc : null;
+    const targetAccId = matchingAcc?.id;
+    resolvedConnectedAccountId = targetAccId || null;
+
     if (!targetAccId) {
       if (explicitDeriv) {
-        throw new Error('No active connected Deriv account selected for live execution.');
+        throw new Error(
+          `No active connected ${accountMode.toUpperCase()} Deriv account found. Link your Deriv account or fund your local wallet.`
+        );
       }
     } else {
       const creds = await getDecryptedAccountToken(targetAccId, input.userId);
@@ -311,13 +341,17 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
           let buyResult: any;
           if (isOAuth2) {
-            const otpResp = await derivRestRequest<{ url?: string; otp?: string }>(
+            const otpResp = await derivRestRequest<any>(
               `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
               creds.token,
               { method: 'POST' }
             );
-            const otpUrl = otpResp.url || otpResp.otp;
-            if (!otpUrl) throw new Error('Failed to mint Deriv OTP trading socket');
+            const otpUrl = extractDerivOtpWsUrl(otpResp);
+            if (!otpUrl) {
+              throw new Error(
+                `Failed to mint Deriv OTP trading socket (keys: ${Object.keys(otpResp || {}).join(', ') || 'empty'})`
+              );
+            }
             const prop = await OtpDerivClient.requestOnOtpUrl(otpUrl, proposalPayload);
             buyResult = await OtpDerivClient.requestOnOtpUrl(otpUrl, {
               buy: prop.proposal.id,
@@ -379,18 +413,40 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   }
 
   if (actualMode === 'virtual') {
-    accountMode = 'demo';
-    if (user.virtual_workspace_balance < stake) {
-      throw new Error(
-        `Insufficient virtual balance ($${user.virtual_workspace_balance.toFixed(2)} available, $${stake.toFixed(2)} required)`
-      );
+    if (accountMode === 'real') {
+      const rw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.real_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      const availReal = Number(rw.options || 0);
+      if (availReal < stake) {
+        throw new Error(
+          `Insufficient Real USD Wallet balance ($${availReal.toFixed(2)} available, $${stake.toFixed(2)} required). Deposit funds or connect a Real Deriv account.`
+        );
+      }
+      rw.options = Number((availReal - stake).toFixed(2));
+      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(rw),
+        input.userId,
+      ]);
+      derivWs.emitUserEvent(input.userId, 'balance_updated', { real_wallets: rw });
+    } else {
+      accountMode = 'demo';
+      if (user.virtual_workspace_balance < stake) {
+        throw new Error(
+          `Insufficient Demo balance ($${user.virtual_workspace_balance.toFixed(2)} available, $${stake.toFixed(2)} required)`
+        );
+      }
+      const newBal = Number((user.virtual_workspace_balance - stake).toFixed(2));
+      await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+        newBal,
+        input.userId,
+      ]);
+      derivWs.emitUserEvent(input.userId, 'balance_updated', { virtual_workspace_balance: newBal });
     }
-    const newBal = Number((user.virtual_workspace_balance - stake).toFixed(2));
-    await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-      newBal,
-      input.userId,
-    ]);
-    derivWs.emitUserEvent(input.userId, 'balance_updated', { virtual_workspace_balance: newBal });
   }
 
   const created = await queryOne<any>(
@@ -404,7 +460,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     RETURNING *`,
     [
       input.userId,
-      input.connectedAccountId || null,
+      resolvedConnectedAccountId || null,
       derivContractId,
       actualMode,
       input.source || 'manual',
@@ -508,23 +564,41 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
   );
 
   if (payout > 0) {
-    await execute(
-      'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-      [payout, order.user_id]
-    );
+    if (order.account_mode === 'real') {
+      const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
+        order.user_id,
+      ]);
+      const rw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      rw.options = Number((Number(rw.options || 0) + payout).toFixed(2));
+      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(rw),
+        order.user_id,
+      ]);
+      derivWs.emitUserEvent(order.user_id, 'balance_updated', { real_wallets: rw });
+    } else {
+      await execute(
+        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
+        [payout, order.user_id]
+      );
+      const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
+        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+        [order.user_id]
+      );
+      if (updatedUser) {
+        derivWs.emitUserEvent(order.user_id, 'balance_updated', {
+          virtual_workspace_balance: updatedUser.virtual_workspace_balance,
+        });
+      }
+    }
   }
-
-  const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
-    'SELECT virtual_workspace_balance FROM users WHERE id = $1',
-    [order.user_id]
-  );
 
   derivWs.emitUserEvent(order.user_id, 'order_closed', closedOrder);
-  if (updatedUser) {
-    derivWs.emitUserEvent(order.user_id, 'balance_updated', {
-      virtual_workspace_balance: updatedUser.virtual_workspace_balance,
-    });
-  }
   if (pnl < 0) {
     await evaluateConsecutiveLossCooldown(order.user_id);
   }
@@ -550,12 +624,13 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
         const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
         const sellResp = isOAuth2
           ? await (async () => {
-              const otpResp = await derivRestRequest<{ url?: string; otp?: string }>(
+              const otpResp = await derivRestRequest<any>(
                 `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
                 creds.token,
                 { method: 'POST' }
               );
-              const otpUrl = otpResp.url || otpResp.otp || '';
+              const otpUrl = extractDerivOtpWsUrl(otpResp);
+              if (!otpUrl) throw new Error('Failed to mint Deriv OTP socket');
               return OtpDerivClient.requestOnOtpUrl(otpUrl, { sell: Number(order.deriv_contract_id), price: 0 });
             })()
           : await derivWs.requestWithToken(creds.token, {
@@ -599,19 +674,38 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
     const directional = isUp ? pctDiff : -pctDiff;
     pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
     const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
-    await execute(
-      'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-      [credit, order.user_id]
-    );
+    if (order.account_mode === 'real') {
+      const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
+        order.user_id,
+      ]);
+      const rw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      rw.options = Number((Number(rw.options || 0) + credit).toFixed(2));
+      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(rw),
+        order.user_id,
+      ]);
+      derivWs.emitUserEvent(order.user_id, 'balance_updated', { real_wallets: rw });
+    } else {
+      await execute(
+        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
+        [credit, order.user_id]
+      );
 
-    const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
-      'SELECT virtual_workspace_balance FROM users WHERE id = $1',
-      [order.user_id]
-    );
-    if (updatedUser) {
-      derivWs.emitUserEvent(order.user_id, 'balance_updated', {
-        virtual_workspace_balance: updatedUser.virtual_workspace_balance,
-      });
+      const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
+        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+        [order.user_id]
+      );
+      if (updatedUser) {
+        derivWs.emitUserEvent(order.user_id, 'balance_updated', {
+          virtual_workspace_balance: updatedUser.virtual_workspace_balance,
+        });
+      }
     }
   }
 

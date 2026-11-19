@@ -34,7 +34,11 @@ type UserEventListener = (userId: number, event: string, payload: unknown) => vo
 
 export function getActiveDerivAppId(): string {
   const globalSettings = getCachedSetting<{ derivAppId?: string }>('global', {});
-  return (globalSettings.derivAppId || config.derivAppId || '1089').trim();
+  const dbCandidate = String(globalSettings.derivAppId || '').trim();
+  if (/^\d+$/.test(dbCandidate)) return dbCandidate;
+  const envCandidate = String(config.derivAppId || '').trim();
+  if (/^\d+$/.test(envCandidate)) return envCandidate;
+  return '1089';
 }
 
 export class DerivWebSocketClient {
@@ -97,6 +101,8 @@ export class DerivWebSocketClient {
       connected: this.isConnected,
       endpoint: this.lastWorkingEndpoint || config.derivWsUrl,
       subscribedSymbols: this.subscribedSymbols.size,
+      subscribedSymbolsCount: this.subscribedSymbols.size,
+      subscribedSymbolList: Array.from(this.subscribedSymbols),
       trackedPrices: this.latestTicks.size,
       lastDerivTickAt: this.lastDerivTickAt,
       reconnectAttempts: this.reconnectAttempts,

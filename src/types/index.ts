@@ -29,7 +29,19 @@ export interface UserProfile {
   preferred_language: string;
   display_theme: 'light' | 'dark';
   virtual_workspace_balance: number;
+  real_wallets?: {
+    options: number;
+    mt5_standard: number;
+    mt5_gold: number;
+    exchange_usdt: number;
+  };
+  demo_wallets?: {
+    mt5_standard: number;
+    mt5_gold: number;
+    exchange_usdt: number;
+  };
   exchange_balances: Record<string, number>;
+  real_exchange_balances?: Record<string, number>;
   deriv_nickname: string;
   deriv_client_id: string;
   created_at: string;
@@ -231,6 +243,8 @@ export interface BotTelemetry {
   startedAt: string;
   lastSignal: string;
   recentPrices: number[];
+  accountMode?: 'real' | 'demo';
+  executionSpeed?: 'fast' | 'normal';
 }
 
 export interface ExchangePair {

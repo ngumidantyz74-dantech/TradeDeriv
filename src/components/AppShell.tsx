@@ -21,10 +21,42 @@ import {
   Cpu,
   User,
   X,
+  Shield,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TradeDerivLogo } from './TradeDerivLogo';
 import type { NavTab } from '../types';
+
+const UsFlagIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-3 rounded-[2px] shrink-0' }) => (
+  <svg viewBox="0 0 24 16" className={className} aria-hidden="true">
+    <rect width="24" height="16" fill="#FFFFFF" />
+    <rect y="0" width="24" height="2.2" fill="#B22234" />
+    <rect y="4.4" width="24" height="2.2" fill="#B22234" />
+    <rect y="8.8" width="24" height="2.2" fill="#B22234" />
+    <rect y="13.2" width="24" height="2.8" fill="#B22234" />
+    <rect width="11" height="8.8" fill="#3C3B6E" />
+    <circle cx="2.5" cy="2.2" r="0.7" fill="#FFFFFF" />
+    <circle cx="5.5" cy="2.2" r="0.7" fill="#FFFFFF" />
+    <circle cx="8.5" cy="2.2" r="0.7" fill="#FFFFFF" />
+    <circle cx="4" cy="4.4" r="0.7" fill="#FFFFFF" />
+    <circle cx="7" cy="4.4" r="0.7" fill="#FFFFFF" />
+    <circle cx="2.5" cy="6.6" r="0.7" fill="#FFFFFF" />
+    <circle cx="5.5" cy="6.6" r="0.7" fill="#FFFFFF" />
+    <circle cx="8.5" cy="6.6" r="0.7" fill="#FFFFFF" />
+  </svg>
+);
+
+const KeFlagIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-3 rounded-[2px] shrink-0' }) => (
+  <svg viewBox="0 0 24 16" className={className} aria-hidden="true">
+    <rect width="24" height="4.5" y="0" fill="#0B0B0B" />
+    <rect width="24" height="1" y="4.5" fill="#FFFFFF" />
+    <rect width="24" height="5" y="5.5" fill="#BB0000" />
+    <rect width="24" height="1" y="10.5" fill="#FFFFFF" />
+    <rect width="24" height="4.5" y="11.5" fill="#006600" />
+    <ellipse cx="12" cy="8" rx="2.3" ry="4.4" fill="#BB0000" stroke="#FFFFFF" strokeWidth="0.6" />
+    <path d="M12 4.2v7.6M10.4 8h3.2" stroke="#0B0B0B" strokeWidth="0.7" />
+  </svg>
+);
 
 const CORE_HUB_TABS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
   { id: 'home', label: 'Dashboard', icon: Home },
@@ -73,7 +105,10 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
     setSelectedSymbol,
     wsConnected,
     registerLogoTap,
+    setAdminGateOpen,
   } = useApp();
+
+  const isOwnerSession = user?.role === 'owner' || user?.role === 'admin';
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
@@ -165,7 +200,17 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </div>
         </div>
 
-        <div className="p-3 border-t border-slate-100 dark:border-[#2A2F3D]">
+        <div className="p-3 border-t border-slate-100 dark:border-[#2A2F3D] space-y-2">
+          {isOwnerSession && (
+            <button
+              type="button"
+              onClick={() => setAdminGateOpen(true)}
+              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#151820] text-white text-xs font-bold hover:bg-[#242936] cursor-pointer"
+            >
+              <Shield className="w-3.5 h-3.5 text-[#FF444F]" />
+              <span>Admin MIS Console</span>
+            </button>
+          )}
           <button
             type="button"
             onClick={() => setActiveTab('profile')}
@@ -227,20 +272,22 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               <button
                 type="button"
                 onClick={() => setCurrencyDisplay('USD')}
-                className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
                   currencyDisplay === 'USD' ? 'bg-white dark:bg-[#2A2F3D] shadow-xs' : 'text-slate-500'
                 }`}
               >
-                USD
+                <UsFlagIcon />
+                <span>USD</span>
               </button>
               <button
                 type="button"
                 onClick={() => setCurrencyDisplay('KSH')}
-                className={`px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
+                className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
                   currencyDisplay === 'KSH' ? 'bg-white dark:bg-[#2A2F3D] shadow-xs' : 'text-slate-500'
                 }`}
               >
-                KSH
+                <KeFlagIcon />
+                <span>KSH</span>
               </button>
             </div>
 
@@ -325,9 +372,11 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             <button
               type="button"
               onClick={() => setCurrencyDisplay(currencyDisplay === 'USD' ? 'KSH' : 'USD')}
-              className="px-2.5 py-1 rounded-full bg-[#242936] text-[11px] font-semibold text-slate-200 cursor-pointer"
+              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#242936] text-[11px] font-semibold text-slate-200 cursor-pointer"
+              title="Switch USD / KSH"
             >
-              {currencyDisplay}
+              {currencyDisplay === 'USD' ? <UsFlagIcon /> : <KeFlagIcon />}
+              <span>{currencyDisplay}</span>
             </button>
           </div>
 

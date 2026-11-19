@@ -8,7 +8,7 @@ import {
   requireDb,
   addNotification,
 } from '../db.ts';
-import { CURATED_DERIV_INSTRUMENTS, EXCHANGE_PAIRS_CATALOG } from '../catalog.ts';
+import { CURATED_DERIV_INSTRUMENTS, CURATED_ORDER_RANK, EXCHANGE_PAIRS_CATALOG } from '../catalog.ts';
 import { derivWs } from '../deriv-client.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
 import { randomId } from '../crypto.ts';
@@ -69,31 +69,38 @@ router.get('/market/instruments', async (_req, res) => {
          ORDER BY m.category, m.display_name`
       );
 
-      const instruments = rows.map((r) => {
-        const live = ticks[r.symbol];
-        const price = live?.quote ?? r.price ?? 1000;
-        const spread = r.spread || 0.15;
-        let sparkline: number[] = [];
-        try {
-          sparkline = JSON.parse(r.sparkline_json || '[]');
-        } catch {
-          sparkline = [];
-        }
-        return {
-          symbol: r.symbol,
-          display_name: r.display_name,
-          category: r.category,
-          market: r.market,
-          submarket: r.submarket,
-          pip_size: r.pip_size,
-          price,
-          bid: live?.bid ?? Number((price - spread / 2).toFixed(r.pip_size < 0.001 ? 5 : 2)),
-          ask: live?.ask ?? Number((price + spread / 2).toFixed(r.pip_size < 0.001 ? 5 : 2)),
-          spread,
-          change_pct: r.change_pct ?? 0,
-          sparkline,
-        };
-      });
+      const instruments = rows
+        .map((r) => {
+          const live = ticks[r.symbol];
+          const price = live?.quote ?? r.price ?? 1000;
+          const spread = r.spread || 0.15;
+          let sparkline: number[] = [];
+          try {
+            sparkline = JSON.parse(r.sparkline_json || '[]');
+          } catch {
+            sparkline = [];
+          }
+          return {
+            symbol: r.symbol,
+            display_name: r.display_name,
+            category: r.category,
+            market: r.market,
+            submarket: r.submarket,
+            pip_size: r.pip_size,
+            price,
+            bid: live?.bid ?? Number((price - spread / 2).toFixed(r.pip_size < 0.001 ? 5 : 2)),
+            ask: live?.ask ?? Number((price + spread / 2).toFixed(r.pip_size < 0.001 ? 5 : 2)),
+            spread,
+            change_pct: r.change_pct ?? 0,
+            sparkline,
+          };
+        })
+        .sort((a, b) => {
+          const rankA = CURATED_ORDER_RANK.get(a.symbol) ?? 10000;
+          const rankB = CURATED_ORDER_RANK.get(b.symbol) ?? 10000;
+          if (rankA !== rankB) return rankA - rankB;
+          return a.display_name.localeCompare(b.display_name);
+        });
 
       res.json({ instruments });
       return;
@@ -239,7 +246,8 @@ router.get('/exchange/pairs', (req, res) => {
 });
 
 router.post('/exchange/order', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const { pair, side = 'BUY', amount, orderType = 'market', limitPrice } = req.body || {};
+  const { pair, side = 'BUY', amount, orderType = 'market', limitPrice, accountMode } = req.body || {};
+  const isReal = accountMode === 'real';
   const amt = Number(amount);
   if (!pair || Number.isNaN(amt) || amt <= 0) {
     res.status(400).json({ error: 'Valid pair and amount are required' });
@@ -250,8 +258,8 @@ router.post('/exchange/order', requireDb, requireAuth, async (req: AuthRequest, 
   const price = Number(limitPrice || pairMeta?.price || 1);
   const [baseCoin, quoteCoin] = String(pair).split('/');
 
-  const user = await queryOne<{ exchange_balances_json: string; virtual_workspace_balance: number }>(
-    'SELECT exchange_balances_json, virtual_workspace_balance FROM users WHERE id = $1',
+  const user = await queryOne<any>(
+    'SELECT exchange_balances_json, real_exchange_balances_json, virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
     [req.user!.id]
   );
   if (!user) {
@@ -259,51 +267,66 @@ router.post('/exchange/order', requireDb, requireAuth, async (req: AuthRequest, 
     return;
   }
 
-  const ex = (() => {
+  const parseObj = (raw: string | null | undefined, fallback: Record<string, number>) => {
     try {
-      return JSON.parse(user.exchange_balances_json || '{}');
+      return { ...fallback, ...(JSON.parse(raw || '{}') || {}) };
     } catch {
-      return {};
+      return { ...fallback };
     }
-  })();
+  };
+
+  const ex = isReal
+    ? parseObj(user.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 })
+    : parseObj(user.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
+  const realWallets = parseObj(user.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+  const demoWallets = parseObj(user.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
 
   const quoteAvail = Number(ex[quoteCoin] ?? 0);
   const baseAvail = Number(ex[baseCoin] ?? 0);
 
   if (String(side).toUpperCase() === 'BUY') {
-    // Allow auto-converting from virtual USD workspace if quote USDT/USDC spot is 0 in demo testing
-    if (quoteAvail < amt) {
-      if ((quoteCoin === 'USDT' || quoteCoin === 'USDC') && Number(user.virtual_workspace_balance) >= amt) {
-        await execute(
-          'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance - $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-          [amt, req.user!.id]
-        );
-      } else {
-        res.status(400).json({ error: `Insufficient ${quoteCoin} spot balance` });
-        return;
-      }
-    } else {
+    if (quoteAvail >= amt) {
       ex[quoteCoin] = Number((quoteAvail - amt).toFixed(8));
+    } else if (!isReal && (quoteCoin === 'USDT' || quoteCoin === 'USDC') && Number(user.virtual_workspace_balance) >= amt) {
+      await execute(
+        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance - $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
+        [amt, req.user!.id]
+      );
+    } else if (isReal && (quoteCoin === 'USDT' || quoteCoin === 'USDC') && Number(realWallets.options || 0) >= amt) {
+      realWallets.options = Number((Number(realWallets.options || 0) - amt).toFixed(2));
+    } else {
+      res.status(400).json({ error: `Insufficient ${isReal ? 'Real' : 'Demo'} ${quoteCoin} balance` });
+      return;
     }
     const received = amt / (price || 1);
     ex[baseCoin] = Number((baseAvail + received).toFixed(8));
   } else {
     if (baseAvail < amt) {
-      res.status(400).json({ error: `Insufficient ${baseCoin} spot balance` });
+      res.status(400).json({ error: `Insufficient ${isReal ? 'Real' : 'Demo'} ${baseCoin} balance` });
       return;
     }
     ex[baseCoin] = Number((baseAvail - amt).toFixed(8));
     ex[quoteCoin] = Number((quoteAvail + amt * price).toFixed(8));
   }
 
-  await execute('UPDATE users SET exchange_balances_json = $1, updated_at = NOW() WHERE id = $2', [
-    JSON.stringify(ex),
-    req.user!.id,
-  ]);
+  if (isReal) {
+    realWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
+    await execute(
+      'UPDATE users SET real_exchange_balances_json = $1, real_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+      [JSON.stringify(ex), JSON.stringify(realWallets), req.user!.id]
+    );
+  } else {
+    demoWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
+    await execute(
+      'UPDATE users SET exchange_balances_json = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+      [JSON.stringify(ex), JSON.stringify(demoWallets), req.user!.id]
+    );
+  }
+
   const ref = `EX-${randomId(4).toUpperCase()}`;
   await execute(
-    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, metadata_json)
-     VALUES ($1, 'exchange', $2, 'deriv_exchange', $3, $4, $5, $6, $7, 'completed', $8)`,
+    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+     VALUES ($1, 'exchange', $2, 'deriv_exchange', $3, $4, $5, $6, $7, 'completed', $8, $9)`,
     [
       req.user!.id,
       `${String(orderType).toUpperCase()} ${String(side).toUpperCase()}`,
@@ -312,12 +335,13 @@ router.post('/exchange/order', requireDb, requireAuth, async (req: AuthRequest, 
       amt,
       quoteCoin,
       ref,
-      JSON.stringify({ pair, price }),
+      isReal ? 'real' : 'demo',
+      JSON.stringify({ pair, price, accountMode: isReal ? 'real' : 'demo' }),
     ]
   );
 
-  await addNotification(req.user!.id, 'Exchange Order Filled', `${String(side).toUpperCase()} ${amt} ${pair} @ ${price}`, 'exchange');
-  res.json({ ok: true, exchangeBalances: ex, reference: ref });
+  await addNotification(req.user!.id, 'Exchange Order Filled', `[${isReal ? 'REAL' : 'DEMO'}] ${String(side).toUpperCase()} ${amt} ${pair} @ ${price}`, 'exchange');
+  res.json({ ok: true, exchangeBalances: ex, reference: ref, accountMode: isReal ? 'real' : 'demo' });
 });
 
 // Watchlists

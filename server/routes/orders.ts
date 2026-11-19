@@ -78,6 +78,7 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
         durationUnit: body.durationUnit || 't',
         executionMode: body.executionMode || 'virtual',
         connectedAccountId: body.connectedAccountId ? Number(body.connectedAccountId) : null,
+        accountMode: body.accountMode === 'real' ? 'real' : 'demo',
         source: 'bulk',
       });
       orders.push(o);
@@ -129,10 +130,32 @@ router.post('/trade/close', requireDb, requireAuth, async (req: AuthRequest, res
 });
 
 router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  await execute('UPDATE users SET virtual_workspace_balance = 10000.00, updated_at = NOW() WHERE id = $1', [
+  if (req.body?.accountMode === 'real') {
+    res.status(400).json({ error: 'Reset balance is only available for Demo accounts.' });
+    return;
+  }
+  await execute(
+    `UPDATE users
+     SET virtual_workspace_balance = 10000.00,
+         demo_wallets_json = '{"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}',
+         updated_at = NOW()
+     WHERE id = $1`,
+    [req.user!.id]
+  );
+  await execute(
+    `UPDATE connected_accounts
+     SET balance = CASE WHEN platform = 'deriv' THEN 10000.00 ELSE 0 END,
+         last_known_balance = CASE WHEN platform = 'deriv' THEN 10000.00 ELSE 0 END,
+         updated_at = NOW()
+     WHERE user_id = $1 AND is_virtual = TRUE`,
+    [req.user!.id]
+  );
+  await addNotification(
     req.user!.id,
-  ]);
-  await addNotification(req.user!.id, 'Demo Balance Reset', 'Virtual trading workspace balance reset to $10,000.00 USD.', 'account');
+    'Demo Balance Reset',
+    'Demo Options balance reset to $10,000.00 USD. Real balances remain untouched.',
+    'account'
+  );
   res.json({ ok: true, virtual_workspace_balance: 10000.0 });
 });
 
@@ -186,6 +209,8 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
       maxTrades: Number(b.maxTrades || 50),
       executionMode: b.executionMode || 'virtual',
       connectedAccountId: b.connectedAccountId ? Number(b.connectedAccountId) : null,
+      accountMode: b.accountMode === 'real' ? 'real' : 'demo',
+      executionSpeed: b.executionSpeed === 'normal' ? 'normal' : 'fast',
     });
     res.json({ telemetry });
   } catch (err) {

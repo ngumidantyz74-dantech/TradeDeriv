@@ -324,7 +324,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setLastDerivTickAt(Date.now());
         } else if (msg.type === 'balance_updated' && msg.data) {
           setUser((prev) =>
-            prev ? { ...prev, virtual_workspace_balance: Number(msg.data.virtual_workspace_balance) } : prev
+            prev
+              ? {
+                  ...prev,
+                  virtual_workspace_balance:
+                    msg.data.virtual_workspace_balance !== undefined
+                      ? Number(msg.data.virtual_workspace_balance)
+                      : prev.virtual_workspace_balance,
+                  real_wallets: msg.data.real_wallets ?? prev.real_wallets,
+                  demo_wallets: msg.data.demo_wallets ?? prev.demo_wallets,
+                  exchange_balances: msg.data.exchange_balances ?? prev.exchange_balances,
+                  real_exchange_balances: msg.data.real_exchange_balances ?? prev.real_exchange_balances,
+                }
+              : prev
           );
         } else if (msg.type === 'order_opened' && msg.data) {
           setOrders((prev) => [msg.data, ...prev.filter((o) => o.id !== msg.data.id)]);
@@ -417,9 +429,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [hideBalances, currencyDisplay, kesRate]
   );
 
+  const modeAccounts = accounts.filter((a) =>
+    accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual
+  );
   const activeConnectedAccount =
-    accounts.find((a) => a.id === activeConnectedAccountId) ||
-    accounts.find((a) => (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual) && a.status === 'active') ||
+    modeAccounts.find((a) => a.id === activeConnectedAccountId) ||
+    modeAccounts.find((a) => a.status === 'active') ||
     null;
 
   const unreadCount = notifications.filter((n) => !n.is_read).length;

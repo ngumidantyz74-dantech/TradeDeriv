@@ -17,7 +17,6 @@ import {
   KeyRound,
   UserX,
   Grid,
-  Code2,
   ExternalLink,
   Globe,
   HelpCircle,
@@ -25,24 +24,16 @@ import {
   Moon,
   Sun,
   X,
-  Trash2,
+  Shield,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
-
-interface ApiTokenItem {
-  id?: number;
-  display_name?: string;
-  token?: string;
-  auth_type?: string;
-  scopes?: string | string[];
-  created_at?: string;
-}
 
 export const ProfileHub: React.FC = () => {
   const {
     user,
     setActiveTab,
+    setAdminGateOpen,
     currencyDisplay,
     setCurrencyDisplay,
     theme,
@@ -53,11 +44,11 @@ export const ProfileHub: React.FC = () => {
     showToast,
   } = useApp();
 
+  const isOwnerSession = user?.role === 'owner' || user?.role === 'admin';
   const [derivSettings, setDerivSettings] = useState<Record<string, any>>({});
   const [verification, setVerification] = useState<Record<string, any>>({});
-  const [apiTokens, setApiTokens] = useState<ApiTokenItem[]>([]);
   const [activeSheet, setActiveSheet] = useState<
-    null | 'personal' | 'address' | 'tax' | 'kyc' | 'assessment' | 'tokens' | 'language' | 'close'
+    null | 'personal' | 'address' | 'tax' | 'kyc' | 'assessment' | 'language' | 'close'
   >(null);
 
   // Editable form states
@@ -68,22 +59,19 @@ export const ProfileHub: React.FC = () => {
   const [addressCity, setAddressCity] = useState('');
   const [taxId, setTaxId] = useState('');
   const [language, setLanguage] = useState(user?.preferred_language || 'EN');
-  const [newTokenName, setNewTokenName] = useState('');
   const [closeReason, setCloseReason] = useState('No longer trading');
   const [saving, setSaving] = useState(false);
 
   const loadDetails = useCallback(async () => {
     try {
-      const [detRes, tokRes] = await Promise.all([
-        apiFetch<{ derivSettings: Record<string, any>; verification: Record<string, any> }>('/api/account/profile-details'),
-        apiFetch<{ tokens: ApiTokenItem[] }>('/api/account/api-tokens'),
-      ]);
+      const detRes = await apiFetch<{ derivSettings: Record<string, any>; verification: Record<string, any> }>(
+        '/api/account/profile-details'
+      );
       setDerivSettings(detRes.derivSettings || {});
       setVerification(detRes.verification || {});
       setAddressLine(detRes.derivSettings?.address_line_1 || '');
       setAddressCity(detRes.derivSettings?.address_city || '');
       setTaxId(detRes.derivSettings?.tax_identification_number || '');
-      setApiTokens(tokRes.tokens || []);
     } catch {
       // ignore
     }
@@ -129,35 +117,6 @@ export const ProfileHub: React.FC = () => {
       showToast(err instanceof Error ? err.message : 'Update failed', 'error');
     } finally {
       setSaving(false);
-    }
-  };
-
-  const handleCreateToken = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTokenName.trim()) return;
-    setSaving(true);
-    try {
-      const res = await apiFetch<{ tokens: ApiTokenItem[] }>('/api/account/api-tokens', {
-        method: 'POST',
-        body: JSON.stringify({ token_name: newTokenName.trim(), scopes: ['read', 'trade'] }),
-      });
-      setApiTokens(res.tokens || []);
-      setNewTokenName('');
-      showToast('Deriv API token created', 'success');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Could not create token', 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const handleDeleteToken = async (tokOrId: string | number) => {
-    try {
-      await apiFetch(`/api/account/api-tokens/${encodeURIComponent(String(tokOrId))}`, { method: 'DELETE' });
-      await loadDetails();
-      showToast('Token revoked', 'info');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Revoke failed', 'error');
     }
   };
 
@@ -387,10 +346,10 @@ export const ProfileHub: React.FC = () => {
           </div>
         </section>
 
-        {/* API management */}
+        {/* Connected Apps & Deriv */}
         <section>
           <h2 className="font-display text-sm font-bold text-slate-500 dark:text-slate-400 mb-2.5 px-1">
-            API management
+            Deriv OAuth2 Integration
           </h2>
           <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] divide-y divide-slate-100 dark:divide-[#2A2F3D]">
             <button
@@ -400,19 +359,7 @@ export const ProfileHub: React.FC = () => {
             >
               <div className="flex items-center gap-3.5">
                 <Grid className="w-4 h-4 text-slate-500" />
-                <span className="text-sm font-medium">Connected apps</span>
-              </div>
-              <ChevronRight className="w-4 h-4 text-slate-400" />
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveSheet('tokens')}
-              className="w-full px-4 py-3.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-white/5 text-left cursor-pointer"
-            >
-              <div className="flex items-center gap-3.5">
-                <Code2 className="w-4 h-4 text-slate-500" />
-                <span className="text-sm font-medium">API Token</span>
+                <span className="text-sm font-medium">My Connected Deriv Accounts</span>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
             </button>
@@ -431,6 +378,26 @@ export const ProfileHub: React.FC = () => {
             </a>
           </div>
         </section>
+
+        {isOwnerSession && (
+          <section>
+            <h2 className="font-display text-sm font-bold text-[#FF444F] mb-2.5 px-1">Platform Administration</h2>
+            <button
+              type="button"
+              onClick={() => setAdminGateOpen(true)}
+              className="w-full px-4 py-3.5 rounded-2xl bg-[#151820] text-white border border-[#2A2F3D] flex items-center justify-between hover:bg-[#1A1D26] cursor-pointer"
+            >
+              <div className="flex items-center gap-3.5">
+                <Shield className="w-4 h-4 text-[#FF444F]" />
+                <div className="text-left">
+                  <p className="text-sm font-bold">Open Owner MIS Console</p>
+                  <p className="text-xs text-slate-400">Manage users, Real & Demo balances, markup & diagnostics</p>
+                </div>
+              </div>
+              <ChevronRight className="w-4 h-4 text-slate-400" />
+            </button>
+          </section>
+        )}
 
         {/* Preferences */}
         <section>
@@ -671,54 +638,6 @@ export const ProfileHub: React.FC = () => {
                 >
                   Done
                 </button>
-              </div>
-            )}
-
-            {activeSheet === 'tokens' && (
-              <div className="space-y-4">
-                <form onSubmit={handleCreateToken} className="flex gap-2">
-                  <input
-                    type="text"
-                    placeholder="New token name"
-                    value={newTokenName}
-                    onChange={(e) => setNewTokenName(e.target.value)}
-                    className="flex-1 px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-sm"
-                  />
-                  <button
-                    type="submit"
-                    disabled={saving}
-                    className="px-4 py-2 rounded-xl bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
-                  >
-                    Create
-                  </button>
-                </form>
-                <div className="max-h-60 overflow-y-auto space-y-2">
-                  {apiTokens.length === 0 ? (
-                    <p className="text-xs text-slate-500 text-center py-4">No active authorization records</p>
-                  ) : (
-                    apiTokens.map((t, idx) => (
-                      <div
-                        key={t.id || t.token || idx}
-                        className="p-3 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] flex items-center justify-between text-xs"
-                      >
-                        <div>
-                          <p className="font-semibold">{t.display_name || t.auth_type || 'OAuth2 Session'}</p>
-                          <p className="text-slate-500">
-                            Scopes: {Array.isArray(t.scopes) ? t.scopes.join(', ') : t.scopes || 'read, trade'}
-                          </p>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteToken(t.token || t.id || '')}
-                          className="p-1.5 text-[#FF444F] hover:bg-[#FF444F]/10 rounded-lg cursor-pointer"
-                          aria-label="Revoke token"
-                        >
-                          <Trash2 className="w-4 h-4" />
-                        </button>
-                      </div>
-                    ))
-                  )}
-                </div>
               </div>
             )}
 

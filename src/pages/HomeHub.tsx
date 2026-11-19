@@ -68,18 +68,30 @@ export const HomeHub: React.FC = () => {
   const demoAcc = accounts.find((a) => Boolean(a.is_virtual) && a.status === 'active');
   const optionsBal =
     accountMode === 'real'
-      ? Number(realAcc?.balance || 0)
-      : Number(demoAcc?.balance ?? user?.virtual_workspace_balance ?? 10000);
-  const mt5Acc = accounts.find((a) => a.platform?.includes('mt5'));
-  const mt5Bal = Number(mt5Acc?.balance ?? (accountMode === 'demo' ? 10000 : 0));
-  const exchangeUsdt = Number(user?.exchange_balances?.USDT || 0);
+      ? Number(realAcc?.balance ?? user?.real_wallets?.options ?? 0)
+      : Number(user?.virtual_workspace_balance ?? demoAcc?.balance ?? 10000);
+  const mt5Acc = accounts.find(
+    (a) => a.platform?.includes('mt5') && (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
+  );
+  const mt5Bal =
+    accountMode === 'real'
+      ? Number(mt5Acc?.balance ?? user?.real_wallets?.mt5_standard ?? 0)
+      : Number(mt5Acc?.balance ?? user?.demo_wallets?.mt5_standard ?? 0);
+  const exchangeUsdt =
+    accountMode === 'real'
+      ? Number(user?.real_exchange_balances?.USDT ?? user?.real_wallets?.exchange_usdt ?? 0)
+      : Number(user?.exchange_balances?.USDT ?? user?.demo_wallets?.exchange_usdt ?? 0);
 
-  const openOrders = orders.filter((o) => o.status === 'OPEN');
+  const openOrders = orders.filter(
+    (o) =>
+      o.status === 'OPEN' &&
+      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+  );
   const floatingPnl = openOrders.reduce((s, o) => s + Number(o.pnl || 0), 0);
   const usedMargin = openOrders.reduce((s, o) => s + Number(o.stake || 0), 0);
   const activeBalance =
-    accountMode === 'real' && activeConnectedAccount
-      ? Number(activeConnectedAccount.balance)
+    accountMode === 'real'
+      ? Number(activeConnectedAccount?.balance ?? user?.real_wallets?.options ?? 0)
       : Number(user?.virtual_workspace_balance ?? 10000);
   const equity = activeBalance + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);

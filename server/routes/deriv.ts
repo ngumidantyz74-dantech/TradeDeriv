@@ -20,6 +20,18 @@ import { sendTransactionalEmail } from '../email-service.ts';
 const router = Router();
 const usedStateJtis = new Map<string, number>();
 
+export function isVirtualDerivAccount(
+  loginId: string,
+  accountType = '',
+  explicitVirtual?: boolean
+): boolean {
+  if (explicitVirtual === true) return true;
+  const cleanId = String(loginId || '').trim().toUpperCase();
+  if (/^(VR|VRT|VRW|DOT)/.test(cleanId)) return true;
+  if (/(demo|virtual)/i.test(String(accountType || ''))) return true;
+  return false;
+}
+
 function cleanupReplayGuard(): void {
   const now = Date.now();
   for (const [jti, expiresAt] of usedStateJtis.entries()) {
@@ -145,16 +157,22 @@ async function ensureUserFromDerivProfile(profile: {
   preferredUserId?: number | null;
 }): Promise<{ user: any; isNew: boolean; preserveExistingBalances: boolean }> {
   if (profile.preferredUserId) {
-    const existingById = await queryOne<any>('SELECT * FROM users WHERE id = $1', [profile.preferredUserId]);
+    const existingById = await queryOne<any>(
+      "SELECT * FROM users WHERE id = $1 AND role NOT IN ('owner', 'admin')",
+      [profile.preferredUserId]
+    );
     if (existingById) {
       return { user: existingById, isNew: false, preserveExistingBalances: true };
     }
   }
 
-  // 1) Check if email exists in users
+  // 1) Check if trader email exists in users (never log into owner/admin rows as trader)
   const candidateEmail = profile.email ? profile.email.trim().toLowerCase() : '';
   if (candidateEmail) {
-    const existingByEmail = await queryOne<any>('SELECT * FROM users WHERE LOWER(email) = $1', [candidateEmail]);
+    const existingByEmail = await queryOne<any>(
+      "SELECT * FROM users WHERE LOWER(email) = $1 AND role NOT IN ('owner', 'admin')",
+      [candidateEmail]
+    );
     if (existingByEmail) {
       if (profile.nickname || profile.clientId) {
         await execute(
@@ -167,11 +185,14 @@ async function ensureUserFromDerivProfile(profile: {
     }
   }
 
-  // 2) Check if any deriv_login_id already exists in connected_accounts
+  // 2) Check if any deriv_login_id already exists in connected_accounts for a non-admin trader
   const loginIds = (profile.loginIds || []).filter(Boolean);
   if (loginIds.length > 0) {
     const existingConn = await queryOne<{ user_id: number }>(
-      'SELECT user_id FROM connected_accounts WHERE deriv_login_id = ANY($1::text[]) LIMIT 1',
+      `SELECT ca.user_id FROM connected_accounts ca
+       JOIN users u ON ca.user_id = u.id
+       WHERE ca.deriv_login_id = ANY($1::text[]) AND u.role NOT IN ('owner', 'admin')
+       LIMIT 1`,
       [loginIds]
     );
     if (existingConn) {
@@ -182,10 +203,23 @@ async function ensureUserFromDerivProfile(profile: {
     }
   }
 
-  // 3) Check fallback synthetic email
+  // 3) Check fallback synthetic email — if candidateEmail belongs to owner/admin, assign unique trader alias
+  const ownerConflict = candidateEmail
+    ? await queryOne<{ id: number }>("SELECT id FROM users WHERE LOWER(email) = $1 AND role IN ('owner', 'admin')", [
+        candidateEmail,
+      ])
+    : null;
   const fallbackLogin = profile.clientId || loginIds[0] || randomId(5);
-  const cleanEmail = (candidateEmail || `${fallbackLogin}@deriv-oauth.local`).toLowerCase();
-  const existingFallback = await queryOne<any>('SELECT * FROM users WHERE LOWER(email) = $1', [cleanEmail]);
+  const cleanEmail = (
+    ownerConflict
+      ? `${fallbackLogin.toLowerCase()}@deriv-trader.local`
+      : candidateEmail || `${fallbackLogin}@deriv-oauth.local`
+  ).toLowerCase();
+
+  const existingFallback = await queryOne<any>(
+    "SELECT * FROM users WHERE LOWER(email) = $1 AND role NOT IN ('owner', 'admin')",
+    [cleanEmail]
+  );
   if (existingFallback) {
     return { user: existingFallback, isNew: false, preserveExistingBalances: true };
   }
@@ -279,7 +313,7 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       });
 
       for (const e of entries) {
-        const isVirtual = e.acct.toUpperCase().startsWith('VR') || e.acct.toUpperCase().startsWith('VRT');
+        const isVirtual = isVirtualDerivAccount(e.acct);
         let bal = isVirtual ? 10000 : 0;
         if (!session.preserveExistingBalances) {
           try {
@@ -461,13 +495,18 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
         accessToken
       );
       const list = accResp.data || accResp.accounts || (Array.isArray(accResp) ? accResp : []);
-      derivAccounts = list.map((a: any) => ({
-        account_id: String(a.account_id || a.loginid || a.id),
-        balance: Number(a.balance ?? 0),
-        currency: String(a.currency || 'USD'),
-        account_type: String(a.account_type || (a.is_virtual ? 'Demo' : 'Real')),
-        is_virtual: Boolean(a.is_virtual || String(a.account_id || '').toUpperCase().startsWith('VR')),
-      }));
+      derivAccounts = list.map((a: any) => {
+        const accountId = String(a.account_id || a.loginid || a.id);
+        const accType = String(a.account_type || (a.is_virtual ? 'Demo' : 'Real'));
+        const isVirt = isVirtualDerivAccount(accountId, accType, a.is_virtual);
+        return {
+          account_id: accountId,
+          balance: Number(a.balance ?? 0),
+          currency: String(a.currency || 'USD'),
+          account_type: accType,
+          is_virtual: isVirt,
+        };
+      });
     } catch {
       // ignore empty list
     }
@@ -544,7 +583,7 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
 
     for (const a of accounts) {
       if (!a.acct || !a.token) continue;
-      const isVirtual = String(a.acct).toUpperCase().startsWith('VR');
+      const isVirtual = isVirtualDerivAccount(String(a.acct));
       let bal = isVirtual ? 10000 : 0;
       if (!preserveExistingBalances) {
         try {
@@ -600,7 +639,7 @@ router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, r
       derivLoginId = String(authResp.balance.loginid || derivLoginId);
       currency = String(authResp.balance.currency || 'USD');
       balance = Number(authResp.balance.balance || 0);
-      isVirtual = derivLoginId.toUpperCase().startsWith('VR');
+      isVirtual = isVirtualDerivAccount(derivLoginId, label || '', Boolean(authResp.balance.is_virtual));
     }
 
     const alreadyExists = await queryOne<{ id: number }>(
@@ -649,6 +688,10 @@ router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, r
 });
 
 router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  if (req.user!.role === 'owner' || req.user!.role === 'admin') {
+    res.json({ accounts: [] });
+    return;
+  }
   const sync = req.query.sync === '1';
   const rows = await query<any>(
     `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,

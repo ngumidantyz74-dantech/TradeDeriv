@@ -18,6 +18,8 @@ export interface BotSessionConfig {
   maxTrades?: number;
   executionMode?: 'virtual' | 'deriv';
   connectedAccountId?: number | null;
+  accountMode?: 'real' | 'demo';
+  executionSpeed?: 'fast' | 'normal';
 }
 
 export interface BotTelemetry {
@@ -40,6 +42,8 @@ export interface BotTelemetry {
   startedAt: string;
   lastSignal: string;
   recentPrices: number[];
+  accountMode: 'real' | 'demo';
+  executionSpeed: 'fast' | 'normal';
 }
 
 interface InternalBotSession extends BotTelemetry {
@@ -52,6 +56,7 @@ interface InternalBotSession extends BotTelemetry {
   connectedAccountId: number | null;
   unsubscribeTick: (() => void) | null;
   isExecutingTrade: boolean;
+  lastTradeAt: number;
 }
 
 const activeSessions = new Map<number, InternalBotSession>();
@@ -160,6 +165,9 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   }
 
   if (session.isExecutingTrade) return;
+  if (session.executionSpeed === 'normal' && Date.now() - session.lastTradeAt < 1800) {
+    return;
+  }
   const stillOpen = await queryOne<{ c: string }>(
     "SELECT COUNT(*)::text as c FROM virtual_orders WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' AND source = 'bot'",
     [session.userId, session.symbol]
@@ -186,9 +194,11 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       durationUnit: session.durationUnit,
       executionMode: session.executionMode,
       connectedAccountId: session.connectedAccountId,
+      accountMode: session.accountMode,
       source: 'bot',
     });
 
+    session.lastTradeAt = Date.now();
     session.tradesPlaced += 1;
     derivWs.emitUserEvent(session.userId, 'bot_order_opened', {
       order,
@@ -255,6 +265,8 @@ function serializeTelemetry(s: InternalBotSession): BotTelemetry {
     startedAt: s.startedAt,
     lastSignal: s.lastSignal,
     recentPrices: s.recentPrices,
+    accountMode: s.accountMode,
+    executionSpeed: s.executionSpeed,
   };
 }
 
@@ -301,8 +313,11 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     multiplier: Number(cfg.multiplier || 100),
     executionMode: cfg.executionMode || 'virtual',
     connectedAccountId: cfg.connectedAccountId || null,
+    accountMode: cfg.accountMode === 'real' ? 'real' : 'demo',
+    executionSpeed: cfg.executionSpeed === 'normal' ? 'normal' : 'fast',
     unsubscribeTick: null,
     isExecutingTrade: false,
+    lastTradeAt: 0,
   };
 
   session.unsubscribeTick = derivWs.onTick((tick) => {
@@ -315,7 +330,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   await addNotification(
     cfg.userId,
     'Bot Started',
-    `${session.strategyName} active on ${session.symbol} (${session.contractType}, $${session.baseStake}).`,
+    `[${session.accountMode.toUpperCase()}] ${session.strategyName} active on ${session.symbol} (${session.contractType}, $${session.baseStake}).`,
     'bot'
   );
 
@@ -372,5 +387,7 @@ export function getBotStatus(userId: number): BotTelemetry {
     startedAt: '',
     lastSignal: 'Idle',
     recentPrices: [],
+    accountMode: 'demo',
+    executionSpeed: 'fast',
   };
 }

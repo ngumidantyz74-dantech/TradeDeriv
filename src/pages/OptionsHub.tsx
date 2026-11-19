@@ -13,7 +13,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { SparklineSvg } from '../components/SparklineSvg';
 
-const MOST_TRADED_CODES = ['1HZ15V', '1HZ100V', '1HZ10V', '1HZ25V', '1HZ75V'];
+const MOST_TRADED_CODES = ['1HZ100V', '1HZ75V', '1HZ10V', '1HZ25V', 'R_100'];
 
 export const OptionsHub: React.FC = () => {
   const {
@@ -37,13 +37,17 @@ export const OptionsHub: React.FC = () => {
   const demoAcc = accounts.find((a) => Boolean(a.is_virtual) && a.status === 'active');
   const totalValue =
     accountMode === 'real'
-      ? Number(realAcc?.balance || 0)
+      ? Number(realAcc?.balance ?? user?.real_wallets?.options ?? 0)
       : Number(user?.virtual_workspace_balance ?? demoAcc?.balance ?? 10000);
 
   const handleResetBalance = async () => {
+    if (accountMode !== 'demo') return;
     setResetting(true);
     try {
-      await apiFetch('/api/orders/reset-balance', { method: 'POST' });
+      await apiFetch('/api/orders/reset-balance', {
+        method: 'POST',
+        body: JSON.stringify({ accountMode: 'demo' }),
+      });
       await refreshAll();
       showToast('Demo balance reset to $10,000.00 USD', 'success');
     } catch (err) {
@@ -125,17 +129,19 @@ export const OptionsHub: React.FC = () => {
             <span className="text-xs font-medium">Trade</span>
           </button>
 
-          <button
-            type="button"
-            disabled={resetting}
-            onClick={handleResetBalance}
-            className="flex flex-col items-center gap-2 cursor-pointer"
-          >
-            <span className="w-12 h-12 rounded-full border border-white/30 hover:bg-white/10 flex items-center justify-center">
-              <RotateCcw className={`w-5 h-5 text-white ${resetting ? 'animate-spin' : ''}`} />
-            </span>
-            <span className="text-xs font-medium">Reset balance</span>
-          </button>
+          {accountMode === 'demo' && (
+            <button
+              type="button"
+              disabled={resetting}
+              onClick={handleResetBalance}
+              className="flex flex-col items-center gap-2 cursor-pointer"
+            >
+              <span className="w-12 h-12 rounded-full border border-white/30 hover:bg-white/10 flex items-center justify-center">
+                <RotateCcw className={`w-5 h-5 text-white ${resetting ? 'animate-spin' : ''}`} />
+              </span>
+              <span className="text-xs font-medium">Reset balance</span>
+            </button>
+          )}
         </div>
       </section>
 

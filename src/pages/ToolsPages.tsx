@@ -25,10 +25,18 @@ import type { JournalEntry, SmartAlert } from '../types';
 
 // 1. Risk Management Centre (Calculator + Server Guardrails)
 export const RiskCalculatorPage: React.FC = () => {
-  const { user, kesRate, showToast } = useApp();
-  const [capital, setCapital] = useState(String(user?.virtual_workspace_balance ?? 1000));
+  const { user, accountMode, activeConnectedAccount, kesRate, showToast } = useApp();
+  const modeCapital =
+    accountMode === 'real'
+      ? Number(activeConnectedAccount?.balance ?? user?.real_wallets?.options ?? 0)
+      : Number(user?.virtual_workspace_balance ?? 1000);
+  const [capital, setCapital] = useState(String(modeCapital));
   const [riskPct, setRiskPct] = useState('2');
   const [martingale, setMartingale] = useState('2');
+
+  useEffect(() => {
+    setCapital(String(modeCapital));
+  }, [modeCapital]);
 
   // Server Risk Guardrails state
   const [riskLoading, setRiskLoading] = useState(true);
@@ -331,10 +339,13 @@ export const RiskCalculatorPage: React.FC = () => {
   );
 };
 
-// 2. Copy Trading & Linked Deriv Accounts
+// 2. Copy Trading & Linked Deriv Accounts (Strictly scoped to current signed-in user)
 export const CopyTradingPage: React.FC = () => {
   const { accounts, refreshAccounts, launchDerivOAuth, showToast, formatMoney } = useApp();
   const [busyId, setBusyId] = useState<number | null>(null);
+
+  const realAccounts = accounts.filter((a) => !a.is_virtual);
+  const demoAccounts = accounts.filter((a) => Boolean(a.is_virtual));
 
   const handleAction = async (id: number, action: 'sync' | 'disconnect' | 'revoke') => {
     setBusyId(id);
@@ -349,14 +360,91 @@ export const CopyTradingPage: React.FC = () => {
     }
   };
 
+  const renderGroup = (title: string, badgeClass: string, list: typeof accounts) => (
+    <div className="space-y-2.5">
+      <div className="flex items-center gap-2">
+        <h2 className="font-display text-sm font-bold">{title}</h2>
+        <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${badgeClass}`}>{list.length}</span>
+      </div>
+      {list.length === 0 ? (
+        <div className="p-4 rounded-2xl bg-[#F8F9FB] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-xs text-slate-500">
+          No {title.toLowerCase()} linked to your profile.
+        </div>
+      ) : (
+        list.map((acc) => (
+          <div
+            key={acc.id}
+            className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-4"
+          >
+            <div>
+              <div className="flex items-center gap-2">
+                <span className="font-mono tabular-nums font-bold text-sm">{acc.deriv_account_id}</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    acc.is_virtual ? 'bg-[#1958B7]/10 text-[#1958B7]' : 'bg-[#FF444F]/15 text-[#FF444F]'
+                  }`}
+                >
+                  {acc.is_virtual ? 'DEMO' : 'REAL'}
+                </span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                    acc.status === 'active' ? 'bg-[#00A878]/15 text-[#00A878]' : 'bg-slate-200 text-slate-600'
+                  }`}
+                >
+                  {acc.status}
+                </span>
+              </div>
+              <p className="text-xs text-slate-500 mt-1">
+                {acc.account_type} · {acc.platform.toUpperCase()} · {acc.currency}
+              </p>
+            </div>
+
+            <div className="flex items-center gap-3">
+              <span className="font-mono tabular-nums text-base font-bold">{formatMoney(acc.balance)}</span>
+              <button
+                type="button"
+                disabled={busyId === acc.id}
+                onClick={() => handleAction(acc.id, 'sync')}
+                className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:text-[#00A878] cursor-pointer"
+                title="Sync balance"
+              >
+                <RefreshCw className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                disabled={busyId === acc.id}
+                onClick={() => handleAction(acc.id, 'disconnect')}
+                className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:text-amber-500 cursor-pointer"
+                title="Disconnect"
+              >
+                <Unlink className="w-4 h-4" />
+              </button>
+              <button
+                type="button"
+                disabled={busyId === acc.id}
+                onClick={() => handleAction(acc.id, 'revoke')}
+                className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:text-[#FF444F] cursor-pointer"
+                title="Revoke token"
+              >
+                <Ban className="w-4 h-4" />
+              </button>
+            </div>
+          </div>
+        ))
+      )}
+    </div>
+  );
+
   return (
     <div className="max-w-5xl mx-auto px-4 sm:px-8 py-6 space-y-6">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <h1 className="font-display text-2xl font-bold flex items-center gap-2">
-            <Copy className="w-6 h-6 text-[#FF444F]" /> Connected Deriv Accounts & Copy Desk
+            <Copy className="w-6 h-6 text-[#FF444F]" /> Your Connected Deriv Accounts
           </h1>
-          <p className="text-xs text-slate-500">Sync balances, manage OAuth2 authorizations, or link another Deriv login</p>
+          <p className="text-xs text-slate-500">
+            Strictly scoped to your personal login — Real &amp; Demo accounts stay completely separate.
+          </p>
         </div>
 
         <button
@@ -368,77 +456,23 @@ export const CopyTradingPage: React.FC = () => {
         </button>
       </div>
 
-      <div className="space-y-3">
-        {accounts.length === 0 ? (
-          <div className="p-8 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-center">
-            <p className="text-sm text-slate-500 mb-4">No external Deriv accounts connected yet.</p>
-            <button
-              type="button"
-              onClick={() => launchDerivOAuth('login')}
-              className="px-6 py-2.5 rounded-full bg-[#151820] dark:bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
-            >
-              Connect with Deriv OAuth2
-            </button>
-          </div>
-        ) : (
-          accounts.map((acc) => (
-            <div
-              key={acc.id}
-              className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-4"
-            >
-              <div>
-                <div className="flex items-center gap-2">
-                  <span className="font-mono tabular-nums font-bold text-sm">{acc.deriv_account_id}</span>
-                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-[#1958B7]/10 text-[#1958B7]">
-                    {acc.is_virtual ? 'DEMO' : 'REAL'}
-                  </span>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                      acc.status === 'active' ? 'bg-[#00A878]/15 text-[#00A878]' : 'bg-slate-200 text-slate-600'
-                    }`}
-                  >
-                    {acc.status}
-                  </span>
-                </div>
-                <p className="text-xs text-slate-500 mt-1">
-                  {acc.account_type} · {acc.platform.toUpperCase()} · {acc.currency}
-                </p>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <span className="font-mono tabular-nums text-base font-bold">{formatMoney(acc.balance)}</span>
-                <button
-                  type="button"
-                  disabled={busyId === acc.id}
-                  onClick={() => handleAction(acc.id, 'sync')}
-                  className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:text-[#00A878] cursor-pointer"
-                  title="Sync balance"
-                >
-                  <RefreshCw className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  disabled={busyId === acc.id}
-                  onClick={() => handleAction(acc.id, 'disconnect')}
-                  className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:text-amber-500 cursor-pointer"
-                  title="Disconnect"
-                >
-                  <Unlink className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  disabled={busyId === acc.id}
-                  onClick={() => handleAction(acc.id, 'revoke')}
-                  className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:text-[#FF444F] cursor-pointer"
-                  title="Revoke token"
-                >
-                  <Ban className="w-4 h-4" />
-                </button>
-              </div>
-            </div>
-          ))
-        )}
-      </div>
+      {accounts.length === 0 ? (
+        <div className="p-8 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-center">
+          <p className="text-sm text-slate-500 mb-4">No external Deriv accounts connected to your profile yet.</p>
+          <button
+            type="button"
+            onClick={() => launchDerivOAuth('login')}
+            className="px-6 py-2.5 rounded-full bg-[#151820] dark:bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
+          >
+            Connect with Deriv OAuth2
+          </button>
+        </div>
+      ) : (
+        <div className="space-y-6">
+          {renderGroup('Real Accounts', 'bg-[#FF444F]/15 text-[#FF444F]', realAccounts)}
+          {renderGroup('Demo Accounts', 'bg-[#1958B7]/15 text-[#1958B7]', demoAccounts)}
+        </div>
+      )}
     </div>
   );
 };

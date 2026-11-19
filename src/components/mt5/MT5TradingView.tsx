@@ -38,6 +38,8 @@ import {
   CheckCircle2,
   Wifi,
   WifiOff,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { apiFetch } from '../../lib/api';
@@ -144,6 +146,7 @@ export const MT5TradingView: React.FC = () => {
   const [catFilter, setCatFilter] = useState<'All' | MarketInstrument['category']>('All');
   const [mwSearch, setMwSearch] = useState('');
   const [showWatchlistOnly, setShowWatchlistOnly] = useState(false);
+  const [mobileMwOpen, setMobileMwOpen] = useState(false);
 
   // Chart & Data State
   const [timeframe, setTimeframe] = useState(900);
@@ -735,8 +738,13 @@ export const MT5TradingView: React.FC = () => {
       }
     }
 
-    // Open Order Lines
-    const symOpenOrders = orders.filter((o) => o.status === 'OPEN' && o.symbol === selectedSymbol);
+    // Open Order Lines (strictly matching active Real vs Demo mode)
+    const symOpenOrders = orders.filter(
+      (o) =>
+        o.status === 'OPEN' &&
+        o.symbol === selectedSymbol &&
+        (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+    );
     for (const o of symOpenOrders) {
       priceLinesRef.current.push(
         series.createPriceLine({
@@ -959,7 +967,7 @@ export const MT5TradingView: React.FC = () => {
 
   const handlePlaceOrder = (sideInput: string, contractTypeOverride?: string) => {
     if (placing) return;
-    if (accountMode === 'real' && activeConnectedAccount) {
+    if (accountMode === 'real') {
       setConfirmRealOrder({ sideInput, contractTypeOverride });
       return;
     }
@@ -1070,7 +1078,11 @@ export const MT5TradingView: React.FC = () => {
     });
   }, [instruments, showWatchlistOnly, watchlist, catFilter, mwSearch]);
 
-  const openOrders = orders.filter((o) => o.status === 'OPEN');
+  const openOrders = orders.filter(
+    (o) =>
+      o.status === 'OPEN' &&
+      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+  );
   const closedOrders = orders.filter((o) => o.status === 'CLOSED');
   const filteredClosedOrders = useMemo(() => {
     return closedOrders.filter((o) => {
@@ -1093,8 +1105,8 @@ export const MT5TradingView: React.FC = () => {
   const floatingPnl = openOrders.reduce((acc, o) => acc + Number(o.pnl || 0), 0);
   const usedMargin = openOrders.reduce((acc, o) => acc + Number(o.stake || 0), 0);
   const balance =
-    accountMode === 'real' && activeConnectedAccount
-      ? Number(activeConnectedAccount.balance)
+    accountMode === 'real'
+      ? Number(activeConnectedAccount?.balance ?? user?.real_wallets?.options ?? 0)
       : Number(user?.virtual_workspace_balance ?? 10000);
   const equity = balance + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);
@@ -1126,11 +1138,127 @@ export const MT5TradingView: React.FC = () => {
   ].filter(Boolean).length;
 
   return (
-    <div className="max-w-[1600px] mx-auto px-3 sm:px-6 pt-4 pb-8 space-y-4">
+    <div className="max-w-[1600px] mx-auto px-3 sm:px-6 pt-3 pb-8 space-y-3">
+      {/* Compact Mobile Market Switcher (Chart-first UX: never pushes chart below 75 instruments) */}
+      <div className="xl:hidden bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-2.5 space-y-2">
+        <div className="flex items-center justify-between gap-2">
+          <button
+            type="button"
+            onClick={() => setMobileMwOpen((v) => !v)}
+            className="flex items-center gap-2 min-w-0 text-left cursor-pointer"
+          >
+            <span className="px-2 py-0.5 rounded-lg bg-[#FF444F]/10 text-[#FF444F] font-mono-num text-[11px] font-bold shrink-0">
+              {selectedSymbol}
+            </span>
+            <span className="text-xs font-bold truncate">{activeInst?.display_name || selectedSymbol}</span>
+            <span className="inline-flex items-center gap-0.5 text-[11px] text-slate-400 shrink-0">
+              {mobileMwOpen ? <ChevronUp className="w-3.5 h-3.5" /> : <ChevronDown className="w-3.5 h-3.5" />}
+            </span>
+          </button>
+          <div className="flex items-center gap-2 font-mono-num text-[11px] shrink-0">
+            <span className="text-[#FF444F] font-bold">{currentBid.toFixed(decimals)}</span>
+            <span className="text-slate-400">/</span>
+            <span className="text-[#00A878] font-bold">{currentAsk.toFixed(decimals)}</span>
+          </div>
+        </div>
+
+        {/* Most-Traded Quick-Tap Bar */}
+        <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+          {instruments.slice(0, 6).map((inst) => (
+            <button
+              key={inst.symbol}
+              type="button"
+              onClick={() => {
+                setSelectedSymbol(inst.symbol);
+                setMobileMwOpen(false);
+              }}
+              className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap cursor-pointer ${
+                inst.symbol === selectedSymbol
+                  ? 'bg-[#151820] text-white dark:bg-[#FF444F]'
+                  : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+              }`}
+            >
+              {inst.display_name.replace(' Index', '')}
+            </button>
+          ))}
+        </div>
+
+        {mobileMwOpen && (
+          <div className="pt-2 border-t border-slate-100 dark:border-[#2A2F3D] space-y-2">
+            <div className="flex items-center gap-2">
+              <div className="flex-1 flex items-center gap-2 px-3 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319]">
+                <Search className="w-3.5 h-3.5 text-slate-400" />
+                <input
+                  type="text"
+                  value={mwSearch}
+                  onChange={(e) => setMwSearch(e.target.value)}
+                  placeholder="Search 75+ instruments..."
+                  className="flex-1 bg-transparent text-xs outline-none"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowWatchlistOnly(!showWatchlistOnly)}
+                className={`px-2.5 py-1.5 rounded-xl text-[11px] font-semibold flex items-center gap-1 cursor-pointer ${
+                  showWatchlistOnly ? 'bg-amber-500/15 text-amber-500' : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-500'
+                }`}
+              >
+                <Star className="w-3 h-3 fill-current" />
+              </button>
+            </div>
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+              {(['All', 'Synthetic', 'Forex', 'Crypto', 'Metals/Cmd', 'Indices'] as const).map((cat) => (
+                <button
+                  key={cat}
+                  type="button"
+                  onClick={() => setCatFilter(cat)}
+                  className={`px-2.5 py-1 rounded-full text-[11px] font-semibold whitespace-nowrap cursor-pointer ${
+                    catFilter === cat
+                      ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
+                      : 'text-slate-500 hover:bg-slate-100 dark:hover:bg-white/5'
+                  }`}
+                >
+                  {cat}
+                </button>
+              ))}
+            </div>
+            <div className="max-h-60 overflow-y-auto divide-y divide-slate-100 dark:divide-[#2A2F3D]">
+              {filteredInstruments.map((inst) => {
+                const t = ticks[inst.symbol];
+                const bid = t?.bid ?? inst.bid;
+                const ask = t?.ask ?? inst.ask;
+                const active = inst.symbol === selectedSymbol;
+                return (
+                  <button
+                    key={inst.symbol}
+                    type="button"
+                    onClick={() => {
+                      setSelectedSymbol(inst.symbol);
+                      setMobileMwOpen(false);
+                    }}
+                    className={`w-full px-2.5 py-2 flex items-center justify-between text-left cursor-pointer ${
+                      active ? 'bg-[#FF444F]/8' : ''
+                    }`}
+                  >
+                    <div className="min-w-0">
+                      <p className="text-xs font-semibold truncate">{inst.display_name}</p>
+                      <p className="text-[10px] text-slate-400">{inst.symbol}</p>
+                    </div>
+                    <span className="font-mono-num text-[11px] font-bold text-[#00A878]">
+                      {bid} / {ask}
+                    </span>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        )}
+      </div>
+
       {/* Top 3-Column Trading Workspace */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-        {/* Left MarketWatch Panel (3 cols) */}
-        <aside className="xl:col-span-3 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] flex flex-col max-h-[600px]">
+        {/* Desktop Left MarketWatch Panel (3 cols, hidden on mobile to keep Chart first) */}
+        <aside className="hidden xl:flex xl:col-span-3 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] flex-col max-h-[600px]">
           <div className="p-3 border-b border-slate-100 dark:border-[#2A2F3D] space-y-2.5">
             <div className="flex items-center justify-between">
               <h2 className="font-display text-sm font-bold">MarketWatch</h2>
@@ -1573,12 +1701,16 @@ export const MT5TradingView: React.FC = () => {
             <span className="font-semibold text-slate-500">Execution Mode</span>
             <span
               className={`px-2.5 py-0.5 rounded-full font-bold ${
-                accountMode === 'real' && activeConnectedAccount
+                accountMode === 'real'
                   ? 'bg-[#FF444F]/15 text-[#FF444F]'
                   : 'bg-[#00A878]/15 text-[#00A878]'
               }`}
             >
-              {accountMode === 'real' && activeConnectedAccount ? `REAL (${activeConnectedAccount.deriv_account_id})` : 'DEMO WORKSPACE'}
+              {accountMode === 'real'
+                ? activeConnectedAccount
+                  ? `REAL (${activeConnectedAccount.deriv_account_id})`
+                  : 'REAL WALLET (DB)'
+                : 'DEMO WORKSPACE'}
             </span>
           </div>
 
@@ -2231,7 +2363,11 @@ export const MT5TradingView: React.FC = () => {
             </div>
             <div className="p-4 rounded-2xl bg-[#F8F9FB] dark:bg-[#111319] space-y-1.5 text-xs">
               <p>
-                Account: <strong className="font-mono-num">{activeConnectedAccount?.deriv_account_id}</strong> (Real Funds)
+                Account:{' '}
+                <strong className="font-mono-num">
+                  {activeConnectedAccount?.deriv_account_id || 'Real DB USD Wallet'}
+                </strong>{' '}
+                (Real Funds)
               </p>
               <p>
                 Instrument: <strong>{selectedSymbol}</strong> · Side: <strong>{confirmRealOrder.sideInput}</strong>

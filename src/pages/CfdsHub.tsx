@@ -24,12 +24,18 @@ export const CfdsHub: React.FC = () => {
       (a.platform?.includes('mt5') || a.platform === 'ctrader') &&
       (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
   );
+  const stdWalletBal =
+    accountMode === 'real'
+      ? Number(user?.real_wallets?.mt5_standard ?? 0)
+      : Number(user?.demo_wallets?.mt5_standard ?? 0);
+  const goldWalletBal =
+    accountMode === 'real'
+      ? Number(user?.real_wallets?.mt5_gold ?? 0)
+      : Number(user?.demo_wallets?.mt5_gold ?? 0);
   const totalValue =
     cfdAccounts.length > 0
       ? cfdAccounts.reduce((acc, a) => acc + Number(a.balance || 0), 0)
-      : accountMode === 'demo'
-        ? Number(user?.virtual_workspace_balance ?? 10000)
-        : 0;
+      : stdWalletBal + goldWalletBal;
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -126,7 +132,14 @@ export const CfdsHub: React.FC = () => {
                   id: 0,
                   deriv_account_id: accountMode === 'demo' ? 'MT5-DEMO-STD' : 'MT5-REAL-STD',
                   account_type: 'CFDs | Standard',
-                  balance: totalValue,
+                  balance: stdWalletBal,
+                  currency: 'USD',
+                },
+                {
+                  id: -1,
+                  deriv_account_id: accountMode === 'demo' ? 'MT5-DEMO-GOLD' : 'MT5-REAL-GOLD',
+                  account_type: 'CFDs | Gold',
+                  balance: goldWalletBal,
                   currency: 'USD',
                 },
               ]
