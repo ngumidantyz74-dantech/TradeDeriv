@@ -10,6 +10,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { config } from './server/config.ts';
 import {
   pool,
+  query,
   ensureDatabaseSchema,
   checkDatabaseHealth,
   requireDb,
@@ -136,9 +137,26 @@ async function bootstrapServer() {
 
     const state = {
       userId,
-      symbols: new Set<string>(['1HZ100V', '1HZ15V', '1HZ10V', '1HZ25V', '1HZ75V', 'R_100']),
+      symbols: new Set<string>(['1HZ100V', '1HZ15V', '1HZ10V', '1HZ25V', '1HZ75V', 'R_100', 'cryBTCUSD']),
     };
     clientSubscriptions.set(socket, state);
+
+    // Ensure all active open positions for this user stream live ticks immediately
+    if (userId && pool) {
+      query<{ symbol: string }>(
+        "SELECT DISTINCT symbol FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN'",
+        [userId]
+      )
+        .then((rows) => {
+          for (const r of rows) {
+            if (r.symbol) {
+              state.symbols.add(r.symbol);
+              derivWs.ensureSymbolSubscribed(r.symbol).catch(() => {});
+            }
+          }
+        })
+        .catch(() => {});
+    }
 
     // Send initial price snapshot
     socket.send(JSON.stringify({ type: 'ticks_snapshot', ticks: derivWs.getAllLatestTicks() }));
@@ -146,9 +164,28 @@ async function bootstrapServer() {
     socket.on('message', (raw) => {
       try {
         const msg = JSON.parse(raw.toString());
+        if (msg.type === 'ping') {
+          if (socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'pong', ts: Date.now() }));
+          }
+          return;
+        }
         if (msg.type === 'subscribe' && msg.symbol) {
-          state.symbols.add(String(msg.symbol));
-          derivWs.ensureSymbolSubscribed(String(msg.symbol)).catch(() => {});
+          const sym = String(msg.symbol);
+          state.symbols.add(sym);
+          derivWs.ensureSymbolSubscribed(sym).catch(() => {});
+          const latest = derivWs.getLatestTick(sym);
+          if (latest && socket.readyState === WebSocket.OPEN) {
+            socket.send(JSON.stringify({ type: 'tick', tick: latest }));
+          }
+        }
+        if (msg.type === 'subscribe_many' && Array.isArray(msg.symbols)) {
+          for (const rawSym of msg.symbols) {
+            const sym = String(rawSym || '').trim();
+            if (!sym) continue;
+            state.symbols.add(sym);
+            derivWs.ensureSymbolSubscribed(sym).catch(() => {});
+          }
         }
         if (msg.type === 'unsubscribe' && msg.symbol) {
           state.symbols.delete(String(msg.symbol));

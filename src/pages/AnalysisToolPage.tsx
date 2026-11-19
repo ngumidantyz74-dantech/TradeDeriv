@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   Activity,
   TrendingUp,
@@ -16,7 +16,7 @@ import {
   Search,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { apiFetch, fetchDerivTickHistoryDirect, subscribeDerivTicksDirect } from '../lib/api';
+import { apiFetch, fetchDerivTickHistoryDirect, subscribeDerivTicksDirect, sanitizeUiError } from '../lib/api';
 import type { SmcAnalysis, BuyLowSellHighResult, StrategySetup } from '../lib/quant-engine';
 
 type AnalyserTab =
@@ -189,38 +189,53 @@ export const AnalysisToolPage: React.FC = () => {
     return () => clearInterval(timer);
   }, []);
 
+  const radarReqRef = useRef(0);
+  const analyzeReqRef = useRef(0);
+
   const loadRadar = useCallback(async () => {
+    const reqId = ++radarReqRef.current;
     setRadarLoading(true);
     setRadarError(null);
     try {
       const res = await apiFetch<{
         instruments: RadarInstrument[];
         scannedAt: string;
-      }>(`/api/intelligence/radar?granularity=${granularity}`, { skipAuth: true });
+      }>(`/api/intelligence/radar?granularity=${granularity}&_t=${Date.now()}`, {
+        skipAuth: true,
+        cache: 'no-store',
+      });
+      if (radarReqRef.current !== reqId) return;
       setRadarRows(res.instruments || []);
       setRadarScannedAt(res.scannedAt || null);
     } catch (err) {
-      setRadarError(err instanceof Error ? err.message : 'Unable to load Market Radar');
+      if (radarReqRef.current !== reqId) return;
+      setRadarError(sanitizeUiError(err, 'Unable to load Market Radar right now.'));
     } finally {
-      setRadarLoading(false);
+      if (radarReqRef.current === reqId) setRadarLoading(false);
     }
   }, [granularity]);
 
   const loadAnalyze = useCallback(async () => {
+    const reqId = ++analyzeReqRef.current;
     setAnalyzeLoading(true);
     try {
       const res = await apiFetch<AnalyzeResponse>(
-        `/api/intelligence/analyze?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${granularity}&count=200`,
-        { skipAuth: true }
+        `/api/intelligence/analyze?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${granularity}&count=200&_t=${Date.now()}`,
+        { skipAuth: true, cache: 'no-store' }
       );
-      setAnalyzeData(res);
+      if (analyzeReqRef.current !== reqId) return;
+      setAnalyzeData({
+        ...res,
+        error: res.error ? sanitizeUiError(res.error, 'Analysis temporarily unavailable.') : null,
+      });
     } catch (err) {
+      if (analyzeReqRef.current !== reqId) return;
       setAnalyzeData({
         symbol: selectedSymbol,
         granularity,
         timeframe: `${Math.round(granularity / 60)}m`,
         source: 'unavailable',
-        error: err instanceof Error ? err.message : 'Analysis unavailable',
+        error: sanitizeUiError(err, 'Analysis temporarily unavailable.'),
         lastUpdated: null,
         candlesCount: 0,
         indicators: null,
@@ -229,14 +244,17 @@ export const AnalysisToolPage: React.FC = () => {
         setups: [],
       });
     } finally {
-      setAnalyzeLoading(false);
+      if (analyzeReqRef.current === reqId) setAnalyzeLoading(false);
     }
   }, [selectedSymbol, granularity]);
 
   const loadSessions = useCallback(async () => {
     setSessionsLoading(true);
     try {
-      const res = await apiFetch<SessionsResponse>('/api/intelligence/sessions', { skipAuth: true });
+      const res = await apiFetch<SessionsResponse>(`/api/intelligence/sessions?_t=${Date.now()}`, {
+        skipAuth: true,
+        cache: 'no-store',
+      });
       setSessionsData(res);
     } catch {
       // ignore transient error
@@ -327,6 +345,7 @@ export const AnalysisToolPage: React.FC = () => {
     const rawUpper = String(contractType || '').toUpperCase().trim();
     const normalizedContractType =
       rawUpper === 'BUY' ? 'MULTUP' : rawUpper === 'SELL' ? 'MULTDOWN' : rawUpper || 'MULTUP';
+    const isMultiplier = normalizedContractType === 'MULTUP' || normalizedContractType === 'MULTDOWN';
     try {
       await apiFetch('/api/orders', {
         method: 'POST',
@@ -335,9 +354,10 @@ export const AnalysisToolPage: React.FC = () => {
           side: contractType,
           contractType: normalizedContractType,
           stake: Number(stake) || 5,
+          multiplier: 100,
           barrier: customBarrier,
-          duration: extra?.duration ?? 1,
-          durationUnit: extra?.durationUnit ?? 't',
+          duration: isMultiplier ? undefined : extra?.duration ?? 5,
+          durationUnit: isMultiplier ? undefined : extra?.durationUnit ?? 't',
           strategyKey: extra?.strategyKey,
           slPrice: extra?.slPrice ?? undefined,
           tpPrice: extra?.tpPrice ?? undefined,
@@ -350,7 +370,7 @@ export const AnalysisToolPage: React.FC = () => {
       await Promise.all([refreshOrders(), refreshAll()]);
       showToast(`Executed ${contractType} ($${stake}) on ${targetSymbol}`, 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Execution failed', 'error');
+      showToast(sanitizeUiError(err, 'Execution failed'), 'error');
     } finally {
       setExecuting(false);
     }
@@ -377,7 +397,7 @@ export const AnalysisToolPage: React.FC = () => {
       setCopilotAnswer(res.answer);
       setCopilotSummary(res.groundedSummary || null);
     } catch (err) {
-      setCopilotError(err instanceof Error ? err.message : 'Co-Pilot analysis failed');
+      setCopilotError(sanitizeUiError(err, 'Market intelligence assistant is temporarily busy. Please try again.'));
     } finally {
       setCopilotBusy(false);
     }
@@ -386,6 +406,7 @@ export const AnalysisToolPage: React.FC = () => {
   const openInChart = (sym: string) => {
     setSelectedSymbol(sym);
     setActiveTab('mt5-tv');
+    window.scrollTo({ top: 0, behavior: 'auto' });
   };
 
   const filteredRadar = useMemo(() => {
@@ -595,10 +616,18 @@ export const AnalysisToolPage: React.FC = () => {
                     {filteredRadar.map((row) => (
                       <tr key={row.symbol} className="hover:bg-[#F8F9FB] dark:hover:bg-[#111319]/60">
                         <td className="px-4 py-3">
-                          <div className="font-bold text-[#0E1117] dark:text-white">{row.displayName}</div>
-                          <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                            {row.symbol} · {row.category}
-                          </div>
+                          <button
+                            type="button"
+                            onClick={() => openInChart(row.symbol)}
+                            className="text-left group cursor-pointer"
+                          >
+                            <div className="font-bold text-[#0E1117] dark:text-white group-hover:text-[#FF444F] transition-colors">
+                              {row.displayName}
+                            </div>
+                            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
+                              {row.symbol} · {row.category}
+                            </div>
+                          </button>
                         </td>
                         <td className="px-4 py-3 text-right font-mono tabular-nums font-bold">
                           {row.price !== null ? row.price.toFixed(row.price < 10 ? 4 : 2) : 'Unavailable'}
@@ -1144,7 +1173,7 @@ export const AnalysisToolPage: React.FC = () => {
                 <Sparkles className="w-5 h-5 text-[#FF444F]" /> TradeDeriv Grounded AI Co-Pilot
               </h2>
               <p className="text-xs text-slate-500">
-                Server-side Gemini analysis grounded strictly in live Deriv candles, SMC zones, risk rules, and open positions.
+                Institutional quantitative analysis grounded strictly in live Deriv candles, SMC zones, risk rules, and open positions.
               </p>
             </div>
             <div className="flex flex-wrap gap-1.5">

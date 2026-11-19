@@ -16,7 +16,15 @@ import {
 
 const router = Router();
 
+router.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 const TIMEFRAME_LABELS: Record<number, string> = {
+  1: '1t',
   60: '1m',
   300: '5m',
   900: '15m',
@@ -40,7 +48,66 @@ const RADAR_SYMBOLS = [
   'cryBTCUSD',
 ];
 
-const radarCache = new Map<number, { ts: number; data: any }>();
+function sanitizePublicError(err: unknown, fallback = 'Live market service is temporarily busy. Please try again.'): string {
+  const raw = err instanceof Error ? err.message : String(err || '');
+  const trimmed = raw.trim();
+  if (!trimmed) return fallback;
+  if (
+    trimmed.startsWith('{') ||
+    trimmed.includes('"error"') ||
+    trimmed.includes('UNAVAILABLE') ||
+    trimmed.includes('RESOURCE_EXHAUSTED') ||
+    /gemini|genai|GEMINI_API_KEY|sdk|stack|sql|postgres|neon/i.test(trimmed)
+  ) {
+    return fallback;
+  }
+  if (/MarketIsClosed|market is closed/i.test(trimmed)) {
+    return 'Market is currently closed for this instrument. Try 24/7 Volatility indices or check session hours.';
+  }
+  return trimmed.slice(0, 220);
+}
+
+function buildFallbackQuantitativeBrief(payload: any, prompt: string): string {
+  const sym = payload.symbol;
+  const tf = payload.timeframe;
+  const quote = Number(payload.liveQuote || 0);
+  const ind = payload.indicators || {};
+  const smc = payload.smc || {};
+  const dr = smc.dealingRange || {};
+  const blsh = payload.buyLowSellHigh || {};
+  const openPos = Array.isArray(payload.userOpenPositions) ? payload.userOpenPositions : [];
+  const risk = payload.userRiskSettings || {};
+  const openStake = openPos.reduce((s: number, p: any) => s + Number(p.stake || 0), 0);
+  const openPnl = openPos.reduce((s: number, p: any) => s + Number(p.pnl || 0), 0);
+  const maxExp = Number(risk.max_exposure_usd || 500);
+
+  const lines: string[] = [
+    `### ${sym} (${tf}) Live Quantitative Brief`,
+    `_Note: AI narrative capacity is temporarily busy — displaying direct live quantitative telemetry for: "${prompt}"_`,
+    '',
+    `- **Live Spot:** ${quote}`,
+    `- **SMC Bias & Range:** ${String(smc.bias || 'neutral').toUpperCase()} | ${dr.zone || 'Equilibrium'} (${Number(dr.currentPct || 50).toFixed(1)}% of dealing range)`,
+    `- **Momentum & Trend:** RSI(14) = ${ind.rsi14 !== null && ind.rsi14 !== undefined ? Number(ind.rsi14).toFixed(1) : '—'} | ADX(14) = ${ind.adx14?.adx !== null && ind.adx14?.adx !== undefined ? Number(ind.adx14.adx).toFixed(1) : '—'} | MACD Hist = ${ind.macd?.histogram !== null && ind.macd?.histogram !== undefined ? Number(ind.macd.histogram).toFixed(4) : '—'}`,
+    `- **Buy Low / Sell High:** ${String(blsh.action || 'WAIT').replace(/_/g, ' ')} (${blsh.regimeLabel || 'Evaluating range'})`,
+    `- **Key Levels:** Support ${(smc.supportLevels || []).slice(0, 2).join(', ') || '—'} | Resistance ${(smc.resistanceLevels || []).slice(0, 2).join(', ') || '—'}`,
+  ];
+
+  if (blsh.stopLoss || blsh.takeProfit) {
+    lines.push(
+      `- **Suggested Invalidation / Target:** SL ${blsh.stopLoss ?? '—'} | TP ${blsh.takeProfit ?? '—'} (R:R ${blsh.riskReward ?? '—'}:1)`
+    );
+  }
+
+  lines.push(
+    '',
+    '### Open Exposure & Risk Audit',
+    `- **Active Open Trades:** ${openPos.length} | **Used Margin:** $${openStake.toFixed(2)} / $${maxExp.toFixed(2)} limit`,
+    `- **Floating P/L:** ${openPnl >= 0 ? '+' : ''}$${openPnl.toFixed(2)} | **Daily Loss Cap:** $${Number(risk.daily_loss_limit_usd || 150).toFixed(2)}`,
+    `- **Compliance Status:** ${openStake <= maxExp ? 'Within configured exposure limits' : 'Exceeds configured max exposure limit — reduce open stake'}`
+  );
+
+  return lines.join('\n');
+}
 
 function summarizeLatestIndicators(candles: any[], ind: ReturnType<typeof computeAllIndicators>) {
   const n = candles.length - 1;
@@ -138,16 +205,10 @@ router.get('/intelligence/analyze', async (req, res) => {
   });
 });
 
-// 2. Multi-Instrument Market Radar Scanner
+// 2. Multi-Instrument Market Radar Scanner (Always live, zero cache)
 router.get('/intelligence/radar', async (req, res) => {
   const granularity = Number(req.query.granularity || 900);
   const tfLabel = TIMEFRAME_LABELS[granularity] || '15m';
-
-  const cached = radarCache.get(granularity);
-  if (cached && Date.now() - cached.ts < 20000) {
-    res.json({ ...cached.data, cached: true });
-    return;
-  }
 
   const results = await Promise.all(
     RADAR_SYMBOLS.map(async (sym) => {
@@ -161,7 +222,7 @@ router.get('/intelligence/radar', async (req, res) => {
           category: meta?.category || 'Market',
           price: tick?.quote ?? meta?.base_price ?? null,
           source: detailed.source,
-          error: detailed.error || 'Candles unavailable',
+          error: sanitizePublicError(detailed.error, 'Market closed or candles temporarily unavailable'),
           volatilityPct: null,
           trendStrengthAdx: null,
           rsi14: null,
@@ -187,7 +248,7 @@ router.get('/intelligence/radar', async (req, res) => {
         symbol: sym,
         displayName: meta?.display_name || sym,
         category: meta?.category || 'Market',
-        price: tick?.quote ?? close,
+        price: tick?.source === 'deriv_ws' ? tick.quote : close,
         source: detailed.source,
         error: null,
         volatilityPct,
@@ -210,7 +271,6 @@ router.get('/intelligence/radar', async (req, res) => {
     scannedAt: new Date().toISOString(),
     instruments: results,
   };
-  radarCache.set(granularity, { ts: Date.now(), data: payload });
   res.json({ ...payload, cached: false });
 });
 
@@ -295,16 +355,8 @@ router.get('/intelligence/sessions', async (_req, res) => {
   });
 });
 
-// 4. Server-Side Gemini AI Trading Co-Pilot (Strictly Grounded in Live Deriv Data)
+// 4. Server-Side AI Trading Co-Pilot (Strictly Grounded in Live Deriv Data, Sanitised + Retry + Quantitative Fallback)
 router.post('/intelligence/copilot', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const apiKey = process.env.GEMINI_API_KEY;
-  if (!apiKey) {
-    res.status(503).json({
-      error: 'GEMINI_API_KEY is not configured on the server. AI Co-Pilot cannot run without a valid key.',
-    });
-    return;
-  }
-
   try {
     const {
       symbol = '1HZ100V',
@@ -314,13 +366,14 @@ router.post('/intelligence/copilot', requireDb, requireAuth, async (req: AuthReq
 
     const tfLabel = TIMEFRAME_LABELS[Number(granularity)] || '15m';
     const detailed = await derivWs.fetchCandlesDetailed(String(symbol), Number(granularity), 160);
-    const tick = derivWs.getLatestTick(String(symbol));
+    const tick = await derivWs.getLiveQuote(String(symbol)).catch(() => derivWs.getLatestTick(String(symbol)));
 
     if (detailed.candles.length < 30) {
       res.status(503).json({
-        error:
-          detailed.error ||
-          'Cannot run grounded AI Co-Pilot analysis because real Deriv historical candles are currently unavailable.',
+        error: sanitizePublicError(
+          detailed.error,
+          `Live historical candles for ${symbol} are temporarily unavailable (market may be closed). Switch to a 24/7 Volatility index or retry.`
+        ),
       });
       return;
     }
@@ -357,44 +410,82 @@ router.post('/intelligence/copilot', requireDb, requireAuth, async (req: AuthReq
       userRiskSettings: risk || { risk_per_trade_pct: 1.5, daily_loss_limit_usd: 150, max_exposure_usd: 500 },
     };
 
+    const groundedSummary = {
+      bias: smc.bias,
+      dealingZone: smc.dealingRange.zone,
+      rangePct: smc.dealingRange.currentPct,
+      rsi14: latestInd?.rsi14,
+      adx: latestInd?.adx14.adx,
+      buyLowSellHighAction: blsh.action,
+      setupsCount: setups.length,
+    };
+
+    const apiKey = process.env.GEMINI_API_KEY;
+    if (!apiKey) {
+      await logSystemError('ai-copilot', 'AI narrative service key unavailable; served quant brief', 'warn', {
+        userId: req.user?.id,
+      });
+      res.json({
+        model: 'quant-engine',
+        degraded: true,
+        symbol: String(symbol),
+        timeframe: tfLabel,
+        answer: buildFallbackQuantitativeBrief(groundedPayload, String(prompt)),
+        groundedSummary,
+      });
+      return;
+    }
+
     const ai = new GoogleGenAI({
       apiKey,
       httpOptions: { headers: { 'User-Agent': 'aistudio-build' } },
     });
 
-    const response = await ai.models.generateContent({
-      model: 'gemini-4-hydrogen',
-      contents: `Live Grounded Market & Portfolio Snapshot (JSON):\n${JSON.stringify(groundedPayload, null, 2)}\n\nTrader Question:\n${String(prompt)}`,
-      config: {
-        systemInstruction:
-          'You are the TradeDeriv Institutional Trading Co-Pilot. Analyze ONLY the supplied live Deriv market data, indicators, SMC structure, Buy Low/Sell High regime, and user open positions/risk settings. Cite exact numbers from the JSON. Never invent prices, never fabricate news, and never guarantee profits or claim certain outcomes. State invalidation levels, risk-reward trade-offs, and whether current exposure complies with the user risk limits. Keep the output concise, structured with clear markdown headings and bullet points.',
-      },
-    });
+    const generateBrief = async () => {
+      const response = await ai.models.generateContent({
+        model: 'gemini-4-hydrogen',
+        contents: `Live Grounded Market & Portfolio Snapshot (JSON):\n${JSON.stringify(groundedPayload, null, 2)}\n\nTrader Question:\n${String(prompt)}`,
+        config: {
+          systemInstruction:
+            'You are the TradeDeriv Institutional Trading Co-Pilot. Analyze ONLY the supplied live Deriv market data, indicators, SMC structure, Buy Low/Sell High regime, and user open positions/risk settings. Cite exact numbers from the JSON. Never invent prices, never fabricate news, and never guarantee profits or claim certain outcomes. State invalidation levels, risk-reward trade-offs, and whether current exposure complies with the user risk limits. Keep the output concise, structured with clear markdown headings and bullet points.',
+        },
+      });
+      const text = (response.text || '').trim();
+      if (!text) throw new Error('Empty narrative output');
+      return text;
+    };
 
-    const answer = (response.text || '').trim();
-    if (!answer) {
-      throw new Error('Gemini returned an empty response');
+    let answer = '';
+    let degraded = false;
+    try {
+      answer = await generateBrief();
+    } catch (firstErr) {
+      await new Promise((r) => setTimeout(r, 650));
+      try {
+        answer = await generateBrief();
+      } catch (secondErr) {
+        const rawErr =
+          secondErr instanceof Error ? secondErr.message : firstErr instanceof Error ? firstErr.message : 'Upstream busy';
+        await logSystemError('ai-copilot', rawErr, 'warn', { userId: req.user?.id, symbol });
+        answer = buildFallbackQuantitativeBrief(groundedPayload, String(prompt));
+        degraded = true;
+      }
     }
 
     res.json({
-      model: 'gemini-4-hydrogen',
+      model: degraded ? 'quant-engine' : 'copilot-live',
+      degraded,
       symbol: String(symbol),
       timeframe: tfLabel,
       answer,
-      groundedSummary: {
-        bias: smc.bias,
-        dealingZone: smc.dealingRange.zone,
-        rangePct: smc.dealingRange.currentPct,
-        rsi14: latestInd?.rsi14,
-        adx: latestInd?.adx14.adx,
-        buyLowSellHighAction: blsh.action,
-        setupsCount: setups.length,
-      },
+      groundedSummary,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : 'AI Co-Pilot upstream failure';
-    await logSystemError('ai-copilot', msg, 'error', { userId: req.user?.id });
-    res.status(502).json({ error: msg });
+    const rawMsg = err instanceof Error ? err.message : 'Co-Pilot analysis interrupted';
+    await logSystemError('ai-copilot', rawMsg, 'error', { userId: req.user?.id });
+    res.status(503).json({
+      error: sanitizePublicError(err, 'Live analysis is temporarily unavailable. Please retry in a few seconds.'),
+    });
   }
 });
 

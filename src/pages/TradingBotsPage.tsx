@@ -11,7 +11,7 @@ import {
   CheckCircle2,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { apiFetch } from '../lib/api';
+import { apiFetch, sanitizeUiError } from '../lib/api';
 import type { BotStrategy } from '../types';
 import type { StrategyDefinition, BacktestReport, StrategyKey } from '../lib/quant-engine';
 
@@ -82,10 +82,18 @@ export const TradingBotsPage: React.FC = () => {
 
   const loadStrategyLab = useCallback(async () => {
     try {
+      const ts = Date.now();
       const [catRes, userRes, runsRes] = await Promise.all([
-        apiFetch<{ strategies: StrategyDefinition[] }>('/api/strategies/catalog', { skipAuth: true }),
-        apiFetch<{ strategies: UserStrategyRow[] }>('/api/strategies/user').catch(() => ({ strategies: [] })),
-        apiFetch<{ runs: any[] }>('/api/strategies/backtests').catch(() => ({ runs: [] })),
+        apiFetch<{ strategies: StrategyDefinition[] }>(`/api/strategies/catalog?_t=${ts}`, {
+          skipAuth: true,
+          cache: 'no-store',
+        }),
+        apiFetch<{ strategies: UserStrategyRow[] }>(`/api/strategies/user?_t=${ts}`, { cache: 'no-store' }).catch(
+          () => ({ strategies: [] })
+        ),
+        apiFetch<{ runs: any[] }>(`/api/strategies/backtests?_t=${ts}`, { cache: 'no-store' }).catch(() => ({
+          runs: [],
+        })),
       ]);
       setCatalog(catRes.strategies || []);
       setUserStrategies(userRes.strategies || []);
@@ -96,7 +104,10 @@ export const TradingBotsPage: React.FC = () => {
   }, []);
 
   useEffect(() => {
-    apiFetch<{ strategies: BotStrategy[] }>('/api/bots/strategies', { skipAuth: true })
+    apiFetch<{ strategies: BotStrategy[] }>(`/api/bots/strategies?_t=${Date.now()}`, {
+      skipAuth: true,
+      cache: 'no-store',
+    })
       .then((res) => setStrategies(res.strategies || []))
       .catch(() => {});
     loadStrategyLab();
@@ -153,7 +164,7 @@ export const TradingBotsPage: React.FC = () => {
       await loadStrategyLab();
       showToast(`Saved configuration for ${def?.name || selectedKey}`, 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to save strategy config', 'error');
+      showToast(sanitizeUiError(err, 'Failed to save strategy config'), 'error');
     } finally {
       setSavingConfig(false);
     }
@@ -184,7 +195,7 @@ export const TradingBotsPage: React.FC = () => {
       await loadStrategyLab();
       showToast('Backtest completed on real Deriv historical candles', 'success');
     } catch (err) {
-      setBacktestError(err instanceof Error ? err.message : 'Backtest unavailable');
+      setBacktestError(sanitizeUiError(err, 'Backtest temporarily unavailable. Please retry in a moment.'));
     } finally {
       setBacktesting(false);
     }
@@ -221,7 +232,7 @@ export const TradingBotsPage: React.FC = () => {
       showToast(`${s.name} launched in ${accountMode.toUpperCase()} Bot Engine`, 'success');
       setActiveTab('bot-builder');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to start strategy', 'error');
+      showToast(sanitizeUiError(err, 'Failed to start strategy'), 'error');
     } finally {
       setRunningSlug(null);
     }

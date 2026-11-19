@@ -45,7 +45,7 @@ export const HomeHub: React.FC = () => {
   const [perfSummary, setPerfSummary] = useState<any>(null);
 
   useEffect(() => {
-    apiFetch('/api/analytics/performance')
+    apiFetch(`/api/analytics/performance?_t=${Date.now()}`, { cache: 'no-store' })
       .then((res) => setPerfSummary(res))
       .catch(() => {});
   }, [orders.length]);
@@ -420,7 +420,7 @@ export const HomeHub: React.FC = () => {
               </span>
               <h3 className="font-display text-base font-bold mt-1">Market Radar & AI Co-Pilot</h3>
               <p className="text-xs text-slate-400 mt-1">
-                Multi-instrument volatility scanner, BOS/CHoCH, Order Blocks, FVG detection, and Gemini market reasoning.
+                Multi-instrument volatility scanner, BOS/CHoCH, Order Blocks, FVG detection, and AI market reasoning.
               </p>
             </button>
 

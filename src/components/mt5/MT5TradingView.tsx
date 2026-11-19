@@ -40,9 +40,10 @@ import {
   WifiOff,
   ChevronDown,
   ChevronUp,
+  Edit3,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
-import { apiFetch } from '../../lib/api';
+import { apiFetch, sanitizeUiError } from '../../lib/api';
 import { getCanonicalBalances } from '../../lib/balances';
 import { computeAllIndicators, STRATEGY_CATALOG } from '../../lib/quant-engine';
 import type { CandleData, MarketInstrument, WorkspacePreferences } from '../../types';
@@ -155,9 +156,25 @@ export const MT5TradingView: React.FC = () => {
   const [candles, setCandles] = useState<CandleData[]>([]);
   const [candleSource, setCandleSource] = useState<'deriv_ws' | 'unavailable'>('deriv_ws');
   const [candleError, setCandleError] = useState<string | null>(null);
+  const [marketClosedReason, setMarketClosedReason] = useState<string | null>(null);
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [indPanelOpen, setIndPanelOpen] = useState(false);
+  const [editingLimitsOrder, setEditingLimitsOrder] = useState<{
+    id: number;
+    symbol: string;
+    side: string;
+    contractType: string;
+    stake: number;
+    multiplier: number;
+    entryPrice: number;
+    currentPrice: number;
+    slPriceStr: string;
+    tpPriceStr: string;
+    slUsdStr: string;
+    tpUsdStr: string;
+  } | null>(null);
+  const [savingLimits, setSavingLimits] = useState(false);
   const [ohlcHover, setOhlcHover] = useState<{
     open: number;
     high: number;
@@ -278,6 +295,11 @@ export const MT5TradingView: React.FC = () => {
   const trendSeriesRef = useRef<Array<ISeriesApi<'Line'>>>([]);
   const priceLinesRef = useRef<IPriceLine[]>([]);
   const liveBarRef = useRef<CandleData | null>(null);
+  const candlesRef = useRef<CandleData[]>([]);
+  candlesRef.current = candles;
+  const candleReqIdRef = useRef(0);
+  const initialFitKeyRef = useRef('');
+  const lastCandleSyncTsRef = useRef(0);
 
   const activeInst = useMemo(
     () => instruments.find((i) => i.symbol === selectedSymbol) || instruments[0],
@@ -303,34 +325,57 @@ export const MT5TradingView: React.FC = () => {
       : (activeInst?.ask ?? currentPrice);
   const chartMode: ChartMode = indPrefs.chartMode || 'candles';
 
-  // Fetch candles
+  // Fetch live uncached candles with race-condition protection
   const loadCandles = useCallback(async () => {
+    const reqId = ++candleReqIdRef.current;
     try {
       const res = await apiFetch<{
         candles: CandleData[];
         source?: 'deriv_ws' | 'unavailable';
         error?: string | null;
+        marketClosed?: boolean;
         lastUpdated?: string;
-      }>(`/api/market/candles?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${timeframe}&count=180`, {
-        skipAuth: true,
-      });
+      }>(
+        `/api/market/candles?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${timeframe}&count=180&_t=${Date.now()}`,
+        {
+          skipAuth: true,
+          cache: 'no-store',
+        }
+      );
+      if (candleReqIdRef.current !== reqId) return;
       setCandles(res.candles || []);
       setCandleSource(res.source || (res.candles?.length ? 'deriv_ws' : 'unavailable'));
-      setCandleError(res.error || null);
+      const cleanErr = res.error ? sanitizeUiError(res.error, 'Live candles temporarily unavailable.') : null;
+      setCandleError(cleanErr);
+      setMarketClosedReason(
+        res.marketClosed
+          ? cleanErr || 'This market is currently off-hours on Deriv. Live pricing resumes on session open.'
+          : null
+      );
       setLastUpdated(res.lastUpdated || new Date().toISOString());
     } catch (err) {
+      if (candleReqIdRef.current !== reqId) return;
       setCandles([]);
       setCandleSource('unavailable');
-      setCandleError(err instanceof Error ? err.message : 'Unable to load candles');
+      setMarketClosedReason(null);
+      setCandleError(sanitizeUiError(err, 'Unable to load live candles from Deriv'));
     }
   }, [selectedSymbol, timeframe]);
 
   useEffect(() => {
+    // Reset stale symbol/timeframe bars immediately on switch so old data never lingers
+    setCandles([]);
+    liveBarRef.current = null;
+    setOhlcHover(null);
+    setCandleError(null);
+    setMarketClosedReason(null);
+    initialFitKeyRef.current = '';
+
     loadCandles();
-    const intervalMs = timeframe <= 60 ? 4000 : 12000;
+    const intervalMs = timeframe <= 60 ? 2000 : timeframe <= 900 ? 4000 : 8000;
     const timer = setInterval(loadCandles, intervalMs);
     return () => clearInterval(timer);
-  }, [loadCandles, timeframe]);
+  }, [loadCandles, selectedSymbol, timeframe]);
 
   // Fetch SMC analysis when enabled
   useEffect(() => {
@@ -339,8 +384,9 @@ export const MT5TradingView: React.FC = () => {
       return;
     }
     const g = timeframe < 60 ? 60 : timeframe;
-    apiFetch(`/api/intelligence/analyze?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${g}&count=160`, {
+    apiFetch(`/api/intelligence/analyze?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${g}&count=160&_t=${Date.now()}`, {
       skipAuth: true,
+      cache: 'no-store',
     })
       .then((res) => setSmcData(res))
       .catch(() => setSmcData(null));
@@ -404,8 +450,38 @@ export const MT5TradingView: React.FC = () => {
         horzLines: { color: isDark ? '#1F2430' : '#F1F5F9' },
       },
       crosshair: { mode: CrosshairMode.Normal },
+      localization: {
+        timeFormatter: (t: any) => {
+          const sec = typeof t === 'number' ? t : 0;
+          if (!sec) return String(t);
+          return new Date(sec * 1000).toLocaleString([], {
+            month: 'short',
+            day: '2-digit',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: timeframe < 60 ? '2-digit' : undefined,
+            hour12: false,
+          });
+        },
+      },
       rightPriceScale: { borderColor: isDark ? '#2A2F3D' : '#E2E8F0' },
-      timeScale: { borderColor: isDark ? '#2A2F3D' : '#E2E8F0', timeVisible: true, secondsVisible: timeframe < 60 },
+      timeScale: {
+        borderColor: isDark ? '#2A2F3D' : '#E2E8F0',
+        timeVisible: true,
+        secondsVisible: timeframe < 60,
+        rightOffset: 3,
+        barSpacing: 8,
+        tickMarkFormatter: (t: any) => {
+          const sec = typeof t === 'number' ? t : 0;
+          if (!sec) return '';
+          return new Date(sec * 1000).toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: timeframe < 60 ? '2-digit' : undefined,
+            hour12: false,
+          });
+        },
+      },
     });
 
     let mainSeries: ISeriesApi<'Candlestick'> | ISeriesApi<'Line'> | ISeriesApi<'Area'>;
@@ -462,7 +538,7 @@ export const MT5TradingView: React.FC = () => {
         setOhlcHover(null);
         return;
       }
-      const bar = candles.find((c) => c.time === Number(param.time));
+      const bar = candlesRef.current.find((c) => c.time === Number(param.time));
       if (bar) setOhlcHover(bar);
     });
 
@@ -494,7 +570,8 @@ export const MT5TradingView: React.FC = () => {
       const price = series.coordinateToPrice(param.point.y);
       if (price === null || !Number.isFinite(price)) return;
       const cleanPrice = Number(price.toFixed(decimals));
-      const clickTime = Number(param.time || candles[candles.length - 1]?.time || Math.floor(Date.now() / 1000));
+      const latestBar = candlesRef.current[candlesRef.current.length - 1];
+      const clickTime = Number(param.time || latestBar?.time || Math.floor(Date.now() / 1000));
 
       if (drawMode === 'hline') {
         const nextH = [...hLines, cleanPrice];
@@ -593,7 +670,17 @@ export const MT5TradingView: React.FC = () => {
         ? toSeriesPoints(candles, computedIndicators.vwap.values)
         : []
     );
-  }, [candles, chartMode, computedIndicators, indPrefs]);
+
+    const activeKey = `${selectedSymbol}:${timeframe}`;
+    if (candles.length > 0 && initialFitKeyRef.current !== activeKey) {
+      initialFitKeyRef.current = activeKey;
+      try {
+        chartApiRef.current?.timeScale().scrollToRealTime();
+      } catch {
+        // ignore chart framing errors
+      }
+    }
+  }, [candles, chartMode, computedIndicators, indPrefs, selectedSymbol, timeframe]);
 
   // Live Last Candle Tick Update — only apply authentic deriv_ws ticks to prevent seed-price spikes
   useEffect(() => {
@@ -612,45 +699,72 @@ export const MT5TradingView: React.FC = () => {
   }, [candles]);
 
   useEffect(() => {
-    if (!liveTick || liveTick.source !== 'deriv_ws' || !mainSeriesRef.current || candles.length === 0) return;
-    const baseLast = liveBarRef.current || candles[candles.length - 1];
+    const currentCandles = candlesRef.current;
+    if (
+      !liveTick ||
+      liveTick.symbol !== selectedSymbol ||
+      liveTick.source !== 'deriv_ws' ||
+      !mainSeriesRef.current ||
+      currentCandles.length === 0
+    ) {
+      return;
+    }
+    const baseLast = liveBarRef.current || currentCandles[currentCandles.length - 1];
     const bucket = Math.floor(liveTick.epoch / Math.max(1, timeframe)) * Math.max(1, timeframe);
+    const isNewBar = bucket > baseLast.time;
+    const updatedBar: CandleData = isNewBar
+      ? {
+          time: bucket,
+          open: baseLast.close,
+          high: Math.max(baseLast.close, liveTick.quote),
+          low: Math.min(baseLast.close, liveTick.quote),
+          close: liveTick.quote,
+        }
+      : {
+          time: baseLast.time,
+          open: baseLast.open,
+          high: Math.max(baseLast.high, liveTick.quote),
+          low: Math.min(baseLast.low, liveTick.quote),
+          close: liveTick.quote,
+        };
+
     try {
+      liveBarRef.current = updatedBar;
       if (chartMode === 'candles') {
-        const updated: CandleData =
-          bucket > baseLast.time
-            ? {
-                time: bucket,
-                open: baseLast.close,
-                high: Math.max(baseLast.close, liveTick.quote),
-                low: Math.min(baseLast.close, liveTick.quote),
-                close: liveTick.quote,
-              }
-            : {
-                time: baseLast.time,
-                open: baseLast.open,
-                high: Math.max(baseLast.high, liveTick.quote),
-                low: Math.min(baseLast.low, liveTick.quote),
-                close: liveTick.quote,
-              };
-        liveBarRef.current = updated;
         (mainSeriesRef.current as ISeriesApi<'Candlestick'>).update({
-          ...updated,
-          time: updated.time as UTCTimestamp,
+          ...updatedBar,
+          time: updatedBar.time as UTCTimestamp,
         });
       } else {
-        const t = Math.max(bucket, baseLast.time);
-        liveBarRef.current = { ...baseLast, time: t, close: liveTick.quote };
         (mainSeriesRef.current as ISeriesApi<'Line' | 'Area'>).update({
-          time: t as UTCTimestamp,
+          time: updatedBar.time as UTCTimestamp,
           value: liveTick.quote,
         });
       }
       setLastUpdated(new Date().toISOString());
+
+      // Keep OHLC readout and computed indicator lines animated live
+      const nowMs = Date.now();
+      if (isNewBar || nowMs - lastCandleSyncTsRef.current >= 700) {
+        lastCandleSyncTsRef.current = nowMs;
+        setCandles((prev) => {
+          if (prev.length === 0) return prev;
+          const tail = prev[prev.length - 1];
+          if (updatedBar.time > tail.time) {
+            return [...prev.slice(-239), updatedBar];
+          }
+          if (updatedBar.time === tail.time) {
+            const copy = prev.slice();
+            copy[copy.length - 1] = updatedBar;
+            return copy;
+          }
+          return prev;
+        });
+      }
     } catch {
       // ignore out-of-order updates
     }
-  }, [liveTick, timeframe, candles, chartMode]);
+  }, [liveTick, selectedSymbol, timeframe, chartMode]);
 
   // Render Horizontal Lines, Trendlines, Fibs, SMC Levels, and Open Orders
   useEffect(() => {
@@ -786,7 +900,19 @@ export const MT5TradingView: React.FC = () => {
         o.symbol === selectedSymbol &&
         (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
     );
+    const symTick = ticks[selectedSymbol];
     for (const o of symOpenOrders) {
+      let livePnl = Number(o.pnl || 0);
+      const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
+      if (symTick && symTick.source === 'deriv_ws' && isMult && Number(o.entry_price) > 0) {
+        const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
+        const pctDiff = (symTick.quote - Number(o.entry_price)) / Number(o.entry_price);
+        const directional = isUp ? pctDiff : -pctDiff;
+        livePnl = Number(
+          Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100)).toFixed(2)
+        );
+      }
+
       priceLinesRef.current.push(
         series.createPriceLine({
           price: o.entry_price,
@@ -794,7 +920,7 @@ export const MT5TradingView: React.FC = () => {
           lineWidth: 1,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `${o.side} ${o.lots}L`,
+          title: `${o.side} ${o.lots}L (${livePnl >= 0 ? '+' : ''}$${livePnl.toFixed(2)})`,
         })
       );
       if (o.tp_price) {
@@ -822,7 +948,7 @@ export const MT5TradingView: React.FC = () => {
         );
       }
     }
-  }, [hLines, trendLines, fibs, drawingsVisible, orders, selectedSymbol, decimals, indPrefs.smc, smcData]);
+  }, [hLines, trendLines, fibs, drawingsVisible, orders, selectedSymbol, decimals, indPrefs.smc, smcData, accountMode, candles.length, ticks]);
 
   const handleUndoDrawing = () => {
     if (undoHistory.length === 0) return;
@@ -1023,7 +1149,53 @@ export const MT5TradingView: React.FC = () => {
       await Promise.all([refreshOrders(), refreshAll()]);
       showToast('Position closed', 'info');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Close failed', 'error');
+      showToast(sanitizeUiError(err, 'Close failed'), 'error');
+    }
+  };
+
+  const openEditLimitsModal = (o: (typeof openOrders)[number]) => {
+    setEditingLimitsOrder({
+      id: o.id,
+      symbol: o.symbol,
+      side: o.side,
+      contractType: o.contract_type,
+      stake: Number(o.stake || 10),
+      multiplier: Number(o.multiplier || 100),
+      entryPrice: Number(o.entry_price || 0),
+      currentPrice: Number(o.current_price || o.entry_price || 0),
+      slPriceStr: o.sl_price ? String(o.sl_price) : '',
+      tpPriceStr: o.tp_price ? String(o.tp_price) : '',
+      slUsdStr: o.sl_usd ? String(o.sl_usd) : '',
+      tpUsdStr: o.tp_usd ? String(o.tp_usd) : '',
+    });
+  };
+
+  const handleSaveLimits = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingLimitsOrder || savingLimits) return;
+    setSavingLimits(true);
+    try {
+      const slPrice = editingLimitsOrder.slPriceStr.trim() ? Number(editingLimitsOrder.slPriceStr) : null;
+      const tpPrice = editingLimitsOrder.tpPriceStr.trim() ? Number(editingLimitsOrder.tpPriceStr) : null;
+      const slUsd = editingLimitsOrder.slUsdStr.trim() ? Number(editingLimitsOrder.slUsdStr) : null;
+      const tpUsd = editingLimitsOrder.tpUsdStr.trim() ? Number(editingLimitsOrder.tpUsdStr) : null;
+
+      await apiFetch(`/api/orders/${editingLimitsOrder.id}/limits`, {
+        method: 'PATCH',
+        body: JSON.stringify({
+          slPrice: slPrice !== null && Number.isFinite(slPrice) && slPrice > 0 ? slPrice : null,
+          tpPrice: tpPrice !== null && Number.isFinite(tpPrice) && tpPrice > 0 ? tpPrice : null,
+          slUsd: slUsd !== null && Number.isFinite(slUsd) && slUsd > 0 ? slUsd : null,
+          tpUsd: tpUsd !== null && Number.isFinite(tpUsd) && tpUsd > 0 ? tpUsd : null,
+        }),
+      });
+      await refreshOrders();
+      setEditingLimitsOrder(null);
+      showToast('SL / TP targets updated on live position', 'success');
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Unable to update SL / TP'), 'error');
+    } finally {
+      setSavingLimits(false);
     }
   };
 
@@ -1036,7 +1208,7 @@ export const MT5TradingView: React.FC = () => {
       await Promise.all([refreshOrders(), refreshAll()]);
       showToast(`Closed ${res.closedCount} position(s) (${filter})`, 'info');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Bulk close failed', 'error');
+      showToast(sanitizeUiError(err, 'Bulk close failed'), 'error');
     }
   };
 
@@ -1061,7 +1233,7 @@ export const MT5TradingView: React.FC = () => {
       setAlertMsg('');
       showToast(`Price alert armed on ${selectedSymbol} @ ${target}`, 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Failed to arm alert', 'error');
+      showToast(sanitizeUiError(err, 'Failed to arm alert'), 'error');
     }
   };
 
@@ -1081,7 +1253,7 @@ export const MT5TradingView: React.FC = () => {
       });
       setCopilotAnswer(res.answer);
     } catch (err) {
-      setCopilotError(err instanceof Error ? err.message : 'AI Co-Pilot failed');
+      setCopilotError(sanitizeUiError(err, 'AI Market Co-Pilot is temporarily busy. Please try again in a moment.'));
     } finally {
       setCopilotLoading(false);
     }
@@ -1419,13 +1591,19 @@ export const MT5TradingView: React.FC = () => {
                 </span>
                 <span
                   className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                    wsConnected && candleSource === 'deriv_ws'
-                      ? 'bg-[#00A878]/15 text-[#00A878]'
-                      : 'bg-amber-500/15 text-amber-500'
+                    marketClosedReason
+                      ? 'bg-amber-500/15 text-amber-500'
+                      : hasLiveWsTick || (wsConnected && candleSource === 'deriv_ws')
+                        ? 'bg-[#00A878]/15 text-[#00A878]'
+                        : 'bg-amber-500/15 text-amber-500'
                   }`}
                 >
-                  {wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-                  {candleSource === 'deriv_ws' ? 'Deriv WS Live' : 'Feed Unavailable'}
+                  {hasLiveWsTick || wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+                  {marketClosedReason
+                    ? 'Market Off-Hours'
+                    : hasLiveWsTick || (wsConnected && candleSource === 'deriv_ws')
+                      ? 'Deriv WS Live'
+                      : 'Reconnecting'}
                 </span>
               </div>
               <div className="flex flex-wrap items-center gap-3 mt-0.5 text-xs font-mono-num">
@@ -1692,17 +1870,19 @@ export const MT5TradingView: React.FC = () => {
             </div>
           </div>
 
-          {/* Truthful Candle / Feed Error Banner if Deriv Candles Unavailable */}
-          {candles.length === 0 && (
+          {/* Truthful Candle / Feed Error Banner if Deriv Candles Unavailable or Market Off-Hours */}
+          {(candles.length === 0 || marketClosedReason) && (
             <div className="px-4 py-3 bg-amber-500/10 border-b border-amber-500/25 flex items-center justify-between gap-2 text-xs text-amber-600 dark:text-amber-300">
               <span className="flex items-center gap-2">
                 <AlertTriangle className="w-4 h-4 shrink-0" />
-                {candleError || 'Real historical candles from Deriv are temporarily unavailable for this symbol.'}
+                {marketClosedReason ||
+                  candleError ||
+                  'Loading live historical candles from Deriv...'}
               </span>
               <button
                 type="button"
                 onClick={loadCandles}
-                className="px-3 py-1 rounded-full bg-amber-500/20 font-semibold cursor-pointer"
+                className="px-3 py-1 rounded-full bg-amber-500/20 font-semibold cursor-pointer shrink-0"
               >
                 Retry
               </button>
@@ -2274,52 +2454,75 @@ export const MT5TradingView: React.FC = () => {
                     </td>
                   </tr>
                 ) : (
-                  openOrders.map((o) => (
-                    <tr key={o.id}>
-                      <td className="px-4 py-2.5 font-semibold">
-                        {o.symbol}
-                        {o.strategy_key && (
-                          <span className="ml-1.5 text-[10px] text-slate-400">({o.strategy_key})</span>
-                        )}
-                      </td>
-                      <td className="px-4 py-2.5">
-                        <span
-                          className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
-                            o.side === 'BUY' || o.side === 'CALL' || o.side === 'DIGITOVER'
-                              ? 'bg-[#00A878]/15 text-[#00A878]'
-                              : 'bg-[#FF444F]/15 text-[#FF444F]'
+                  openOrders.map((o) => {
+                    const isMultOrder = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(
+                      String(o.contract_type || '').toUpperCase()
+                    );
+                    return (
+                      <tr key={o.id} className="hover:bg-[#F8F9FB] dark:hover:bg-[#111319]/60">
+                        <td className="px-4 py-2.5 font-semibold">
+                          <button
+                            type="button"
+                            onClick={() => setSelectedSymbol(o.symbol)}
+                            className="text-left hover:text-[#FF444F] transition-colors cursor-pointer font-semibold"
+                            title={`Inspect ${o.symbol} on chart`}
+                          >
+                            {o.symbol}
+                          </button>
+                          {o.strategy_key && (
+                            <span className="ml-1.5 text-[10px] text-slate-400">({o.strategy_key})</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-2.5">
+                          <span
+                            className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
+                              o.side === 'BUY' || o.side === 'CALL' || o.side === 'DIGITOVER'
+                                ? 'bg-[#00A878]/15 text-[#00A878]'
+                                : 'bg-[#FF444F]/15 text-[#FF444F]'
+                            }`}
+                          >
+                            {o.side}
+                          </span>
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono-num">
+                          {o.lots}L (${o.stake})
+                        </td>
+                        <td className="px-4 py-2.5 text-right font-mono-num">{o.entry_price}</td>
+                        <td className="px-4 py-2.5 text-right font-mono-num">{o.current_price}</td>
+                        <td className="px-4 py-2.5 text-right font-mono-num text-slate-500">
+                          {o.sl_usd ? `-$${o.sl_usd}` : o.sl_price ? `${o.sl_price}` : '—'} /{' '}
+                          {o.tp_usd ? `+$${o.tp_usd}` : o.tp_price ? `${o.tp_price}` : '—'}
+                        </td>
+                        <td
+                          className={`px-4 py-2.5 text-right font-mono-num font-bold ${
+                            o.pnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'
                           }`}
                         >
-                          {o.side}
-                        </span>
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono-num">
-                        {o.lots}L (${o.stake})
-                      </td>
-                      <td className="px-4 py-2.5 text-right font-mono-num">{o.entry_price}</td>
-                      <td className="px-4 py-2.5 text-right font-mono-num">{o.current_price}</td>
-                      <td className="px-4 py-2.5 text-right font-mono-num text-slate-500">
-                        {o.sl_usd ? `-$${o.sl_usd}` : '—'} / {o.tp_usd ? `+$${o.tp_usd}` : '—'}
-                      </td>
-                      <td
-                        className={`px-4 py-2.5 text-right font-mono-num font-bold ${
-                          o.pnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'
-                        }`}
-                      >
-                        {o.pnl >= 0 ? '+' : ''}
-                        {Number(o.pnl).toFixed(2)}
-                      </td>
-                      <td className="px-4 py-2.5 text-right">
-                        <button
-                          type="button"
-                          onClick={() => handleCloseOrder(o.id)}
-                          className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#FF444F]/10 text-[#FF444F] font-semibold hover:bg-[#FF444F] hover:text-white cursor-pointer"
-                        >
-                          <X className="w-3 h-3" /> Close
-                        </button>
-                      </td>
-                    </tr>
-                  ))
+                          {o.pnl >= 0 ? '+' : ''}
+                          {Number(o.pnl).toFixed(2)}
+                        </td>
+                        <td className="px-4 py-2.5 text-right whitespace-nowrap space-x-1.5">
+                          {isMultOrder && (
+                            <button
+                              type="button"
+                              onClick={() => openEditLimitsModal(o)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#1958B7]/10 text-[#1958B7] font-semibold hover:bg-[#1958B7] hover:text-white cursor-pointer"
+                              title="Modify SL / TP"
+                            >
+                              <Edit3 className="w-3 h-3" /> SL/TP
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => handleCloseOrder(o.id)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#FF444F]/10 text-[#FF444F] font-semibold hover:bg-[#FF444F] hover:text-white cursor-pointer"
+                          >
+                            <X className="w-3 h-3" /> Close
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })
                 )}
               </tbody>
             </table>
@@ -2613,6 +2816,122 @@ export const MT5TradingView: React.FC = () => {
               </button>
             </form>
           </div>
+        </div>
+      )}
+
+      {/* Edit SL / TP Modal for Open Position */}
+      {editingLimitsOrder && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <form
+            onSubmit={handleSaveLimits}
+            className="w-full max-w-md bg-white dark:bg-[#181C25] rounded-3xl p-6 border border-slate-200 dark:border-[#2A2F3D] space-y-4 shadow-2xl"
+          >
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">
+                  Modify SL / TP ({editingLimitsOrder.symbol} · {editingLimitsOrder.side})
+                </h3>
+                <p className="text-[11px] text-slate-500 font-mono-num">
+                  Entry: {editingLimitsOrder.entryPrice} · Live: {editingLimitsOrder.currentPrice}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setEditingLimitsOrder(null)}
+                className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Stop Loss (USD)</label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  placeholder="e.g. 15"
+                  value={editingLimitsOrder.slUsdStr}
+                  onChange={(e) =>
+                    setEditingLimitsOrder((prev) =>
+                      prev ? { ...prev, slUsdStr: e.target.value, slPriceStr: '' } : prev
+                    )
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-xs font-bold"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Stop Loss (Price)</label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  placeholder="Exact price"
+                  value={editingLimitsOrder.slPriceStr}
+                  onChange={(e) =>
+                    setEditingLimitsOrder((prev) =>
+                      prev ? { ...prev, slPriceStr: e.target.value, slUsdStr: '' } : prev
+                    )
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-xs font-bold"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Take Profit (USD)</label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  placeholder="e.g. 30"
+                  value={editingLimitsOrder.tpUsdStr}
+                  onChange={(e) =>
+                    setEditingLimitsOrder((prev) =>
+                      prev ? { ...prev, tpUsdStr: e.target.value, tpPriceStr: '' } : prev
+                    )
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-xs font-bold"
+                />
+              </div>
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Take Profit (Price)</label>
+                <input
+                  type="number"
+                  step="any"
+                  min="0"
+                  placeholder="Exact price"
+                  value={editingLimitsOrder.tpPriceStr}
+                  onChange={(e) =>
+                    setEditingLimitsOrder((prev) =>
+                      prev ? { ...prev, tpPriceStr: e.target.value, tpUsdStr: '' } : prev
+                    )
+                  }
+                  className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-xs font-bold"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-between gap-3 pt-1">
+              <button
+                type="button"
+                onClick={() =>
+                  setEditingLimitsOrder((prev) =>
+                    prev ? { ...prev, slPriceStr: '', tpPriceStr: '', slUsdStr: '', tpUsdStr: '' } : prev
+                  )
+                }
+                className="px-4 py-2 rounded-full border border-slate-300 dark:border-[#2A2F3D] text-xs font-semibold cursor-pointer"
+              >
+                Clear Limits
+              </button>
+              <button
+                type="submit"
+                disabled={savingLimits}
+                className="flex-1 py-2.5 rounded-full bg-[#1958B7] hover:bg-[#154A9B] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+              >
+                {savingLimits ? 'Updating...' : 'Save SL / TP'}
+              </button>
+            </div>
+          </form>
         </div>
       )}
     </div>

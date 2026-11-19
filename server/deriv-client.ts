@@ -85,6 +85,10 @@ export class DerivWebSocketClient {
     'frxXAUUSD',
     'cryBTCUSD',
   ]);
+  private activeStreamSymbols = new Set<string>();
+  private marketClosedSymbols = new Map<string, string>();
+  private quoteKeepaliveTimer: NodeJS.Timeout | null = null;
+  private lastOpenOrderSyncAt = 0;
   private latestTicks = new Map<string, TickData>();
   private tickHistoryBuffers = new Map<string, number[]>();
 
@@ -118,6 +122,7 @@ export class DerivWebSocketClient {
       subscribedSymbolsCount: this.subscribedSymbols.size,
       subscribedSymbolList: Array.from(this.subscribedSymbols),
       trackedPrices: this.latestTicks.size,
+      marketClosedCount: this.marketClosedSymbols.size,
       lastDerivTickAt: this.lastDerivTickAt,
       reconnectAttempts: this.reconnectAttempts,
       lastError: this.lastError || null,
@@ -187,16 +192,118 @@ export class DerivWebSocketClient {
     }, delayMs);
   }
 
+  public isMarketClosed(symbol: string): string | null {
+    return this.marketClosedSymbols.get(symbol) || null;
+  }
+
+  public async syncOpenOrderSymbols(): Promise<void> {
+    if (!pool) return;
+    try {
+      const res = await pool.query<{ symbol: string }>(
+        "SELECT DISTINCT symbol FROM virtual_orders WHERE status = 'OPEN'"
+      );
+      for (const row of res.rows) {
+        if (row.symbol) {
+          await this.ensureSymbolSubscribed(row.symbol);
+        }
+      }
+    } catch {
+      // ignore if DB waking up
+    }
+  }
+
+  public async getLiveQuote(symbol: string): Promise<TickData | undefined> {
+    await this.ensureSymbolSubscribed(symbol);
+    const existing = this.latestTicks.get(symbol);
+    const nowEpoch = Math.floor(Date.now() / 1000);
+    if (existing && existing.source === 'deriv_ws' && nowEpoch - existing.epoch <= 4) {
+      return existing;
+    }
+    try {
+      const resp = await this.request<{
+        history?: { prices?: Array<string | number>; times?: Array<number> };
+      }>(
+        {
+          ticks_history: symbol,
+          adjust_start_time: 1,
+          count: 1,
+          end: 'latest',
+          style: 'ticks',
+        },
+        4500
+      );
+      const prices = resp?.history?.prices;
+      const times = resp?.history?.times;
+      if (prices && prices.length > 0) {
+        const quote = Number(prices[prices.length - 1]);
+        const epoch = Number(times?.[times.length - 1] || nowEpoch);
+        const instMeta = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+        const pip = instMeta?.pip_size ?? existing?.pipSize ?? 0.01;
+        const spread = instMeta?.spread ?? 0.2;
+        const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : 2;
+        const live: TickData = {
+          symbol,
+          quote,
+          bid: Number((quote - spread / 2).toFixed(dec)),
+          ask: Number((quote + spread / 2).toFixed(dec)),
+          epoch,
+          pipSize: pip,
+          source: 'deriv_ws',
+        };
+        this.marketClosedSymbols.delete(symbol);
+        this.broadcastTick(live);
+        return live;
+      }
+    } catch {
+      // fallback to latest known tick
+    }
+    return this.latestTicks.get(symbol);
+  }
+
   public startMarketFeed(): void {
-    this.connectCluster().catch((err) => {
-      this.lastError = err instanceof Error ? err.message : 'Deriv WS initial connect failed';
-      this.scheduleReconnect();
-    });
+    this.connectCluster()
+      .then(() => {
+        this.syncOpenOrderSymbols().catch(() => {});
+      })
+      .catch((err) => {
+        this.lastError = err instanceof Error ? err.message : 'Deriv WS initial connect failed';
+        this.scheduleReconnect();
+      });
+
+    if (this.quoteKeepaliveTimer) clearInterval(this.quoteKeepaliveTimer);
+    this.quoteKeepaliveTimer = setInterval(async () => {
+      try {
+        if (Date.now() - this.lastOpenOrderSyncAt >= 10000) {
+          this.lastOpenOrderSyncAt = Date.now();
+          await this.syncOpenOrderSymbols();
+        }
+        if (!this.isConnected || !this.ws || this.ws.readyState !== WebSocket.OPEN) return;
+
+        const nowEpoch = Math.floor(Date.now() / 1000);
+        const staleSymbols: string[] = [];
+        for (const sym of this.subscribedSymbols) {
+          if (this.marketClosedSymbols.has(sym)) continue;
+          const t = this.latestTicks.get(sym);
+          if (!t || t.source !== 'deriv_ws' || nowEpoch - t.epoch >= 6) {
+            staleSymbols.push(sym);
+          }
+        }
+
+        for (const sym of staleSymbols.slice(0, 4)) {
+          if (!this.activeStreamSymbols.has(sym) && this.ws?.readyState === WebSocket.OPEN) {
+            this.activeStreamSymbols.add(sym);
+            this.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+          }
+          await this.getLiveQuote(sym).catch(() => {});
+        }
+      } catch {
+        // ignore keepalive failure
+      }
+    }, 4500);
   }
 
   public async ensureSymbolSubscribed(symbol: string): Promise<void> {
     if (!symbol) return;
-    const isNew = !this.subscribedSymbols.has(symbol);
     this.subscribedSymbols.add(symbol);
     if (!this.latestTicks.has(symbol)) {
       let row: { pip_size: number; spread: number } | null = null;
@@ -229,7 +336,8 @@ export class DerivWebSocketClient {
         });
       }
     }
-    if (isNew && this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
+    if (this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN && !this.activeStreamSymbols.has(symbol)) {
+      this.activeStreamSymbols.add(symbol);
       this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
     }
   }
@@ -294,18 +402,40 @@ export class DerivWebSocketClient {
                 handler.resolve(data);
               }
             }
+            if (data.error && data.echo_req?.ticks) {
+              const sym = String(data.echo_req.ticks);
+              this.activeStreamSymbols.delete(sym);
+              if (data.error.code === 'MarketIsClosed' || /closed/i.test(String(data.error.message || ''))) {
+                this.marketClosedSymbols.set(sym, String(data.error.message || 'Market is currently closed'));
+              }
+            }
             if (data.msg_type === 'tick' && data.tick) {
               const t = data.tick;
               const pip = Number(t.pip_size || 0.01);
               const quote = Number(t.quote);
               const bid = t.bid ? Number(t.bid) : quote;
               const ask = t.ask ? Number(t.ask) : quote;
+              this.marketClosedSymbols.delete(t.symbol);
               this.broadcastTick({
                 symbol: t.symbol,
                 quote,
                 bid,
                 ask,
                 epoch: Number(t.epoch || Math.floor(Date.now() / 1000)),
+                pipSize: pip,
+                source: 'deriv_ws',
+              });
+            } else if (data.msg_type === 'ohlc' && data.ohlc) {
+              const o = data.ohlc;
+              const pip = Number(o.pip_size || 0.01);
+              const quote = Number(o.close);
+              this.marketClosedSymbols.delete(o.symbol);
+              this.broadcastTick({
+                symbol: o.symbol,
+                quote,
+                bid: quote,
+                ask: quote,
+                epoch: Number(o.epoch || o.open_time || Math.floor(Date.now() / 1000)),
                 pipSize: pip,
                 source: 'deriv_ws',
               });
@@ -318,6 +448,7 @@ export class DerivWebSocketClient {
         winner.ws.on('close', () => {
           this.isConnected = false;
           this.ws = null;
+          this.activeStreamSymbols.clear();
           if (this.keepAliveTimer) {
             clearInterval(this.keepAliveTimer);
             this.keepAliveTimer = null;
@@ -337,7 +468,10 @@ export class DerivWebSocketClient {
           }
         }, 30000);
 
+        this.activeStreamSymbols.clear();
+        this.marketClosedSymbols.clear();
         for (const sym of this.subscribedSymbols) {
+          this.activeStreamSymbols.add(sym);
           winner.ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
         }
 
@@ -459,6 +593,65 @@ export class DerivWebSocketClient {
   public async fetchCandlesDetailed(symbol: string, granularity = 60, count = 120): Promise<DetailedCandleResult> {
     await this.ensureSymbolSubscribed(symbol);
     try {
+      // Handle tick timeframe ('1t' / granularity < 60) via Deriv style:'ticks'
+      if (granularity < 60) {
+        const resp = await this.request<{
+          history?: { prices?: Array<string | number>; times?: Array<number> };
+        }>(
+          {
+            ticks_history: symbol,
+            adjust_start_time: 1,
+            count: Math.min(300, Math.max(40, count)),
+            end: 'latest',
+            style: 'ticks',
+          },
+          7000
+        );
+        const prices = resp?.history?.prices || [];
+        const times = resp?.history?.times || [];
+        if (prices.length > 0 && times.length > 0) {
+          const mapByTime = new Map<number, CandleData>();
+          for (let i = 0; i < Math.min(prices.length, times.length); i++) {
+            const t = Number(times[i]);
+            const p = Number(prices[i]);
+            if (!Number.isFinite(t) || !Number.isFinite(p)) continue;
+            const prev = mapByTime.get(t);
+            if (!prev) {
+              mapByTime.set(t, { time: t, open: p, high: p, low: p, close: p });
+            } else {
+              prev.high = Math.max(prev.high, p);
+              prev.low = Math.min(prev.low, p);
+              prev.close = p;
+            }
+          }
+          const candles = Array.from(mapByTime.values()).sort((a, b) => a.time - b.time);
+          const lastCandle = candles[candles.length - 1];
+          if (lastCandle) {
+            const instMeta = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+            const spread = instMeta?.spread ?? 0.2;
+            const pip = instMeta?.pip_size ?? this.latestTicks.get(symbol)?.pipSize ?? 0.01;
+            const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : 2;
+            const existing = this.latestTicks.get(symbol);
+            if (!existing || existing.epoch <= lastCandle.time) {
+              this.broadcastTick({
+                symbol,
+                quote: lastCandle.close,
+                bid: Number((lastCandle.close - spread / 2).toFixed(dec)),
+                ask: Number((lastCandle.close + spread / 2).toFixed(dec)),
+                epoch: lastCandle.time,
+                pipSize: pip,
+                source: 'deriv_ws',
+              });
+            }
+          }
+          return {
+            candles,
+            source: 'deriv_ws',
+            lastUpdated: Date.now(),
+          };
+        }
+      }
+
       const resp = await this.request<{
         candles?: Array<{ epoch: number; open: number; high: number; low: number; close: number }>;
       }>(
@@ -473,13 +666,19 @@ export class DerivWebSocketClient {
         7000
       );
       if (resp?.candles && resp.candles.length > 0) {
-        const candles = resp.candles.map((c) => ({
-          time: Number(c.epoch),
-          open: Number(c.open),
-          high: Number(c.high),
-          low: Number(c.low),
-          close: Number(c.close),
-        }));
+        const deduped = new Map<number, CandleData>();
+        for (const c of resp.candles) {
+          const time = Number(c.epoch);
+          if (!Number.isFinite(time)) continue;
+          deduped.set(time, {
+            time,
+            open: Number(c.open),
+            high: Number(c.high),
+            low: Number(c.low),
+            close: Number(c.close),
+          });
+        }
+        const candles = Array.from(deduped.values()).sort((a, b) => a.time - b.time);
         const lastCandle = candles[candles.length - 1];
         const existingTick = this.latestTicks.get(symbol);
         if (lastCandle && (!existingTick || existingTick.source === 'cached')) {
@@ -510,10 +709,14 @@ export class DerivWebSocketClient {
         lastUpdated: null,
       };
     } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Unable to reach Deriv historical candles API';
+      if (/closed/i.test(msg)) {
+        this.marketClosedSymbols.set(symbol, msg);
+      }
       return {
         candles: [],
         source: 'unavailable',
-        error: err instanceof Error ? err.message : 'Unable to reach Deriv historical candles API',
+        error: msg,
         lastUpdated: null,
       };
     }

@@ -125,6 +125,11 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     const directional = isUp ? pctDiff : -pctDiff;
     const livePnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
     await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [tick.quote, livePnl, order.id]);
+    derivWs.emitUserEvent(session.userId, 'order_updated', {
+      id: order.id,
+      current_price: tick.quote,
+      pnl: livePnl,
+    });
 
     const hitTp = order.tp_usd && livePnl >= Number(order.tp_usd);
     const hitSl = order.sl_usd && livePnl <= -Number(order.sl_usd);

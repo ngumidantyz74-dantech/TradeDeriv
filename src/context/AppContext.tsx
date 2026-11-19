@@ -93,6 +93,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [loadingAuth, setLoadingAuth] = useState<boolean>(true);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const directWsRef = useRef<WebSocket | null>(null);
+  const directSubscribedRef = useRef<Set<string>>(new Set());
   const tapCountRef = useRef<number>(0);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -108,6 +110,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     (t: NavTab) => {
       resetLogoTaps();
       setActiveTabState(t);
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'auto' });
+      }
     },
     [resetLogoTaps]
   );
@@ -298,101 +303,291 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     refreshAll();
   }, [fetchPublicData, refreshAll]);
 
-  // Connect to /ws for realtime ticks & user order/balance/alert events
+  const activeSymbolsSignature = [
+    selectedSymbol,
+    ...orders.filter((o) => o.status === 'OPEN').map((o) => o.symbol),
+  ]
+    .filter(Boolean)
+    .filter((v, idx, arr) => arr.indexOf(v) === idx)
+    .sort()
+    .join(',');
+
+  // Connect to /ws with auto-reconnect & heartbeat for realtime ticks & order/balance/alert events
   useEffect(() => {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${proto}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
-    const ws = new WebSocket(wsUrl);
-    wsRef.current = ws;
+    let disposed = false;
+    let reconnectAttempt = 0;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
 
-    ws.onopen = () => {
-      setWsConnected(true);
-      ws.send(JSON.stringify({ type: 'subscribe', symbol: selectedSymbol }));
-    };
-
-    ws.onclose = () => {
-      setWsConnected(false);
-    };
-
-    ws.onerror = () => {
-      setWsConnected(false);
-    };
-
-    ws.onmessage = (ev) => {
-      try {
-        const msg = JSON.parse(ev.data);
-        if (msg.type === 'ticks_snapshot' && msg.ticks) {
-          setTicks((prev) => ({ ...prev, ...msg.ticks }));
-          setLastDerivTickAt(Date.now());
-        } else if (msg.type === 'tick' && msg.tick) {
-          setTicks((prev) => ({ ...prev, [msg.tick.symbol]: msg.tick }));
-          setLastDerivTickAt(Date.now());
-        } else if (msg.type === 'balance_updated' && msg.data) {
-          setUser((prev) =>
-            prev
-              ? {
-                  ...prev,
-                  virtual_workspace_balance:
-                    msg.data.virtual_workspace_balance !== undefined
-                      ? Number(msg.data.virtual_workspace_balance)
-                      : prev.virtual_workspace_balance,
-                  real_wallets: msg.data.real_wallets ?? msg.data.realWallets ?? prev.real_wallets,
-                  demo_wallets: msg.data.demo_wallets ?? msg.data.demoWallets ?? prev.demo_wallets,
-                  exchange_balances: msg.data.exchange_balances ?? prev.exchange_balances,
-                  real_exchange_balances: msg.data.real_exchange_balances ?? prev.real_exchange_balances,
-                }
-              : prev
-          );
-          refreshAccounts(false);
-        } else if (msg.type === 'order_opened' && msg.data) {
-          setOrders((prev) => [msg.data, ...prev.filter((o) => o.id !== msg.data.id)]);
-        } else if (msg.type === 'order_updated' && msg.data) {
-          setOrders((prev) =>
-            prev.map((o) =>
-              o.id === msg.data.id
-                ? {
-                    ...o,
-                    current_price:
-                      msg.data.current_price !== undefined ? Number(msg.data.current_price) : o.current_price,
-                    pnl: msg.data.pnl !== undefined ? Number(msg.data.pnl) : o.pnl,
-                  }
-                : o
-            )
-          );
-        } else if (msg.type === 'order_closed' && msg.data) {
-          setOrders((prev) => prev.map((o) => (o.id === msg.data.id ? msg.data : o)));
-        } else if (msg.type === 'account_updated') {
-          refreshAccounts(false);
-          apiFetch<{ user: UserProfile }>('/api/auth/me')
-            .then((me) => {
-              if (me?.user) setUser(me.user);
-            })
-            .catch(() => {});
-        } else if (msg.type === 'alert_triggered' && msg.data) {
-          showToast(`Alert: ${msg.data.symbol} @ ${msg.data.triggerPrice}`, 'info');
-          apiFetch<{ notifications: NotificationItem[] }>('/api/notifications')
-            .then((n) => setNotifications(n.notifications || []))
-            .catch(() => {});
-        }
-      } catch {
-        // ignore
+    const sendSubscriptions = (socket: WebSocket | null) => {
+      if (!socket || socket.readyState !== WebSocket.OPEN) return;
+      const syms = activeSymbolsSignature.split(',').filter(Boolean);
+      if (syms.length > 0) {
+        socket.send(JSON.stringify({ type: 'subscribe_many', symbols: syms }));
       }
     };
 
+    const connect = () => {
+      if (disposed) return;
+      const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const wsUrl = `${proto}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
+      const ws = new WebSocket(wsUrl);
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        if (disposed) {
+          ws.close();
+          return;
+        }
+        reconnectAttempt = 0;
+        setWsConnected(true);
+        sendSubscriptions(ws);
+        if (pingTimer) clearInterval(pingTimer);
+        pingTimer = setInterval(() => {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'ping' }));
+          }
+        }, 20000);
+      };
+
+      ws.onclose = () => {
+        setWsConnected(false);
+        if (pingTimer) {
+          clearInterval(pingTimer);
+          pingTimer = null;
+        }
+        if (!disposed) {
+          const delay = Math.min(6000, 1500 * Math.pow(1.4, Math.min(4, reconnectAttempt++)));
+          reconnectTimer = setTimeout(connect, delay);
+        }
+      };
+
+      ws.onerror = () => {
+        setWsConnected(false);
+      };
+
+      ws.onmessage = (ev) => {
+        try {
+          const msg = JSON.parse(ev.data);
+          if (msg.type === 'ticks_snapshot' && msg.ticks) {
+            setTicks((prev) => {
+              const next = { ...prev };
+              for (const [sym, incoming] of Object.entries(msg.ticks as Record<string, TickData>)) {
+                const cur = next[sym];
+                if (!cur || cur.source !== 'deriv_ws' || (incoming.source === 'deriv_ws' && incoming.epoch >= cur.epoch)) {
+                  next[sym] = incoming;
+                }
+              }
+              return next;
+            });
+            setLastDerivTickAt(Date.now());
+          } else if (msg.type === 'tick' && msg.tick) {
+            setTicks((prev) => {
+              const cur = prev[msg.tick.symbol];
+              if (cur && cur.source === 'deriv_ws' && msg.tick.source !== 'deriv_ws') {
+                return prev;
+              }
+              return { ...prev, [msg.tick.symbol]: msg.tick };
+            });
+            setLastDerivTickAt(Date.now());
+          } else if (msg.type === 'balance_updated' && msg.data) {
+            setUser((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    virtual_workspace_balance:
+                      msg.data.virtual_workspace_balance !== undefined
+                        ? Number(msg.data.virtual_workspace_balance)
+                        : prev.virtual_workspace_balance,
+                    real_wallets: msg.data.real_wallets ?? msg.data.realWallets ?? prev.real_wallets,
+                    demo_wallets: msg.data.demo_wallets ?? msg.data.demoWallets ?? prev.demo_wallets,
+                    exchange_balances: msg.data.exchange_balances ?? prev.exchange_balances,
+                    real_exchange_balances: msg.data.real_exchange_balances ?? prev.real_exchange_balances,
+                  }
+                : prev
+            );
+            refreshAccounts(false);
+          } else if (msg.type === 'order_opened' && msg.data) {
+            setOrders((prev) => [msg.data, ...prev.filter((o) => o.id !== msg.data.id)]);
+          } else if (msg.type === 'order_updated' && msg.data) {
+            setOrders((prev) =>
+              prev.map((o) =>
+                o.id === msg.data.id
+                  ? {
+                      ...o,
+                      current_price:
+                        msg.data.current_price !== undefined ? Number(msg.data.current_price) : o.current_price,
+                      pnl: msg.data.pnl !== undefined ? Number(msg.data.pnl) : o.pnl,
+                      sl_price: msg.data.sl_price !== undefined ? msg.data.sl_price : o.sl_price,
+                      tp_price: msg.data.tp_price !== undefined ? msg.data.tp_price : o.tp_price,
+                      sl_usd: msg.data.sl_usd !== undefined ? msg.data.sl_usd : o.sl_usd,
+                      tp_usd: msg.data.tp_usd !== undefined ? msg.data.tp_usd : o.tp_usd,
+                    }
+                  : o
+              )
+            );
+          } else if (msg.type === 'order_closed' && msg.data) {
+            setOrders((prev) => prev.map((o) => (o.id === msg.data.id ? msg.data : o)));
+          } else if (msg.type === 'account_updated') {
+            refreshAccounts(false);
+            apiFetch<{ user: UserProfile }>('/api/auth/me')
+              .then((me) => {
+                if (me?.user) setUser(me.user);
+              })
+              .catch(() => {});
+          } else if (msg.type === 'alert_triggered' && msg.data) {
+            showToast(`Alert: ${msg.data.symbol} @ ${msg.data.triggerPrice}`, 'info');
+            apiFetch<{ notifications: NotificationItem[] }>('/api/notifications')
+              .then((n) => setNotifications(n.notifications || []))
+              .catch(() => {});
+          }
+        } catch {
+          // ignore
+        }
+      };
+    };
+
+    connect();
+
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+          connect();
+        } else {
+          sendSubscriptions(wsRef.current);
+        }
+      }
+    };
+    document.addEventListener('visibilitychange', onVisibility);
+    window.addEventListener('online', onVisibility);
+
     return () => {
+      disposed = true;
+      document.removeEventListener('visibilitychange', onVisibility);
+      window.removeEventListener('online', onVisibility);
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pingTimer) clearInterval(pingTimer);
       try {
-        ws.close();
+        wsRef.current?.close();
       } catch {
         // ignore
       }
     };
   }, [token, refreshAccounts, showToast]);
 
+  // Direct multiplexed browser Deriv WS live feed for selectedSymbol, open order symbols & top synthetics
   useEffect(() => {
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && selectedSymbol) {
-      wsRef.current.send(JSON.stringify({ type: 'subscribe', symbol: selectedSymbol }));
+    let disposed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let pingTimer: ReturnType<typeof setInterval> | null = null;
+
+    const pushSubscriptions = (ws: WebSocket | null) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const baseTop = ['1HZ100V', '1HZ75V', '1HZ50V', '1HZ25V', '1HZ10V', 'R_100', 'cryBTCUSD'];
+      const wanted = Array.from(new Set([...activeSymbolsSignature.split(',').filter(Boolean), ...baseTop]));
+      for (const sym of wanted) {
+        if (!directSubscribedRef.current.has(sym)) {
+          directSubscribedRef.current.add(sym);
+          ws.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+        }
+      }
+    };
+
+    const connectDirect = () => {
+      if (disposed) return;
+      try {
+        const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089&l=EN&brand=deriv');
+        directWsRef.current = ws;
+
+        ws.onopen = () => {
+          if (disposed) {
+            ws.close();
+            return;
+          }
+          directSubscribedRef.current.clear();
+          pushSubscriptions(ws);
+          if (pingTimer) clearInterval(pingTimer);
+          pingTimer = setInterval(() => {
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ ping: 1 }));
+            }
+          }, 25000);
+        };
+
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.msg_type === 'tick' && msg.tick) {
+              const t = msg.tick;
+              const quote = Number(t.quote);
+              const pipSize = Number(t.pip_size || 0.01);
+              const epoch = Number(t.epoch || Math.floor(Date.now() / 1000));
+              if (!Number.isFinite(quote)) return;
+              const tickObj: TickData = {
+                symbol: t.symbol,
+                quote,
+                bid: t.bid ? Number(t.bid) : quote,
+                ask: t.ask ? Number(t.ask) : quote,
+                epoch,
+                pipSize,
+                source: 'deriv_ws',
+              };
+              setTicks((prev) => ({ ...prev, [t.symbol]: tickObj }));
+              setLastDerivTickAt(Date.now());
+              setWsConnected(true);
+            }
+          } catch {
+            // ignore
+          }
+        };
+
+        ws.onclose = () => {
+          directSubscribedRef.current.clear();
+          if (pingTimer) {
+            clearInterval(pingTimer);
+            pingTimer = null;
+          }
+          if (!disposed) {
+            reconnectTimer = setTimeout(connectDirect, 3000);
+          }
+        };
+      } catch {
+        if (!disposed) {
+          reconnectTimer = setTimeout(connectDirect, 4000);
+        }
+      }
+    };
+
+    connectDirect();
+    return () => {
+      disposed = true;
+      directSubscribedRef.current.clear();
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      if (pingTimer) clearInterval(pingTimer);
+      try {
+        directWsRef.current?.close();
+      } catch {
+        // ignore
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    const syms = activeSymbolsSignature.split(',').filter(Boolean);
+    if (syms.length === 0) return;
+
+    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'subscribe_many', symbols: syms }));
     }
-  }, [selectedSymbol]);
+    if (directWsRef.current && directWsRef.current.readyState === WebSocket.OPEN) {
+      for (const sym of syms) {
+        if (!directSubscribedRef.current.has(sym)) {
+          directSubscribedRef.current.add(sym);
+          directWsRef.current.send(JSON.stringify({ ticks: sym, subscribe: 1 }));
+        }
+      }
+    }
+  }, [activeSymbolsSignature]);
 
   const launchDerivOAuth = useCallback(
     async (prompt: 'login' | 'registration' = 'login') => {

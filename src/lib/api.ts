@@ -17,6 +17,34 @@ export function setStoredToken(token: string | null): void {
   }
 }
 
+export function sanitizeUiError(err: unknown, fallback = 'Operation temporarily unavailable. Please try again.'): string {
+  const raw = err instanceof Error ? err.message : typeof err === 'string' ? err : '';
+  const cleaned = String(raw || '').trim();
+  if (!cleaned) return fallback;
+
+  // Strip raw JSON payloads (e.g. upstream 503 JSON objects)
+  if (cleaned.startsWith('{') || cleaned.startsWith('[') || /"\s*error\s*"\s*:/i.test(cleaned)) {
+    if (/503|UNAVAILABLE|high demand|overloaded|quota|rate.?limit|429/i.test(cleaned)) {
+      return 'Market intelligence engine is experiencing high demand. Please retry in a moment.';
+    }
+    return fallback;
+  }
+
+  // Strip internal infrastructure, model names, env vars, SQL, or stack details
+  if (
+    /gemini|genai|google|anthropic|openai|GEMINI_API_KEY|DATABASE_URL|postgres|neon\.tech|SELECT\s+|INSERT\s+|UPDATE\s+|stack|node_modules|TypeError|ReferenceError|ECONNREFUSED|ENOTFOUND/i.test(
+      cleaned
+    )
+  ) {
+    if (/503|UNAVAILABLE|high demand|overloaded|429|timeout/i.test(cleaned)) {
+      return 'Market intelligence engine is experiencing high demand. Please retry in a moment.';
+    }
+    return fallback;
+  }
+
+  return cleaned.length > 220 ? `${cleaned.slice(0, 217)}...` : cleaned;
+}
+
 export async function apiFetch<T = any>(
   path: string,
   options: RequestInit & { skipAuth?: boolean } = {}
@@ -40,7 +68,7 @@ export async function apiFetch<T = any>(
 
   const data = await resp.json().catch(() => ({}));
   if (!resp.ok) {
-    throw new Error(data.error || `Request failed (${resp.status})`);
+    throw new Error(sanitizeUiError(data.error, `Request failed (${resp.status})`));
   }
   return data as T;
 }

@@ -17,6 +17,13 @@ const router = Router();
 
 let lastSymbolsSync = 0;
 
+router.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 router.get('/market/instruments', async (_req, res) => {
   const ticks = derivWs.getAllLatestTicks();
 
@@ -143,6 +150,7 @@ router.get('/market/candles', async (req, res) => {
     candles: detailed.candles,
     source: detailed.source,
     error: detailed.error || null,
+    marketClosed: derivWs.isMarketClosed(symbol),
     lastUpdated: detailed.lastUpdated,
     latestTick: tick,
   });

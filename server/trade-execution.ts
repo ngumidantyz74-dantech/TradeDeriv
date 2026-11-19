@@ -226,8 +226,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     throw new Error('Owner / Admin MIS accounts are for administration only, not trading.');
   }
 
-  await derivWs.ensureSymbolSubscribed(input.symbol);
-  const tick = derivWs.getLatestTick(input.symbol);
+  const tick = await derivWs.getLiveQuote(input.symbol);
   const entryPrice = tick?.quote || 1000.0;
   const pipSize = tick?.pipSize || 0.01;
 
@@ -555,7 +554,10 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     actualMode === 'virtual' &&
     ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'PUT'].includes(contractType)
   ) {
-    const settleDelay = Math.max(800, Math.min(3000, duration * 450));
+    const settleDelay =
+      durationUnit.toLowerCase() === 't'
+        ? Math.max(800, Math.min(12000, duration * 1000))
+        : Math.max(1500, Math.min(120000, durationToSeconds(duration, durationUnit) * 1000));
     setTimeout(() => {
       settleVirtualDigitalOrder(Number(created.id)).catch(() => {});
     }, settleDelay);
@@ -568,7 +570,7 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
   const order = await queryOne<any>("SELECT * FROM virtual_orders WHERE id = $1 AND status = 'OPEN'", [orderId]);
   if (!order) return null;
 
-  const latest = derivWs.getLatestTick(order.symbol);
+  const latest = await derivWs.getLiveQuote(order.symbol);
   const exitPrice = latest?.quote || order.entry_price;
   const priceStr = exitPrice.toFixed(latest?.pipSize && latest.pipSize < 0.001 ? 5 : 2);
   const lastDigit = Number(priceStr[priceStr.length - 1] || 0);
@@ -674,7 +676,7 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
   }
   if (order.status === 'CLOSED') return order;
 
-  const latest = derivWs.getLatestTick(order.symbol);
+  const latest = await derivWs.getLiveQuote(order.symbol);
   const exitPrice = latest?.quote || order.current_price || order.entry_price;
   let pnl = Number(order.pnl || 0);
 
@@ -834,59 +836,177 @@ export async function bulkCloseOrders(
   return { closedCount: closedOrders.length, closedOrders };
 }
 
+export async function updateOrderLimits(
+  orderId: number,
+  userId: number,
+  patch: { slPrice?: number | null; tpPrice?: number | null; slUsd?: number | null; tpUsd?: number | null }
+): Promise<any> {
+  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
+  if (!order) throw new Error('Order not found');
+  if (order.status !== 'OPEN') throw new Error('Only open positions can update SL/TP');
+  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(order.contract_type || '').toUpperCase())) {
+    throw new Error('SL/TP price limits apply to Multiplier / CFD positions only');
+  }
+
+  const entryPrice = Number(order.entry_price || 1);
+  const stake = Number(order.stake || 1);
+  const multiplier = Number(order.multiplier || 100);
+  const notional = Math.max(1, stake * multiplier);
+
+  let nextSlPrice = patch.slPrice !== undefined ? patch.slPrice : order.sl_price;
+  let nextTpPrice = patch.tpPrice !== undefined ? patch.tpPrice : order.tp_price;
+  let nextSlUsd = patch.slUsd !== undefined ? patch.slUsd : order.sl_usd;
+  let nextTpUsd = patch.tpUsd !== undefined ? patch.tpUsd : order.tp_usd;
+
+  const isUp = order.contract_type === 'MULTUP' || order.side === 'BUY';
+
+  if (patch.slPrice !== undefined) {
+    if (patch.slPrice === null || Number(patch.slPrice) <= 0) {
+      nextSlPrice = null;
+      nextSlUsd = null;
+    } else {
+      nextSlPrice = Number(patch.slPrice);
+      nextSlUsd = Number(((Math.abs(entryPrice - nextSlPrice) / entryPrice) * notional).toFixed(2));
+    }
+  } else if (patch.slUsd !== undefined) {
+    if (patch.slUsd === null || Number(patch.slUsd) <= 0) {
+      nextSlUsd = null;
+      nextSlPrice = null;
+    } else {
+      nextSlUsd = Math.abs(Number(patch.slUsd));
+      const pctMove = Math.min(0.45, nextSlUsd / notional);
+      nextSlPrice = Number((entryPrice * (isUp ? 1 - pctMove : 1 + pctMove)).toFixed(4));
+    }
+  }
+
+  if (patch.tpPrice !== undefined) {
+    if (patch.tpPrice === null || Number(patch.tpPrice) <= 0) {
+      nextTpPrice = null;
+      nextTpUsd = null;
+    } else {
+      nextTpPrice = Number(patch.tpPrice);
+      nextTpUsd = Number(((Math.abs(nextTpPrice - entryPrice) / entryPrice) * notional).toFixed(2));
+    }
+  } else if (patch.tpUsd !== undefined) {
+    if (patch.tpUsd === null || Number(patch.tpUsd) <= 0) {
+      nextTpUsd = null;
+      nextTpPrice = null;
+    } else {
+      nextTpUsd = Math.abs(Number(patch.tpUsd));
+      const pctMove = Math.min(0.95, nextTpUsd / notional);
+      nextTpPrice = Number((entryPrice * (isUp ? 1 + pctMove : 1 - pctMove)).toFixed(4));
+    }
+  }
+
+  const updated = await queryOne<any>(
+    `UPDATE virtual_orders
+     SET sl_price = $1, tp_price = $2, sl_usd = $3, tp_usd = $4
+     WHERE id = $5 AND user_id = $6
+     RETURNING *`,
+    [nextSlPrice, nextTpPrice, nextSlUsd, nextTpUsd, orderId, userId]
+  );
+
+  derivWs.emitUserEvent(userId, 'order_updated', updated);
+  return updated;
+}
+
 const mtmClosingLocks = new Set<number>();
 const lastOrderEmitAt = new Map<number, number>();
+let mtmSweepBusy = false;
+
+async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
+  if (mtmClosingLocks.has(order.id)) return;
+  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(order.contract_type || '').toUpperCase())) return;
+  const entry = Number(order.entry_price || 0);
+  if (!(entry > 0) || !Number.isFinite(quotePrice)) return;
+
+  const isUp = order.contract_type === 'MULTUP' || order.side === 'BUY';
+  const pctDiff = (quotePrice - entry) / entry;
+  const directional = isUp ? pctDiff : -pctDiff;
+  const livePnl = Number(Math.max(-Number(order.stake), directional * Number(order.stake) * Number(order.multiplier || 100)).toFixed(2));
+
+  await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+    quotePrice,
+    livePnl,
+    order.id,
+  ]);
+
+  const nowMs = Date.now();
+  const prevEmit = lastOrderEmitAt.get(order.id) || 0;
+  if (nowMs - prevEmit >= 450) {
+    lastOrderEmitAt.set(order.id, nowMs);
+    derivWs.emitUserEvent(order.user_id, 'order_updated', {
+      id: order.id,
+      current_price: quotePrice,
+      pnl: livePnl,
+    });
+  }
+
+  const hitTpUsd = order.tp_usd && Number(order.tp_usd) > 0 && livePnl >= Number(order.tp_usd);
+  const hitSlUsd = order.sl_usd && Number(order.sl_usd) > 0 && livePnl <= -Number(order.sl_usd);
+  const hitTpPrice =
+    order.tp_price &&
+    Number(order.tp_price) > 0 &&
+    (isUp ? quotePrice >= Number(order.tp_price) : quotePrice <= Number(order.tp_price));
+  const hitSlPrice =
+    order.sl_price &&
+    Number(order.sl_price) > 0 &&
+    (isUp ? quotePrice <= Number(order.sl_price) : quotePrice >= Number(order.sl_price));
+
+  if (hitTpUsd || hitSlUsd || hitTpPrice || hitSlPrice) {
+    mtmClosingLocks.add(order.id);
+    const reason = hitTpUsd || hitTpPrice ? 'Take Profit' : 'Stop Loss';
+    closeOrderById(order.id, order.user_id)
+      .then((closed) => {
+        if (closed) {
+          addNotification(
+            order.user_id,
+            `${reason} Triggered (${order.symbol})`,
+            `Auto-closed #${order.id} ${order.side} ${order.symbol} @ ${quotePrice}. Realized P/L: ${Number(closed.pnl) >= 0 ? '+' : ''}$${Number(closed.pnl).toFixed(2)}.`,
+            'trading'
+          ).catch(() => {});
+        }
+      })
+      .finally(() => mtmClosingLocks.delete(order.id))
+      .catch(() => {});
+  }
+}
 
 export function startMtmPositionMonitor(): void {
   derivWs.onTick(async (tick) => {
+    if (tick.source !== 'deriv_ws') return;
     try {
       const openOrders = await query<any>(
         "SELECT * FROM virtual_orders WHERE symbol = $1 AND status = 'OPEN' AND source != 'bot'",
         [tick.symbol]
       );
-
       for (const order of openOrders) {
-        if (mtmClosingLocks.has(order.id)) continue;
-        if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(order.contract_type)) continue;
-
-        const isUp = order.contract_type === 'MULTUP' || order.side === 'BUY';
-        const pctDiff = (tick.quote - order.entry_price) / (order.entry_price || 1);
-        const directional = isUp ? pctDiff : -pctDiff;
-        const livePnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
-
-        await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
-          tick.quote,
-          livePnl,
-          order.id,
-        ]);
-
-        const nowMs = Date.now();
-        const prevEmit = lastOrderEmitAt.get(order.id) || 0;
-        if (nowMs - prevEmit >= 450) {
-          lastOrderEmitAt.set(order.id, nowMs);
-          derivWs.emitUserEvent(order.user_id, 'order_updated', {
-            id: order.id,
-            current_price: tick.quote,
-            pnl: livePnl,
-          });
-        }
-
-        const hitTpUsd = order.tp_usd && livePnl >= Number(order.tp_usd);
-        const hitSlUsd = order.sl_usd && livePnl <= -Number(order.sl_usd);
-        const hitTpPrice =
-          order.tp_price && (isUp ? tick.quote >= Number(order.tp_price) : tick.quote <= Number(order.tp_price));
-        const hitSlPrice =
-          order.sl_price && (isUp ? tick.quote <= Number(order.sl_price) : tick.quote >= Number(order.sl_price));
-
-        if (hitTpUsd || hitSlUsd || hitTpPrice || hitSlPrice) {
-          mtmClosingLocks.add(order.id);
-          closeOrderById(order.id, order.user_id)
-            .finally(() => mtmClosingLocks.delete(order.id))
-            .catch(() => {});
-        }
+        await evaluateMtmOrder(order, tick.quote);
       }
     } catch {
       // ignore if DB not yet initialized
     }
   });
+
+  // Periodic sweep guarantees MTM + SL/TP checks stay alive across all open positions
+  setInterval(async () => {
+    if (mtmSweepBusy) return;
+    mtmSweepBusy = true;
+    try {
+      const openOrders = await query<any>(
+        "SELECT * FROM virtual_orders WHERE status = 'OPEN' AND contract_type IN ('MULTUP','MULTDOWN','BUY','SELL') LIMIT 100"
+      );
+      for (const order of openOrders) {
+        await derivWs.ensureSymbolSubscribed(order.symbol);
+        const t = derivWs.getLatestTick(order.symbol);
+        if (t && t.source === 'deriv_ws') {
+          await evaluateMtmOrder(order, t.quote);
+        }
+      }
+    } catch {
+      // ignore if DB waking up
+    } finally {
+      mtmSweepBusy = false;
+    }
+  }, 1500);
 }

@@ -1,16 +1,40 @@
 import { Router } from 'express';
 import { pool, query, execute, ensureDatabaseSchema, requireDb, addNotification } from '../db.ts';
 import { SEEDED_BOT_STRATEGIES } from '../catalog.ts';
+import { derivWs } from '../deriv-client.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
-import { placeUnifiedOrder, closeOrderById, bulkCloseOrders } from '../trade-execution.ts';
+import { placeUnifiedOrder, closeOrderById, bulkCloseOrders, updateOrderLimits } from '../trade-execution.ts';
 import { startBotSession, stopBotSession, closeAllBotOrders, getBotStatus } from '../bot-engine-service.ts';
 
 const router = Router();
 
+router.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 router.get('/orders', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const orders = await query('SELECT * FROM virtual_orders WHERE user_id = $1 ORDER BY id DESC LIMIT 200', [
+  const rows = await query<any>('SELECT * FROM virtual_orders WHERE user_id = $1 ORDER BY id DESC LIMIT 200', [
     req.user!.id,
   ]);
+  const orders = rows.map((o) => {
+    if (o.status !== 'OPEN') return o;
+    derivWs.ensureSymbolSubscribed(o.symbol).catch(() => {});
+    const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
+    const t = derivWs.getLatestTick(o.symbol);
+    if (isMult && t && t.source === 'deriv_ws' && Number(o.entry_price) > 0) {
+      const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
+      const pctDiff = (t.quote - Number(o.entry_price)) / Number(o.entry_price);
+      const directional = isUp ? pctDiff : -pctDiff;
+      const livePnl = Number(
+        Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100)).toFixed(2)
+      );
+      return { ...o, current_price: t.quote, pnl: livePnl };
+    }
+    return o;
+  });
   res.json({ orders });
 });
 
@@ -112,6 +136,21 @@ router.post('/orders/:id/close', requireDb, requireAuth, async (req: AuthRequest
     res.json({ order });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to close position' });
+  }
+});
+
+router.patch('/orders/:id/limits', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const b = req.body || {};
+    const order = await updateOrderLimits(Number(req.params.id), req.user!.id, {
+      slPrice: b.slPrice !== undefined ? (b.slPrice === null || b.slPrice === '' ? null : Number(b.slPrice)) : undefined,
+      tpPrice: b.tpPrice !== undefined ? (b.tpPrice === null || b.tpPrice === '' ? null : Number(b.tpPrice)) : undefined,
+      slUsd: b.slUsd !== undefined ? (b.slUsd === null || b.slUsd === '' ? null : Number(b.slUsd)) : undefined,
+      tpUsd: b.tpUsd !== undefined ? (b.tpUsd === null || b.tpUsd === '' ? null : Number(b.tpUsd)) : undefined,
+    });
+    res.json({ order });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to update SL/TP limits' });
   }
 });
 
