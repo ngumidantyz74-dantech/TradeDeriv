@@ -4,12 +4,16 @@ interface LogoProps {
   variant?: 'light' | 'dark';
   size?: 'sm' | 'md' | 'lg';
   showWordmark?: boolean;
+  onClick?: () => void;
+  className?: string;
 }
 
 export const TradeDerivLogo: React.FC<LogoProps> = ({
   variant = 'light',
   size = 'md',
   showWordmark = true,
+  onClick,
+  className = '',
 }) => {
   const iconDim = size === 'sm' ? 28 : size === 'lg' ? 40 : 34;
   const textSize = size === 'sm' ? 'text-lg' : size === 'lg' ? 'text-2xl' : 'text-xl';
@@ -17,7 +21,10 @@ export const TradeDerivLogo: React.FC<LogoProps> = ({
   const navyFill = variant === 'dark' ? '#E2E8F0' : '#0F1F38';
 
   return (
-    <div className="inline-flex items-center gap-2.5 select-none shrink-0">
+    <div
+      onClick={onClick}
+      className={`inline-flex items-center gap-2.5 select-none shrink-0 ${onClick ? 'cursor-pointer' : ''} ${className}`}
+    >
       <svg
         width={iconDim}
         height={iconDim}

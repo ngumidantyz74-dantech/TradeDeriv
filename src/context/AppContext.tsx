@@ -8,6 +8,7 @@ import type {
   OrderRecord,
   NotificationItem,
   PublicSettings,
+  WorkspacePreferences,
 } from '../types';
 import { apiFetch, getStoredToken, setStoredToken } from '../lib/api';
 
@@ -30,6 +31,8 @@ interface AppContextValue {
   selectedSymbol: string;
   setSelectedSymbol: (s: string) => void;
   ticks: Record<string, TickData>;
+  wsConnected: boolean;
+  lastDerivTickAt: number | null;
   instruments: MarketInstrument[];
   orders: OrderRecord[];
   watchlist: string[];
@@ -38,6 +41,11 @@ interface AppContextValue {
   publicSettings: PublicSettings;
   kesRate: number;
   loadingAuth: boolean;
+  workspacePreferences: WorkspacePreferences;
+  saveWorkspacePreferences: (patch: WorkspacePreferences) => Promise<void>;
+  adminGateOpen: boolean;
+  setAdminGateOpen: (v: boolean) => void;
+  registerLogoTap: () => void;
   formatMoney: (usdAmount: number, opts?: { hideable?: boolean; currencyOverride?: string }) => string;
   refreshAll: () => Promise<void>;
   refreshOrders: () => Promise<void>;
@@ -66,13 +74,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
     return (localStorage.getItem('td_theme') as 'light' | 'dark') || 'light';
   });
-  const [activeTab, setActiveTab] = useState<NavTab>('home');
+  const [activeTab, setActiveTabState] = useState<NavTab>('home');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('1HZ100V');
   const [ticks, setTicks] = useState<Record<string, TickData>>({});
+  const [wsConnected, setWsConnected] = useState<boolean>(false);
+  const [lastDerivTickAt, setLastDerivTickAt] = useState<number | null>(null);
   const [instruments, setInstruments] = useState<MarketInstrument[]>([]);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
+  const [workspacePreferences, setWorkspacePreferences] = useState<WorkspacePreferences>({});
+  const [adminGateOpen, setAdminGateOpen] = useState<boolean>(false);
   const [publicSettings, setPublicSettings] = useState<PublicSettings>({
     branding: { appName: 'TradeDeriv' },
     global: { kesRate: 130.0, tickerText: 'TradeDeriv Live Markets', adminPrivateSlug: 'pf-ops-9482' },
@@ -81,6 +93,41 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [loadingAuth, setLoadingAuth] = useState<boolean>(true);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
+  const tapCountRef = useRef<number>(0);
+  const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const resetLogoTaps = useCallback(() => {
+    tapCountRef.current = 0;
+    if (tapTimerRef.current) {
+      clearTimeout(tapTimerRef.current);
+      tapTimerRef.current = null;
+    }
+  }, []);
+
+  const setActiveTab = useCallback(
+    (t: NavTab) => {
+      resetLogoTaps();
+      setActiveTabState(t);
+    },
+    [resetLogoTaps]
+  );
+
+  // Hidden 20-tap gesture within 2.5s rolling timeout to open Owner MIS Portal (zero visible hints)
+  const registerLogoTap = useCallback(() => {
+    if (tapTimerRef.current) {
+      clearTimeout(tapTimerRef.current);
+    }
+    tapCountRef.current += 1;
+    if (tapCountRef.current >= 20) {
+      resetLogoTaps();
+      setAdminGateOpen(true);
+      return;
+    }
+    tapTimerRef.current = setTimeout(() => {
+      tapCountRef.current = 0;
+      tapTimerRef.current = null;
+    }, 2500);
+  }, [resetLogoTaps]);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
@@ -149,23 +196,42 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       return;
     }
     try {
-      const [meRes, ordRes, wlRes, notifRes] = await Promise.all([
+      const [meRes, ordRes, wlRes, notifRes, prefRes] = await Promise.all([
         apiFetch<{ user: UserProfile; accounts: ConnectedAccount[] }>('/api/auth/me'),
         apiFetch<{ orders: OrderRecord[] }>('/api/orders'),
         apiFetch<{ symbols: string[] }>('/api/watchlists'),
         apiFetch<{ notifications: NotificationItem[] }>('/api/notifications'),
+        apiFetch<WorkspacePreferences>('/api/workspace/preferences').catch(() => ({} as WorkspacePreferences)),
       ]);
       setUser(meRes.user);
       setAccounts(meRes.accounts || []);
       setOrders(ordRes.orders || []);
       setWatchlist(wlRes.symbols || []);
       setNotifications(notifRes.notifications || []);
+      setWorkspacePreferences(prefRes || {});
     } catch {
       setStoredToken(null);
       setToken(null);
       setUser(null);
     } finally {
       setLoadingAuth(false);
+    }
+  }, []);
+
+  const saveWorkspacePreferences = useCallback(async (patch: WorkspacePreferences) => {
+    setWorkspacePreferences((prev) => ({
+      layout: patch.layout !== undefined ? patch.layout : prev.layout,
+      chartDrawings: patch.chartDrawings !== undefined ? patch.chartDrawings : prev.chartDrawings,
+      chartIndicators: patch.chartIndicators !== undefined ? patch.chartIndicators : prev.chartIndicators,
+    }));
+    if (!getStoredToken()) return;
+    try {
+      await apiFetch('/api/workspace/preferences', {
+        method: 'PUT',
+        body: JSON.stringify(patch),
+      });
+    } catch {
+      // ignore transient error
     }
   }, []);
 
@@ -184,8 +250,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setUser(null);
     setAccounts([]);
     setOrders([]);
+    setWorkspacePreferences({});
     setActiveTab('home');
-  }, []);
+  }, [setActiveTab]);
 
   // Capture oauth_token in URL hash or query after Deriv OAuth2 redirect
   useEffect(() => {
@@ -203,7 +270,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         });
       }
     }
-  }, [loginWithToken, showToast]);
+  }, [loginWithToken, setActiveTab, showToast]);
 
   // Listen for popup postMessage from /api/deriv/oauth/callback
   useEffect(() => {
@@ -219,14 +286,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
     window.addEventListener('message', onMessage);
     return () => window.removeEventListener('message', onMessage);
-  }, [loginWithToken, showToast]);
+  }, [loginWithToken, setActiveTab, showToast]);
 
   useEffect(() => {
     fetchPublicData();
     refreshAll();
   }, [fetchPublicData, refreshAll]);
 
-  // Connect to /ws for realtime ticks & user order/balance events
+  // Connect to /ws for realtime ticks & user order/balance/alert events
   useEffect(() => {
     const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = `${proto}//${window.location.host}/ws${token ? `?token=${encodeURIComponent(token)}` : ''}`;
@@ -234,7 +301,16 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     wsRef.current = ws;
 
     ws.onopen = () => {
+      setWsConnected(true);
       ws.send(JSON.stringify({ type: 'subscribe', symbol: selectedSymbol }));
+    };
+
+    ws.onclose = () => {
+      setWsConnected(false);
+    };
+
+    ws.onerror = () => {
+      setWsConnected(false);
     };
 
     ws.onmessage = (ev) => {
@@ -242,8 +318,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         const msg = JSON.parse(ev.data);
         if (msg.type === 'ticks_snapshot' && msg.ticks) {
           setTicks((prev) => ({ ...prev, ...msg.ticks }));
+          setLastDerivTickAt(Date.now());
         } else if (msg.type === 'tick' && msg.tick) {
           setTicks((prev) => ({ ...prev, [msg.tick.symbol]: msg.tick }));
+          setLastDerivTickAt(Date.now());
         } else if (msg.type === 'balance_updated' && msg.data) {
           setUser((prev) =>
             prev ? { ...prev, virtual_workspace_balance: Number(msg.data.virtual_workspace_balance) } : prev
@@ -254,6 +332,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           setOrders((prev) => prev.map((o) => (o.id === msg.data.id ? msg.data : o)));
         } else if (msg.type === 'account_updated') {
           refreshAccounts(false);
+        } else if (msg.type === 'alert_triggered' && msg.data) {
+          showToast(`Alert: ${msg.data.symbol} @ ${msg.data.triggerPrice}`, 'info');
+          apiFetch<{ notifications: NotificationItem[] }>('/api/notifications')
+            .then((n) => setNotifications(n.notifications || []))
+            .catch(() => {});
         }
       } catch {
         // ignore
@@ -267,7 +350,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // ignore
       }
     };
-  }, [token, refreshAccounts]);
+  }, [token, refreshAccounts, showToast]);
 
   useEffect(() => {
     if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN && selectedSymbol) {
@@ -294,16 +377,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [token, showToast]
   );
 
-  const toggleWatchlist = useCallback(async (symbol: string) => {
-    const exists = watchlist.includes(symbol);
-    const res = exists
-      ? await apiFetch<{ symbols: string[] }>(`/api/watchlists/${encodeURIComponent(symbol)}`, { method: 'DELETE' })
-      : await apiFetch<{ symbols: string[] }>('/api/watchlists', {
-          method: 'POST',
-          body: JSON.stringify({ symbol }),
-        });
-    setWatchlist(res.symbols || []);
-  }, [watchlist]);
+  const toggleWatchlist = useCallback(
+    async (symbol: string) => {
+      const exists = watchlist.includes(symbol);
+      const res = exists
+        ? await apiFetch<{ symbols: string[] }>(`/api/watchlists/${encodeURIComponent(symbol)}`, { method: 'DELETE' })
+        : await apiFetch<{ symbols: string[] }>('/api/watchlists', {
+            method: 'POST',
+            body: JSON.stringify({ symbol }),
+          });
+      setWatchlist(res.symbols || []);
+    },
+    [watchlist]
+  );
 
   const markNotificationRead = useCallback(async (id: number | 'all') => {
     await apiFetch(`/api/notifications/${id}/read`, { method: 'PATCH' });
@@ -359,6 +445,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         selectedSymbol,
         setSelectedSymbol,
         ticks,
+        wsConnected,
+        lastDerivTickAt,
         instruments,
         orders,
         watchlist,
@@ -367,6 +455,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         publicSettings,
         kesRate,
         loadingAuth,
+        workspacePreferences,
+        saveWorkspacePreferences,
+        adminGateOpen,
+        setAdminGateOpen,
+        registerLogoTap,
         formatMoney,
         refreshAll,
         refreshOrders,

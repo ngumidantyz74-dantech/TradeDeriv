@@ -128,9 +128,17 @@ router.get('/market/candles', async (req, res) => {
   const granularity = Number(req.query.granularity || 60);
   const count = Math.min(500, Math.max(20, Number(req.query.count || 120)));
 
-  const candles = await derivWs.fetchCandles(symbol, granularity, count);
+  const detailed = await derivWs.fetchCandlesDetailed(symbol, granularity, count);
   const tick = derivWs.getLatestTick(symbol);
-  res.json({ symbol, granularity, candles, latestTick: tick });
+  res.json({
+    symbol,
+    granularity,
+    candles: detailed.candles,
+    source: detailed.source,
+    error: detailed.error || null,
+    lastUpdated: detailed.lastUpdated,
+    latestTick: tick,
+  });
 });
 
 router.get('/market/digit-analysis', async (req, res) => {

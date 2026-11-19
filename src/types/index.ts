@@ -81,6 +81,7 @@ export interface CandleData {
   high: number;
   low: number;
   close: number;
+  tick_volume?: number;
 }
 
 export interface OrderRecord {
@@ -111,6 +112,78 @@ export interface OrderRecord {
   status: 'OPEN' | 'CLOSED';
   opened_at: string;
   closed_at: string | null;
+  strategy_key?: string;
+  timeframe?: string;
+  account_mode?: 'real' | 'demo';
+  notes?: string;
+}
+
+export interface WorkspacePreferences {
+  layout?: {
+    showKpis?: boolean;
+    showAccounts?: boolean;
+    showQuickTools?: boolean;
+    showHighlights?: boolean;
+  };
+  chartDrawings?: Record<
+    string,
+    {
+      hLines?: number[];
+      trendLines?: Array<{ id: string; t1: number; p1: number; t2: number; p2: number }>;
+      fibs?: Array<{ id: string; low: number; high: number; mode: 'retracement' | 'extension' }>;
+    }
+  >;
+  chartIndicators?: {
+    chartMode?: 'candles' | 'line' | 'area';
+    ema9?: boolean;
+    ema20?: boolean;
+    ema50?: boolean;
+    ema200?: boolean;
+    sma20?: boolean;
+    sma50?: boolean;
+    bb?: boolean;
+    psar?: boolean;
+    vwap?: boolean;
+    smc?: boolean;
+    rsi14?: boolean;
+    macd?: boolean;
+    stochastic?: boolean;
+    atr14?: boolean;
+    adx14?: boolean;
+  };
+}
+
+export interface JournalEntry {
+  id: number;
+  user_id: number;
+  order_id: number | null;
+  symbol: string;
+  side: string;
+  strategy_key: string;
+  timeframe: string;
+  rationale: string;
+  emotions: string;
+  discipline_score: number;
+  lessons: string;
+  image_url: string;
+  tags_json: string;
+  order_pnl?: number | null;
+  order_entry_price?: number | null;
+  order_exit_price?: number | null;
+  order_status?: string | null;
+  created_at: string;
+}
+
+export interface SmartAlert {
+  id: number;
+  user_id: number;
+  symbol: string;
+  alert_type: 'price_above' | 'price_below';
+  condition_json: string;
+  message: string;
+  status: 'active' | 'triggered' | 'paused';
+  triggered_at: string | null;
+  created_at: string;
 }
 
 export interface BotStrategy {

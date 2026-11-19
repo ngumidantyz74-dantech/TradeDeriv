@@ -293,6 +293,104 @@ async function runSchemaAndSeed(): Promise<void> {
         details_json TEXT DEFAULT '{}',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS admin_login_attempts (
+        id SERIAL PRIMARY KEY,
+        email TEXT NOT NULL,
+        ip_address TEXT DEFAULT 'unknown',
+        success BOOLEAN NOT NULL DEFAULT FALSE,
+        reason TEXT DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS system_error_logs (
+        id SERIAL PRIMARY KEY,
+        source TEXT NOT NULL,
+        severity TEXT NOT NULL DEFAULT 'error',
+        message TEXT NOT NULL,
+        details_json TEXT DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS risk_settings (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        risk_per_trade_pct DOUBLE PRECISION NOT NULL DEFAULT 1.5,
+        daily_loss_limit_usd DOUBLE PRECISION NOT NULL DEFAULT 150.0,
+        max_exposure_usd DOUBLE PRECISION NOT NULL DEFAULT 500.0,
+        max_consecutive_losses INTEGER NOT NULL DEFAULT 4,
+        cooldown_minutes INTEGER NOT NULL DEFAULT 30,
+        cooldown_until TIMESTAMPTZ,
+        enforce_limits BOOLEAN NOT NULL DEFAULT TRUE,
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS user_strategies (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        strategy_key TEXT NOT NULL,
+        name TEXT NOT NULL,
+        enabled BOOLEAN NOT NULL DEFAULT TRUE,
+        execution_mode TEXT NOT NULL DEFAULT 'paper',
+        symbol TEXT NOT NULL DEFAULT '1HZ100V',
+        timeframe TEXT NOT NULL DEFAULT '15m',
+        config_json TEXT NOT NULL DEFAULT '{}',
+        risk_json TEXT NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(user_id, strategy_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS strategy_backtest_runs (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        strategy_key TEXT NOT NULL,
+        symbol TEXT NOT NULL,
+        granularity INTEGER NOT NULL DEFAULT 900,
+        candle_count INTEGER NOT NULL DEFAULT 300,
+        spread_cost_pct DOUBLE PRECISION NOT NULL DEFAULT 0.06,
+        in_sample_json TEXT NOT NULL DEFAULT '{}',
+        out_of_sample_json TEXT NOT NULL DEFAULT '{}',
+        full_metrics_json TEXT NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS trading_journal_entries (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        order_id INTEGER REFERENCES virtual_orders(id) ON DELETE SET NULL,
+        symbol TEXT NOT NULL,
+        side TEXT NOT NULL DEFAULT 'BUY',
+        strategy_key TEXT DEFAULT '',
+        timeframe TEXT DEFAULT '15m',
+        rationale TEXT NOT NULL DEFAULT '',
+        emotions TEXT DEFAULT 'Calm & Objective',
+        discipline_score INTEGER NOT NULL DEFAULT 8,
+        lessons TEXT DEFAULT '',
+        image_url TEXT DEFAULT '',
+        tags_json TEXT NOT NULL DEFAULT '[]',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS smart_alerts (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        symbol TEXT NOT NULL,
+        alert_type TEXT NOT NULL DEFAULT 'price_above',
+        condition_json TEXT NOT NULL DEFAULT '{}',
+        message TEXT NOT NULL,
+        status TEXT NOT NULL DEFAULT 'active',
+        triggered_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS user_workspace_preferences (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        layout_json TEXT NOT NULL DEFAULT '{}',
+        chart_drawings_json TEXT NOT NULL DEFAULT '{}',
+        chart_indicators_json TEXT NOT NULL DEFAULT '{}',
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
 
     // Idempotent column migrations for pre-existing tables
@@ -307,6 +405,10 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_nickname TEXT DEFAULT '';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_client_id TEXT DEFAULT '';
+      ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS strategy_key TEXT DEFAULT '';
+      ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS timeframe TEXT DEFAULT '';
+      ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS account_mode TEXT DEFAULT 'demo';
+      ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
     `);
 
     await client.query(`
@@ -320,6 +422,11 @@ async function runSchemaAndSeed(): Promise<void> {
 
       CREATE UNIQUE INDEX IF NOT EXISTS idx_connected_accounts_user_login
       ON connected_accounts (user_id, deriv_login_id);
+
+      CREATE INDEX IF NOT EXISTS idx_virtual_orders_user_status ON virtual_orders (user_id, status, opened_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_smart_alerts_user_status ON smart_alerts (user_id, status);
+      CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_email_time ON admin_login_attempts (email, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_journal_user_time ON trading_journal_entries (user_id, created_at DESC);
     `);
 
     // Seed roles
@@ -551,3 +658,21 @@ export async function logAdminAction(
     [adminUserId, action, targetType, targetId, JSON.stringify(details)]
   );
 }
+
+export async function logSystemError(
+  source: string,
+  message: string,
+  severity: 'warn' | 'error' | 'critical' = 'error',
+  details: Record<string, unknown> = {}
+): Promise<void> {
+  if (!pool) return;
+  try {
+    await execute(
+      'INSERT INTO system_error_logs (source, severity, message, details_json) VALUES ($1, $2, $3, $4)',
+      [source, severity, message.slice(0, 500), JSON.stringify(details)]
+    );
+  } catch {
+    // avoid recursive error loops if DB is down
+  }
+}
+

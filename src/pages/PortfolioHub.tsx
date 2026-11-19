@@ -13,6 +13,7 @@ import {
   CheckCircle2,
   ShieldCheck,
   ExternalLink,
+  BarChart3,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
@@ -64,17 +65,25 @@ export const PortfolioHub: React.FC = () => {
   const [verifyCode, setVerifyCode] = useState('');
   const [hintCode, setHintCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [perfSplit, setPerfSplit] = useState<{
+    real: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
+    demo: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
+  } | null>(null);
 
   const loadPortfolioData = useCallback(async () => {
     try {
-      const [txRes, agRes, p2pRes] = await Promise.all([
+      const [txRes, agRes, p2pRes, perfRes] = await Promise.all([
         apiFetch<{ transactions: CashierTransaction[] }>('/api/cashier/transactions'),
         apiFetch<{ agents: PaymentAgent[] }>('/api/cashier/payment-agents'),
         apiFetch<{ adverts: P2PAdvert[] }>('/api/cashier/p2p/adverts'),
+        apiFetch<any>('/api/analytics/performance').catch(() => null),
       ]);
       setTransactions(txRes.transactions || []);
       setAgents(agRes.agents || []);
       setAdverts(p2pRes.adverts || []);
+      if (perfRes?.real && perfRes?.demo) {
+        setPerfSplit({ real: perfRes.real, demo: perfRes.demo });
+      }
     } catch {
       // ignore initial error
     }
@@ -439,6 +448,47 @@ export const PortfolioHub: React.FC = () => {
                 </span>
               </button>
             </div>
+
+            {perfSplit && (
+              <div className="mt-4 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-bold flex items-center gap-2">
+                    <BarChart3 className="w-4 h-4 text-[#FF444F]" /> Account Performance Split (Real vs Demo)
+                  </h3>
+                  <button
+                    type="button"
+                    onClick={() => setActiveTab('reports')}
+                    className="text-xs font-semibold text-[#FF444F] hover:underline cursor-pointer"
+                  >
+                    Open Full Analytics & Journal
+                  </button>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                  <div className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] flex items-center justify-between">
+                    <div>
+                      <p className="font-semibold text-[#FF444F]">Real Money Trades</p>
+                      <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                        {perfSplit.real.totalTrades} closed · Win {perfSplit.real.winRatePct}% · PF {perfSplit.real.profitFactor}
+                      </p>
+                    </div>
+                    <strong className={`font-mono tabular-nums text-sm ${perfSplit.real.netPnlUsd >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                      {perfSplit.real.netPnlUsd >= 0 ? '+' : ''}${perfSplit.real.netPnlUsd.toFixed(2)}
+                    </strong>
+                  </div>
+                  <div className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] flex items-center justify-between">
+                    <div>
+                      <p className="font-semibold text-[#1958B7]">Demo / Virtual Trades</p>
+                      <p className="text-[11px] text-slate-500 font-mono tabular-nums">
+                        {perfSplit.demo.totalTrades} closed · Win {perfSplit.demo.winRatePct}% · PF {perfSplit.demo.profitFactor}
+                      </p>
+                    </div>
+                    <strong className={`font-mono tabular-nums text-sm ${perfSplit.demo.netPnlUsd >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                      {perfSplit.demo.netPnlUsd >= 0 ? '+' : ''}${perfSplit.demo.netPnlUsd.toFixed(2)}
+                    </strong>
+                  </div>
+                </div>
+              </div>
+            )}
           </section>
         )}
 

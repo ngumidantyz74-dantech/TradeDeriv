@@ -1,21 +1,42 @@
-import { Router } from 'express';
-import bcrypt from 'bcryptjs';
+import { Router, type Response } from 'express';
 import {
   query,
   queryOne,
   execute,
   requireDb,
+  checkDatabaseHealth,
   getSetting,
   setSetting,
   logAdminAction,
 } from '../db.ts';
 import { config } from '../config.ts';
 import { encryptToken, decryptToken, randomId } from '../crypto.ts';
-import { requireAdmin, signUserToken, type AuthRequest } from '../middleware/auth.ts';
+import { hashPasswordArgon2id, verifyPasswordHash } from '../password-hash.ts';
+import {
+  ADMIN_SESSION_COOKIE,
+  getAdminCookieOptions,
+  requireAdmin,
+  signUserToken,
+  signAdminReauthToken,
+  verifyAdminReauthToken,
+  type AuthRequest,
+} from '../middleware/auth.ts';
 import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
 import { closeOrderById } from '../trade-execution.ts';
 
 const router = Router();
+
+function checkReauthHeader(req: AuthRequest, res: Response): boolean {
+  const token = String(req.headers['x-admin-reauth'] || '').trim();
+  if (!verifyAdminReauthToken(token, req.user!.id)) {
+    res.status(428).json({
+      error: 'Re-authentication required for sensitive admin operation.',
+      code: 'REAUTH_REQUIRED',
+    });
+    return false;
+  }
+  return true;
+}
 
 router.get('/admin/bootstrap-status', requireDb, async (_req, res) => {
   const adminRow = await queryOne("SELECT id, email, full_name FROM users WHERE role IN ('admin', 'owner') LIMIT 1");
@@ -33,13 +54,13 @@ router.post('/admin/bootstrap', requireDb, async (req, res) => {
     return;
   }
   const { email, password, full_name = 'Platform Owner' } = req.body || {};
-  if (!email || !password) {
-    res.status(400).json({ error: 'Email and password are required' });
+  if (!email || !password || String(password).length < 8) {
+    res.status(400).json({ error: 'Email and password (min 8 chars) are required' });
     return;
   }
 
   const cleanEmail = String(email).trim().toLowerCase();
-  const hash = await bcrypt.hash(String(password), 10);
+  const hash = await hashPasswordArgon2id(String(password));
 
   const owner = await queryOne<any>(
     `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
@@ -48,7 +69,8 @@ router.post('/admin/bootstrap', requireDb, async (req, res) => {
     [cleanEmail, hash, String(full_name), `OWNER-${randomId(3).toUpperCase()}`]
   );
 
-  const token = signUserToken({ id: owner.id, email: owner.email, role: owner.role });
+  const token = signUserToken({ id: owner.id, email: owner.email, role: owner.role }, '12h');
+  res.cookie(ADMIN_SESSION_COOKIE, token, getAdminCookieOptions());
   await logAdminAction(owner.id, 'owner_bootstrap', 'users', String(owner.id), { email: cleanEmail });
 
   res.status(201).json({
@@ -64,22 +86,113 @@ router.post('/admin/login', requireDb, async (req, res) => {
     return;
   }
   const cleanEmail = String(email).trim().toLowerCase();
-  const user = await queryOne<any>("SELECT * FROM users WHERE email = $1 AND role IN ('admin', 'owner')", [cleanEmail]);
-  if (!user) {
-    res.status(401).json({ error: 'Invalid owner credentials' });
+  const ip = String(req.ip || 'unknown');
+
+  // Progressive rate limiting / temporary lockout (5 failures in 15 mins per IP or email)
+  const failCountRow = await queryOne<{ cnt: number }>(
+    `SELECT COUNT(*)::int as cnt
+     FROM admin_login_attempts
+     WHERE success = FALSE
+       AND created_at > NOW() - INTERVAL '15 minutes'
+       AND (email = $1 OR ip_address = $2)`,
+    [cleanEmail, ip]
+  );
+  if ((failCountRow?.cnt || 0) >= 5) {
+    await execute(
+      'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
+      [cleanEmail, ip, 'rate_limited_lockout']
+    );
+    res.status(429).json({
+      error: 'Too many failed admin login attempts. Temporary 15-minute security lockout active.',
+    });
     return;
   }
-  const ok = await bcrypt.compare(String(password), user.password_hash);
-  if (!ok) {
+
+  const user = await queryOne<any>("SELECT * FROM users WHERE email = $1 AND role IN ('admin', 'owner')", [cleanEmail]);
+  if (!user) {
+    await execute(
+      'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
+      [cleanEmail, ip, 'unknown_admin_email']
+    );
     res.status(401).json({ error: 'Invalid owner credentials' });
     return;
   }
 
-  const token = signUserToken({ id: user.id, email: user.email, role: user.role });
+  const { valid, needsRehash } = await verifyPasswordHash(String(password), user.password_hash);
+  if (!valid) {
+    await execute(
+      'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
+      [cleanEmail, ip, 'bad_password']
+    );
+    res.status(401).json({ error: 'Invalid owner credentials' });
+    return;
+  }
+
+  if (needsRehash) {
+    const upgraded = await hashPasswordArgon2id(String(password));
+    await execute('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [upgraded, user.id]);
+  }
+
+  await execute(
+    'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, TRUE, $3)',
+    [cleanEmail, ip, 'authenticated']
+  );
+
+  const token = signUserToken({ id: user.id, email: user.email, role: user.role }, '12h');
+  res.cookie(ADMIN_SESSION_COOKIE, token, getAdminCookieOptions());
   await logAdminAction(user.id, 'owner_login', 'users', String(user.id));
   res.json({
     token,
     user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role },
+  });
+});
+
+router.post('/admin/logout', (_req, res) => {
+  res.clearCookie(ADMIN_SESSION_COOKIE, { path: '/' });
+  res.json({ ok: true });
+});
+
+router.post('/admin/reauth', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  const { password } = req.body || {};
+  if (!password) {
+    res.status(400).json({ error: 'Current admin password is required' });
+    return;
+  }
+  const adminUser = await queryOne<any>('SELECT id, password_hash FROM users WHERE id = $1', [req.user!.id]);
+  if (!adminUser) {
+    res.status(404).json({ error: 'Admin user not found' });
+    return;
+  }
+  const { valid } = await verifyPasswordHash(String(password), adminUser.password_hash);
+  if (!valid) {
+    await logAdminAction(req.user!.id, 'admin_reauth_failed', 'users', String(req.user!.id));
+    res.status(401).json({ error: 'Incorrect administrator password' });
+    return;
+  }
+  const reauthToken = signAdminReauthToken(req.user!.id);
+  await logAdminAction(req.user!.id, 'admin_reauth_success', 'users', String(req.user!.id));
+  res.json({ reauthToken, expiresInSeconds: 600 });
+});
+
+router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
+  const [database, loginAttempts, errorLogs, securityLogs] = await Promise.all([
+    checkDatabaseHealth(),
+    query('SELECT id, email, ip_address, success, reason, created_at FROM admin_login_attempts ORDER BY id DESC LIMIT 50'),
+    query('SELECT id, source, severity, message, details_json, created_at FROM system_error_logs ORDER BY id DESC LIMIT 50'),
+    query('SELECT id, user_id, event_type, ip_address, details_json, created_at FROM security_logs ORDER BY id DESC LIMIT 50'),
+  ]);
+  res.json({
+    database,
+    deriv: derivWs.getDiagnostics(),
+    environment: {
+      nodeEnv: config.nodeEnv,
+      geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
+      brevoConfigured: Boolean(config.brevoApiKey),
+      derivAppId: getActiveDerivAppId(),
+    },
+    loginAttempts,
+    errorLogs,
+    securityLogs,
   });
 });
 
@@ -166,6 +279,7 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
 
 // Settings updates
 router.put('/admin/settings/admin-credentials', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  if (!checkReauthHeader(req, res)) return;
   const { email, password, full_name } = req.body || {};
   if (email) {
     await execute('UPDATE users SET email = $1, updated_at = NOW() WHERE id = $2', [
@@ -180,7 +294,7 @@ router.put('/admin/settings/admin-credentials', requireDb, requireAdmin, async (
     ]);
   }
   if (password) {
-    const hash = await bcrypt.hash(String(password), 10);
+    const hash = await hashPasswordArgon2id(String(password));
     await execute('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [hash, req.user!.id]);
   }
   await logAdminAction(req.user!.id, 'update_admin_credentials', 'users', String(req.user!.id));
@@ -314,7 +428,7 @@ router.post('/admin/users', requireDb, requireAdmin, async (req: AuthRequest, re
     return;
   }
   const cleanEmail = String(email).trim().toLowerCase();
-  const hash = await bcrypt.hash(String(password), 10);
+  const hash = await hashPasswordArgon2id(String(password));
   try {
     const user = await queryOne<any>(
       `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
@@ -360,12 +474,16 @@ router.patch('/admin/users/:id/role', requireDb, requireAdmin, async (req: AuthR
 router.patch('/admin/users/:id/status', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const status = String(req.body?.status || 'active');
+  if (status === 'suspended' || status === 'closed') {
+    if (!checkReauthHeader(req, res)) return;
+  }
   await execute('UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2', [status, id]);
   await logAdminAction(req.user!.id, 'update_user_status', 'users', String(id), { status });
   res.json({ ok: true });
 });
 
 router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  if (!checkReauthHeader(req, res)) return;
   const id = Number(req.params.id);
   const balance = Number(req.body?.balance);
   if (Number.isNaN(balance) || balance < 0) {
@@ -465,6 +583,7 @@ router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, async 
 });
 
 router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  if (!checkReauthHeader(req, res)) return;
   const id = Number(req.params.id);
   const balance = Number(req.body?.balance);
   const currency = req.body?.currency ? String(req.body.currency).trim().toUpperCase() : null;

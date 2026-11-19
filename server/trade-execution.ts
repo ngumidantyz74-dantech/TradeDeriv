@@ -1,11 +1,11 @@
-import { query, queryOne, execute, addNotification } from './db.ts';
+import { query, queryOne, execute, addNotification, logSystemError } from './db.ts';
 import { decryptToken } from './crypto.ts';
 import { derivWs, derivRestRequest, OtpDerivClient } from './deriv-client.ts';
 
 export interface PlaceOrderInput {
   userId: number;
   symbol: string;
-  side: string; // BUY | SELL | CALL | PUT | DIGITOVER | DIGITUNDER | DIGITEVEN | DIGITODD | DIGITMATCH | DIGITDIFF | MULTUP | MULTDOWN
+  side: string;
   contractType?: string;
   lots?: number;
   stake?: number;
@@ -20,7 +20,14 @@ export interface PlaceOrderInput {
   executionMode?: 'virtual' | 'deriv';
   connectedAccountId?: number | null;
   source?: 'manual' | 'bot' | 'bulk';
+  strategyKey?: string;
+  timeframe?: string;
+  accountMode?: 'demo' | 'real';
+  notes?: string;
+  idempotencyKey?: string;
 }
+
+const recentOrderLocks = new Map<string, number>();
 
 function normalizeContractType(side: string, explicitType?: string): string {
   if (explicitType) return explicitType.toUpperCase();
@@ -38,7 +45,10 @@ function normalizeContractType(side: string, explicitType?: string): string {
   return 'MULTUP';
 }
 
-async function getDecryptedAccountToken(connectedAccountId: number, userId: number): Promise<{
+export async function getDecryptedAccountToken(
+  connectedAccountId: number,
+  userId: number
+): Promise<{
   account: {
     id: number;
     deriv_account_id: string;
@@ -82,7 +92,98 @@ async function getDecryptedAccountToken(connectedAccountId: number, userId: numb
   return { account, token };
 }
 
+async function checkUserRiskLimits(userId: number, stake: number, source: string): Promise<void> {
+  if (source === 'bulk') return;
+  const risk = await queryOne<{
+    daily_loss_limit_usd: number;
+    max_exposure_usd: number;
+    max_consecutive_losses: number;
+    cooldown_minutes: number;
+    cooldown_until: string | null;
+    enforce_limits: boolean;
+  }>('SELECT * FROM risk_settings WHERE user_id = $1', [userId]);
+
+  if (!risk || !risk.enforce_limits) return;
+
+  if (risk.cooldown_until && new Date(risk.cooldown_until).getTime() > Date.now()) {
+    const minsLeft = Math.ceil((new Date(risk.cooldown_until).getTime() - Date.now()) / 60000);
+    throw new Error(`Risk cooldown active for ${minsLeft} more minute(s) after consecutive losses.`);
+  }
+
+  const todayPnlRow = await queryOne<{ daily_pnl: number }>(
+    `SELECT COALESCE(SUM(pnl), 0) as daily_pnl
+     FROM virtual_orders
+     WHERE user_id = $1 AND status = 'CLOSED' AND closed_at >= CURRENT_DATE`,
+    [userId]
+  );
+  const dailyPnl = Number(todayPnlRow?.daily_pnl || 0);
+  if (dailyPnl <= -Math.abs(Number(risk.daily_loss_limit_usd || 150))) {
+    throw new Error(
+      `Daily loss limit reached ($${Math.abs(dailyPnl).toFixed(2)} / $${Number(risk.daily_loss_limit_usd).toFixed(2)}). Trading paused by Risk Centre.`
+    );
+  }
+
+  const exposureRow = await queryOne<{ open_stake: number }>(
+    `SELECT COALESCE(SUM(stake), 0) as open_stake
+     FROM virtual_orders
+     WHERE user_id = $1 AND status = 'OPEN'`,
+    [userId]
+  );
+  const currentExposure = Number(exposureRow?.open_stake || 0);
+  if (currentExposure + stake > Number(risk.max_exposure_usd || 500)) {
+    throw new Error(
+      `Max exposure limit ($${Number(risk.max_exposure_usd).toFixed(2)}) would be exceeded ($${(currentExposure + stake).toFixed(2)}).`
+    );
+  }
+}
+
+async function evaluateConsecutiveLossCooldown(userId: number): Promise<void> {
+  try {
+    const risk = await queryOne<{
+      max_consecutive_losses: number;
+      cooldown_minutes: number;
+      enforce_limits: boolean;
+    }>('SELECT max_consecutive_losses, cooldown_minutes, enforce_limits FROM risk_settings WHERE user_id = $1', [userId]);
+    if (!risk || !risk.enforce_limits || risk.max_consecutive_losses <= 0) return;
+
+    const recent = await query<{ pnl: number }>(
+      `SELECT pnl FROM virtual_orders WHERE user_id = $1 AND status = 'CLOSED' ORDER BY closed_at DESC LIMIT $2`,
+      [userId, risk.max_consecutive_losses]
+    );
+    if (recent.length >= risk.max_consecutive_losses && recent.every((r) => Number(r.pnl) < 0)) {
+      const mins = Math.max(1, Number(risk.cooldown_minutes || 30));
+      await execute(
+        `UPDATE risk_settings SET cooldown_until = NOW() + ($1 || ' minutes')::interval, updated_at = NOW() WHERE user_id = $2`,
+        [String(mins), userId]
+      );
+      await addNotification(
+        userId,
+        'Risk Cooldown Triggered',
+        `Paused new manual orders for ${mins} minutes after ${risk.max_consecutive_losses} consecutive losses.`,
+        'risk'
+      );
+    }
+  } catch {
+    // ignore risk evaluation failure
+  }
+}
+
 export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
+  const dedupeKey =
+    input.idempotencyKey ||
+    `${input.userId}:${input.symbol}:${input.side}:${input.contractType || ''}:${input.stake || ''}:${input.lots || ''}`;
+  const now = Date.now();
+  const prevLock = recentOrderLocks.get(dedupeKey);
+  if (input.source === 'manual' && prevLock && now - prevLock < 1800) {
+    throw new Error('Duplicate order submission prevented. Please wait a moment before clicking again.');
+  }
+  recentOrderLocks.set(dedupeKey, now);
+  if (recentOrderLocks.size > 500) {
+    for (const [k, ts] of recentOrderLocks.entries()) {
+      if (now - ts > 10000) recentOrderLocks.delete(k);
+    }
+  }
+
   const user = await queryOne<{ id: number; virtual_workspace_balance: number }>(
     'SELECT id, virtual_workspace_balance FROM users WHERE id = $1',
     [input.userId]
@@ -101,33 +202,43 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const duration = Number(input.duration || 5);
   const durationUnit = input.durationUnit || 't';
 
-  let slUsd = input.slUsd !== undefined && input.slUsd !== null ? Math.abs(Number(input.slUsd)) : null;
-  let tpUsd = input.tpUsd !== undefined && input.tpUsd !== null ? Math.abs(Number(input.tpUsd)) : null;
-  let slPrice = input.slPrice ?? null;
-  let tpPrice = input.tpPrice ?? null;
+  if (input.source !== 'bot') {
+    await checkUserRiskLimits(input.userId, stake, input.source || 'manual');
+  }
+
+  // Digital contracts do not support price SL/TP on Deriv; only Multipliers support limit_order
+  const supportsLimits = contractType === 'MULTUP' || contractType === 'MULTDOWN';
+  let slUsd = supportsLimits && input.slUsd !== undefined && input.slUsd !== null ? Math.abs(Number(input.slUsd)) : null;
+  let tpUsd = supportsLimits && input.tpUsd !== undefined && input.tpUsd !== null ? Math.abs(Number(input.tpUsd)) : null;
+  let slPrice = supportsLimits ? input.slPrice ?? null : null;
+  let tpPrice = supportsLimits ? input.tpPrice ?? null : null;
 
   const isUp = ['MULTUP', 'CALL', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY'].includes(contractType);
-  if (slUsd && !slPrice) {
-    const pctMove = Math.min(0.45, slUsd / Math.max(1, stake * multiplier));
-    slPrice = Number((entryPrice * (isUp ? 1 - pctMove : 1 + pctMove)).toFixed(pipSize < 0.001 ? 5 : 2));
-  }
-  if (tpUsd && !tpPrice) {
-    const pctMove = Math.min(0.95, tpUsd / Math.max(1, stake * multiplier));
-    tpPrice = Number((entryPrice * (isUp ? 1 + pctMove : 1 - pctMove)).toFixed(pipSize < 0.001 ? 5 : 2));
-  }
-  if (slPrice && !slUsd) {
-    slUsd = Number(((Math.abs(entryPrice - slPrice) / entryPrice) * stake * multiplier).toFixed(2));
-  }
-  if (tpPrice && !tpUsd) {
-    tpUsd = Number(((Math.abs(tpPrice - entryPrice) / entryPrice) * stake * multiplier).toFixed(2));
+  if (supportsLimits) {
+    if (slUsd && !slPrice) {
+      const pctMove = Math.min(0.45, slUsd / Math.max(1, stake * multiplier));
+      slPrice = Number((entryPrice * (isUp ? 1 - pctMove : 1 + pctMove)).toFixed(pipSize < 0.001 ? 5 : 2));
+    }
+    if (tpUsd && !tpPrice) {
+      const pctMove = Math.min(0.95, tpUsd / Math.max(1, stake * multiplier));
+      tpPrice = Number((entryPrice * (isUp ? 1 + pctMove : 1 - pctMove)).toFixed(pipSize < 0.001 ? 5 : 2));
+    }
+    if (slPrice && !slUsd) {
+      slUsd = Number(((Math.abs(entryPrice - slPrice) / entryPrice) * stake * multiplier).toFixed(2));
+    }
+    if (tpPrice && !tpUsd) {
+      tpUsd = Number(((Math.abs(tpPrice - entryPrice) / entryPrice) * stake * multiplier).toFixed(2));
+    }
   }
 
   let derivContractId: string | null = null;
   let actualMode: 'virtual' | 'deriv' = 'virtual';
   let actualPayout = 0;
+  let accountMode: 'demo' | 'real' = input.accountMode === 'real' ? 'real' : 'demo';
 
-  // Attempt live Deriv execution if a connected account is chosen or executionMode === 'deriv'
-  if (input.executionMode === 'deriv' || input.connectedAccountId) {
+  // If explicit executionMode === 'deriv' or connectedAccountId passed, execute on Deriv & NEVER silently fall back to virtual when executionMode === 'deriv'
+  const explicitDeriv = input.executionMode === 'deriv';
+  if (explicitDeriv || input.connectedAccountId) {
     const fallbackAcc = input.connectedAccountId
       ? { id: input.connectedAccountId }
       : await queryOne<{ id: number }>(
@@ -136,9 +247,18 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         );
 
     const targetAccId = fallbackAcc?.id;
-    if (targetAccId) {
+    if (!targetAccId) {
+      if (explicitDeriv) {
+        throw new Error('No active connected Deriv account selected for live execution.');
+      }
+    } else {
       const creds = await getDecryptedAccountToken(targetAccId, input.userId);
-      if (creds) {
+      if (!creds) {
+        if (explicitDeriv) {
+          throw new Error('Deriv account authorization token is missing or revoked. Reconnect your Deriv account.');
+        }
+      } else {
+        accountMode = creds.account.is_virtual ? 'demo' : 'real';
         try {
           const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
           const symbolField = isOAuth2 ? { underlying_symbol: input.symbol } : { symbol: input.symbol };
@@ -162,7 +282,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
                 }
               }
             } catch {
-              // proceed with default
+              // proceed with requested parameters
             }
           }
 
@@ -197,7 +317,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
               { method: 'POST' }
             );
             const otpUrl = otpResp.url || otpResp.otp;
-            if (!otpUrl) throw new Error('Failed to mint Deriv OTP socket');
+            if (!otpUrl) throw new Error('Failed to mint Deriv OTP trading socket');
             const prop = await OtpDerivClient.requestOnOtpUrl(otpUrl, proposalPayload);
             buyResult = await OtpDerivClient.requestOnOtpUrl(otpUrl, {
               buy: prop.proposal.id,
@@ -216,7 +336,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             actualPayout = Number(buyResult.buy.payout || 0);
             actualMode = 'deriv';
 
-            // Never overwrite admin-locked last_known_balance with live Deriv balance
+            // Preserve admin-locked balance rather than overwriting with live Deriv balance
             if (creds.account.balance_locked_by_admin) {
               const updatedBal = Math.max(0, Number((creds.account.last_known_balance - stake).toFixed(2)));
               await execute(
@@ -238,8 +358,20 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
                 balance: liveBal,
               });
             }
+          } else if (explicitDeriv) {
+            throw new Error('Deriv did not confirm a contract ID for this order.');
           }
-        } catch {
+        } catch (err) {
+          const errMsg = err instanceof Error ? err.message : 'Deriv execution failed';
+          await logSystemError('trade-execution', errMsg, 'error', {
+            userId: input.userId,
+            symbol: input.symbol,
+            contractType,
+            explicitDeriv,
+          });
+          if (explicitDeriv) {
+            throw new Error(`Deriv rejected order: ${errMsg}`);
+          }
           actualMode = 'virtual';
         }
       }
@@ -247,6 +379,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   }
 
   if (actualMode === 'virtual') {
+    accountMode = 'demo';
     if (user.virtual_workspace_balance < stake) {
       throw new Error(
         `Insufficient virtual balance ($${user.virtual_workspace_balance.toFixed(2)} available, $${stake.toFixed(2)} required)`
@@ -265,8 +398,9 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       user_id, connected_account_id, deriv_contract_id, execution_mode, source,
       symbol, side, contract_type, lots, stake, multiplier,
       entry_price, current_price, sl_price, tp_price, sl_usd, tp_usd,
-      barrier, duration, duration_unit, payout, pnl, status
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN')
+      barrier, duration, duration_unit, payout, pnl, status,
+      strategy_key, timeframe, account_mode, notes
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN', $23, $24, $25, $26)
     RETURNING *`,
     [
       input.userId,
@@ -291,6 +425,10 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       durationUnit,
       actualPayout,
       0,
+      input.strategyKey || '',
+      input.timeframe || '',
+      accountMode,
+      input.notes || '',
     ]
   );
 
@@ -387,6 +525,9 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
       virtual_workspace_balance: updatedUser.virtual_workspace_balance,
     });
   }
+  if (pnl < 0) {
+    await evaluateConsecutiveLossCooldown(order.user_id);
+  }
   return closedOrder;
 }
 
@@ -425,7 +566,6 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
           pnl = Number((Number(sellResp.sell.sold_for) - order.stake).toFixed(2));
         }
 
-        // Preserve admin-locked balance rather than overwriting with live Deriv balance
         if (creds.account.balance_locked_by_admin) {
           const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
           const updatedBal = Number((creds.account.last_known_balance + credit).toFixed(2));
@@ -444,8 +584,13 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
             [liveBal, creds.account.id]
           );
         }
-      } catch {
-        // Fallback to MTM pnl
+      } catch (err) {
+        await logSystemError(
+          'close-order',
+          err instanceof Error ? err.message : 'Deriv sell failed',
+          'warn',
+          { orderId: order.id }
+        );
       }
     }
   } else {
@@ -479,6 +624,9 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
   );
 
   derivWs.emitUserEvent(order.user_id, 'order_closed', closedOrder);
+  if (pnl < 0) {
+    await evaluateConsecutiveLossCooldown(order.user_id);
+  }
   return closedOrder;
 }
 

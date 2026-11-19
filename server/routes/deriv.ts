@@ -1,6 +1,5 @@
 import { Router, type Request } from 'express';
 import jwt from 'jsonwebtoken';
-import bcrypt from 'bcryptjs';
 import { config, getDerivRedirectUri } from '../config.ts';
 import {
   query,
@@ -12,8 +11,10 @@ import {
   getSetting,
 } from '../db.ts';
 import { encryptToken, decryptToken, generateCodeVerifier, sha256Base64Url, randomId, maskClientId } from '../crypto.ts';
+import { hashPasswordArgon2id } from '../password-hash.ts';
 import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
 import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
+import { getDecryptedAccountToken } from '../trade-execution.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
 
 const router = Router();
@@ -191,7 +192,7 @@ async function ensureUserFromDerivProfile(profile: {
 
   // First Login: create new user
   const globalSettings = await getSetting<{ defaultVirtualBalance?: number }>('global', {});
-  const hash = await bcrypt.hash(randomId(24), 10);
+  const hash = await hashPasswordArgon2id(randomId(24));
   const created = await queryOne<any>(
     `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id)
      VALUES ($1, $2, $3, 'user', 'active', TRUE, $4, $5, $6)
@@ -807,6 +808,82 @@ router.get('/deriv/statement/:accountId', requireDb, requireAuth, async (req: Au
     [req.user!.id]
   );
   res.json({ transactions: localOrders });
+});
+
+router.get('/deriv/contracts-for', async (req, res) => {
+  const symbol = String(req.query.symbol || '1HZ100V');
+  const currency = String(req.query.currency || 'USD');
+  try {
+    const resp = await derivWs.getContractsFor(symbol, currency);
+    const available = resp?.contracts_for?.available || [];
+    res.json({
+      symbol,
+      currency,
+      source: 'deriv_ws',
+      available,
+    });
+  } catch (err) {
+    res.status(503).json({
+      symbol,
+      currency,
+      source: 'unavailable',
+      available: [],
+      error: err instanceof Error ? err.message : 'Unable to fetch contracts_for from Deriv',
+    });
+  }
+});
+
+router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const b = req.body || {};
+    const symbol = String(b.symbol || '1HZ100V');
+    const contractType = String(b.contractType || 'MULTUP').toUpperCase();
+    const amount = Number(b.amount || b.stake || 10);
+    const currency = String(b.currency || 'USD');
+    const connectedAccountId = b.connectedAccountId ? Number(b.connectedAccountId) : null;
+
+    let token: string | null = null;
+    if (connectedAccountId) {
+      const creds = await getDecryptedAccountToken(connectedAccountId, req.user!.id);
+      if (creds) token = creds.token;
+    }
+
+    const payload: Record<string, unknown> = {
+      amount,
+      basis: 'stake',
+      contract_type: contractType,
+      currency,
+      symbol,
+    };
+
+    if (contractType === 'MULTUP' || contractType === 'MULTDOWN') {
+      payload.multiplier = Number(b.multiplier || 100);
+      const limitOrder: Record<string, number> = {};
+      if (b.tpUsd && Number(b.tpUsd) >= 0.5) limitOrder.take_profit = Number(Number(b.tpUsd).toFixed(2));
+      if (b.slUsd && Number(b.slUsd) >= 0.5 && Number(b.slUsd) < amount) {
+        limitOrder.stop_loss = Number(Number(b.slUsd).toFixed(2));
+      }
+      if (Object.keys(limitOrder).length > 0) payload.limit_order = limitOrder;
+    } else {
+      payload.duration = Number(b.duration || 5);
+      payload.duration_unit = String(b.durationUnit || 't');
+      if (b.barrier !== undefined && b.barrier !== null && b.barrier !== '') {
+        payload.barrier = String(b.barrier);
+      }
+    }
+
+    const resp = await derivWs.getProposal(payload, token);
+    res.json({
+      source: 'deriv_ws',
+      proposal: resp?.proposal || null,
+    });
+  } catch (err) {
+    res.status(400).json({
+      source: 'unavailable',
+      proposal: null,
+      error: err instanceof Error ? err.message : 'Unable to fetch live Deriv proposal',
+    });
+  }
 });
 
 export default router;

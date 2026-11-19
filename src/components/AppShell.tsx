@@ -26,23 +26,31 @@ import { useApp } from '../context/AppContext';
 import { TradeDerivLogo } from './TradeDerivLogo';
 import type { NavTab } from '../types';
 
-const MOBILE_BOTTOM_TABS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
-  { id: 'home', label: 'Home', icon: Home },
+const CORE_HUB_TABS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
+  { id: 'home', label: 'Dashboard', icon: Home },
   { id: 'cfds', label: 'CFDs', icon: CandlestickChart },
   { id: 'exchange', label: 'Exchange', icon: ArrowLeftRight },
   { id: 'options', label: 'Options', icon: Layers },
-  { id: 'portfolio', label: 'Portfolio', icon: Wallet },
+  { id: 'portfolio', label: 'Portfolio & Cashier', icon: Wallet },
+];
+
+const MOBILE_BOTTOM_TABS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
+  { id: 'home', label: 'Dashboard', icon: Home },
+  { id: 'market-analyser', label: 'Markets', icon: Activity },
+  { id: 'mt5-tv', label: 'Trade', icon: CandlestickChart },
+  { id: 'trading-bots', label: 'Strategies', icon: Bot },
+  { id: 'profile', label: 'Profile', icon: User },
 ];
 
 const SIDEBAR_PRO_TOOLS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
-  { id: 'mt5-tv', label: 'MT5 TradingView', icon: CandlestickChart },
+  { id: 'mt5-tv', label: 'MT5 Terminal', icon: CandlestickChart },
+  { id: 'market-analyser', label: 'Market Radar & SMC', icon: Activity },
+  { id: 'trading-bots', label: 'Strategy Lab & Bots', icon: Bot },
   { id: 'bot-builder', label: 'Bot Builder', icon: Cpu },
-  { id: 'trading-bots', label: 'Trading Bots', icon: Bot },
-  { id: 'market-analyser', label: 'Market Analyser', icon: Activity },
   { id: 'bulk-trader', label: 'Bulk Trader', icon: Zap },
-  { id: 'risk-calc', label: 'Risk Calculator', icon: Calculator },
-  { id: 'copy-trading', label: 'Copy Trading', icon: Copy },
-  { id: 'reports', label: 'Reports', icon: FileText },
+  { id: 'risk-calc', label: 'Risk Centre', icon: Calculator },
+  { id: 'reports', label: 'Analytics & Journal', icon: FileText },
+  { id: 'copy-trading', label: 'Copy & Accounts', icon: Copy },
   { id: 'learning-hub', label: 'Learning Hub', icon: BookOpen },
 ];
 
@@ -63,6 +71,8 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
     publicSettings,
     instruments,
     setSelectedSymbol,
+    wsConnected,
+    registerLogoTap,
   } = useApp();
 
   const [searchOpen, setSearchOpen] = useState(false);
@@ -92,9 +102,11 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white dark:bg-[#151820] border-r border-slate-200 dark:border-[#2A2F3D] z-30">
         <div className="px-5 py-5 border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between">
-          <button type="button" onClick={() => setActiveTab('home')} className="cursor-pointer">
-            <TradeDerivLogo variant={theme} size="sm" />
-          </button>
+          <TradeDerivLogo variant={theme} size="sm" onClick={registerLogoTap} />
+          <span
+            title={wsConnected ? 'Deriv WS Relay Connected' : 'Connecting to Deriv WS'}
+            className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-[#00A878]' : 'bg-amber-400'}`}
+          />
         </div>
 
         <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6">
@@ -103,7 +115,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               Core Hubs
             </p>
             <nav className="space-y-1">
-              {MOBILE_BOTTOM_TABS.map((item) => {
+              {CORE_HUB_TABS.map((item) => {
                 const Icon = item.icon;
                 const active = activeTab === item.id;
                 return (
@@ -127,7 +139,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
           <div>
             <p className="px-3 text-[11px] font-semibold text-slate-400 tracking-wide mb-2">
-              Terminals & Automation
+              Terminal & Intelligence
             </p>
             <nav className="space-y-1">
               {SIDEBAR_PRO_TOOLS.map((item) => {
@@ -275,17 +287,10 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </div>
         </div>
 
-        {/* Mobile Dark Top Strip matching Deriv Screenshots */}
+        {/* Mobile Dark Top Strip */}
         <div className="lg:hidden bg-[#151820] text-white px-4 pt-3 pb-2 flex items-center justify-between gap-2">
           <div className="flex items-center gap-2">
-            <button
-              type="button"
-              onClick={() => setActiveTab('profile')}
-              className="w-9 h-9 rounded-full bg-[#242936] text-xs font-bold flex items-center justify-center cursor-pointer"
-              aria-label="Profile"
-            >
-              {initials || <User className="w-4 h-4" />}
-            </button>
+            <TradeDerivLogo variant="dark" size="sm" showWordmark={false} onClick={registerLogoTap} />
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
@@ -296,13 +301,35 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             </button>
           </div>
 
-          <button
-            type="button"
-            onClick={() => setCurrencyDisplay(currencyDisplay === 'USD' ? 'KSH' : 'USD')}
-            className="px-3 py-1 rounded-full bg-[#242936] text-xs font-semibold text-slate-200 cursor-pointer"
-          >
-            {currencyDisplay}
-          </button>
+          <div className="flex items-center gap-1.5">
+            <div className="flex items-center bg-[#242936] p-0.5 rounded-full">
+              <button
+                type="button"
+                onClick={() => setAccountMode('real')}
+                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                  accountMode === 'real' ? 'bg-[#FF444F] text-white' : 'text-slate-300'
+                }`}
+              >
+                Real
+              </button>
+              <button
+                type="button"
+                onClick={() => setAccountMode('demo')}
+                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                  accountMode === 'demo' ? 'bg-white text-[#151820]' : 'text-slate-300'
+                }`}
+              >
+                Demo
+              </button>
+            </div>
+            <button
+              type="button"
+              onClick={() => setCurrencyDisplay(currencyDisplay === 'USD' ? 'KSH' : 'USD')}
+              className="px-2.5 py-1 rounded-full bg-[#242936] text-[11px] font-semibold text-slate-200 cursor-pointer"
+            >
+              {currencyDisplay}
+            </button>
+          </div>
 
           <div className="flex items-center gap-2">
             <button

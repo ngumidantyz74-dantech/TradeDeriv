@@ -25,6 +25,7 @@ import cashierRoutes from './server/routes/cashier.ts';
 import marketRoutes from './server/routes/market.ts';
 import ordersRoutes from './server/routes/orders.ts';
 import adminRoutes from './server/routes/admin.ts';
+import intelligenceRoutes, { evaluateSmartAlertsForTick } from './server/routes/intelligence.ts';
 
 async function bootstrapServer() {
   // Non-blocking Neon schema wakeup so Render binds PORT immediately and health checks stay responsive
@@ -111,6 +112,7 @@ async function bootstrapServer() {
   app.use('/api', marketRoutes);
   app.use('/api', ordersRoutes);
   app.use('/api', adminRoutes);
+  app.use('/api', intelligenceRoutes);
 
   // Root /callback alias for Deriv OAuth redirect URIs
   app.get(['/callback', '/callback/'], requireDb, handleDerivOAuthCallback);
@@ -162,6 +164,7 @@ async function bootstrapServer() {
   });
 
   derivWs.onTick((tick) => {
+    evaluateSmartAlertsForTick(tick).catch(() => {});
     const payload = JSON.stringify({ type: 'tick', tick });
     for (const [sock, state] of clientSubscriptions.entries()) {
       if (sock.readyState === WebSocket.OPEN && state.symbols.has(tick.symbol)) {

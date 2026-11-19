@@ -10,6 +10,7 @@ export interface TickData {
   ask: number;
   epoch: number;
   pipSize: number;
+  source?: 'deriv_ws' | 'cached';
 }
 
 export interface CandleData {
@@ -18,6 +19,14 @@ export interface CandleData {
   high: number;
   low: number;
   close: number;
+  volume?: number;
+}
+
+export interface DetailedCandleResult {
+  candles: CandleData[];
+  source: 'deriv_ws' | 'unavailable';
+  error?: string;
+  lastUpdated: number | null;
 }
 
 type TickListener = (tick: TickData) => void;
@@ -37,21 +46,35 @@ export class DerivWebSocketClient {
   >();
   private lastWorkingEndpoint: string | null = null;
   private keepAliveTimer: NodeJS.Timeout | null = null;
+  private reconnectTimer: NodeJS.Timeout | null = null;
   private connectingPromise: Promise<WebSocket> | null = null;
   private isConnected = false;
+  private lastDerivTickAt: number | null = null;
+  private lastError = '';
+  private reconnectAttempts = 0;
 
   private tickListeners = new Set<TickListener>();
   private userEventListeners = new Set<UserEventListener>();
-  private subscribedSymbols = new Set<string>(['1HZ100V', '1HZ15V', '1HZ10V', '1HZ25V', '1HZ75V', 'R_100', 'frxXAUUSD', 'cryBTCUSD']);
+  private subscribedSymbols = new Set<string>([
+    '1HZ100V',
+    '1HZ15V',
+    '1HZ10V',
+    '1HZ25V',
+    '1HZ75V',
+    'R_100',
+    'R_50',
+    'frxEURUSD',
+    'frxXAUUSD',
+    'cryBTCUSD',
+  ]);
   private latestTicks = new Map<string, TickData>();
   private tickHistoryBuffers = new Map<string, number[]>();
-  private fallbackTickTimer: NodeJS.Timeout | null = null;
 
   constructor() {
-    this.seedInitialTicks();
+    this.seedInitialPricesFromCatalog();
   }
 
-  private seedInitialTicks(): void {
+  private seedInitialPricesFromCatalog(): void {
     const nowEpoch = Math.floor(Date.now() / 1000);
     for (const inst of CURATED_DERIV_INSTRUMENTS) {
       const pip = inst.pip_size;
@@ -64,15 +87,8 @@ export class DerivWebSocketClient {
         ask: Number((quote + spread / 2).toFixed(pip < 0.001 ? 5 : 2)),
         epoch: nowEpoch,
         pipSize: pip,
+        source: 'cached',
       });
-      const history: number[] = [];
-      let p = quote;
-      for (let i = 0; i < 60; i++) {
-        const step = (Math.sin(i * 0.45 + inst.symbol.length) * 0.0018 + (Math.random() - 0.5) * 0.0012) * quote;
-        p = Number(Math.max(pip, p + step).toFixed(pip < 0.001 ? 5 : 2));
-        history.push(p);
-      }
-      this.tickHistoryBuffers.set(inst.symbol, history);
     }
   }
 
@@ -82,6 +98,9 @@ export class DerivWebSocketClient {
       endpoint: this.lastWorkingEndpoint || config.derivWsUrl,
       subscribedSymbols: this.subscribedSymbols.size,
       trackedPrices: this.latestTicks.size,
+      lastDerivTickAt: this.lastDerivTickAt,
+      reconnectAttempts: this.reconnectAttempts,
+      lastError: this.lastError || null,
     };
   }
 
@@ -107,9 +126,12 @@ export class DerivWebSocketClient {
 
   private broadcastTick(tick: TickData): void {
     this.latestTicks.set(tick.symbol, tick);
+    if (tick.source === 'deriv_ws') {
+      this.lastDerivTickAt = Date.now();
+    }
     const buf = this.tickHistoryBuffers.get(tick.symbol) || [];
     buf.push(tick.quote);
-    if (buf.length > 150) buf.shift();
+    if (buf.length > 300) buf.shift();
     this.tickHistoryBuffers.set(tick.symbol, buf);
 
     for (const fn of this.tickListeners) {
@@ -133,38 +155,23 @@ export class DerivWebSocketClient {
     return out;
   }
 
-  public startMarketFeed(): void {
-    this.connectCluster().catch(() => {
-      // Cluster unreachable in isolated container; fallback ticker keeps market alive
-    });
+  private scheduleReconnect(): void {
+    if (this.reconnectTimer) return;
+    const delayMs = Math.min(30000, 2000 * Math.pow(1.5, Math.min(6, this.reconnectAttempts)));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      this.reconnectAttempts += 1;
+      this.connectCluster().catch(() => {
+        this.scheduleReconnect();
+      });
+    }, delayMs);
+  }
 
-    if (!this.fallbackTickTimer) {
-      this.fallbackTickTimer = setInterval(() => {
-        const now = Math.floor(Date.now() / 1000);
-        for (const sym of this.subscribedSymbols) {
-          const prev = this.latestTicks.get(sym);
-          if (!prev) continue;
-          // Only synthesize tick if upstream Deriv WS hasn't updated this symbol within last 2 seconds
-          if (this.isConnected && now - prev.epoch < 2) continue;
-          const inst = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === sym);
-          const pip = inst?.pip_size || prev.pipSize || 0.01;
-          const spread = inst?.spread || Math.max(pip * 2, prev.quote * 0.0002);
-          const decimals = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
-          const volatility = sym.includes('1HZ') || sym.startsWith('R_') ? 0.0012 : 0.0004;
-          const delta = (Math.random() - 0.495) * prev.quote * volatility;
-          const nextQuote = Number(Math.max(pip * 10, prev.quote + delta).toFixed(decimals));
-          const tick: TickData = {
-            symbol: sym,
-            quote: nextQuote,
-            bid: Number((nextQuote - spread / 2).toFixed(decimals)),
-            ask: Number((nextQuote + spread / 2).toFixed(decimals)),
-            epoch: now,
-            pipSize: pip,
-          };
-          this.broadcastTick(tick);
-        }
-      }, 1000);
-    }
+  public startMarketFeed(): void {
+    this.connectCluster().catch((err) => {
+      this.lastError = err instanceof Error ? err.message : 'Deriv WS initial connect failed';
+      this.scheduleReconnect();
+    });
   }
 
   public async ensureSymbolSubscribed(symbol: string): Promise<void> {
@@ -185,20 +192,22 @@ export class DerivWebSocketClient {
             [symbol]
           );
         } catch {
-          // fallback to catalog defaults
+          // ignore if DB waking up
         }
       }
-      const quote = cache?.price || 1000.0;
-      const pip = row?.pip_size || 0.01;
-      const spread = row?.spread || 0.2;
-      this.latestTicks.set(symbol, {
-        symbol,
-        quote,
-        bid: quote - spread / 2,
-        ask: quote + spread / 2,
-        epoch: Math.floor(Date.now() / 1000),
-        pipSize: pip,
-      });
+      if (cache?.price) {
+        const pip = row?.pip_size || 0.01;
+        const spread = row?.spread || 0.2;
+        this.latestTicks.set(symbol, {
+          symbol,
+          quote: cache.price,
+          bid: cache.price - spread / 2,
+          ask: cache.price + spread / 2,
+          epoch: Math.floor(Date.now() / 1000),
+          pipSize: pip,
+          source: 'cached',
+        });
+      }
     }
     if (isNew && this.isConnected && this.ws && this.ws.readyState === WebSocket.OPEN) {
       this.ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));
@@ -231,7 +240,7 @@ export class DerivWebSocketClient {
                 // ignore
               }
               reject(new Error(`Timeout connecting to ${base}`));
-            }, 4500);
+            }, 5000);
 
             socket.once('open', () => {
               clearTimeout(timeout);
@@ -249,6 +258,8 @@ export class DerivWebSocketClient {
         this.lastWorkingEndpoint = winner.url;
         this.ws = winner.ws;
         this.isConnected = true;
+        this.reconnectAttempts = 0;
+        this.lastError = '';
 
         winner.ws.on('message', (raw) => {
           try {
@@ -276,6 +287,7 @@ export class DerivWebSocketClient {
                 ask,
                 epoch: Number(t.epoch || Math.floor(Date.now() / 1000)),
                 pipSize: pip,
+                source: 'deriv_ws',
               });
             }
           } catch {
@@ -290,10 +302,12 @@ export class DerivWebSocketClient {
             clearInterval(this.keepAliveTimer);
             this.keepAliveTimer = null;
           }
+          this.scheduleReconnect();
         });
 
-        winner.ws.on('error', () => {
+        winner.ws.on('error', (err) => {
           this.isConnected = false;
+          this.lastError = err instanceof Error ? err.message : 'Deriv WS error';
         });
 
         if (this.keepAliveTimer) clearInterval(this.keepAliveTimer);
@@ -308,6 +322,9 @@ export class DerivWebSocketClient {
         }
 
         return winner.ws;
+      } catch (err) {
+        this.lastError = err instanceof Error ? err.message : 'Unable to reach Deriv WebSocket cluster';
+        throw err;
       } finally {
         this.connectingPromise = null;
       }
@@ -404,7 +421,7 @@ export class DerivWebSocketClient {
           end: 'latest',
           style: 'ticks',
         },
-        4500
+        6000
       );
       if (resp?.history?.prices && resp.history.prices.length > 0) {
         const prices = resp.history.prices.map((p) => Number(p));
@@ -412,27 +429,14 @@ export class DerivWebSocketClient {
         return prices;
       }
     } catch {
-      // Fallback to rolling buffer
+      // Return genuine recorded ticks in buffer rather than fabricating random ticks
     }
 
     const buf = this.tickHistoryBuffers.get(symbol) || [];
-    if (buf.length >= count) {
-      return buf.slice(-count);
-    }
-    const base = this.latestTicks.get(symbol)?.quote || 1000.0;
-    const pip = this.latestTicks.get(symbol)?.pipSize || 0.01;
-    const decimals = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
-    const out: number[] = [...buf];
-    while (out.length < count) {
-      const last = out[out.length - 1] ?? base;
-      const next = Number((last + (Math.random() - 0.5) * last * 0.001).toFixed(decimals));
-      out.push(next);
-    }
-    this.tickHistoryBuffers.set(symbol, out);
-    return out.slice(-count);
+    return buf.slice(-count);
   }
 
-  public async fetchCandles(symbol: string, granularity = 60, count = 120): Promise<CandleData[]> {
+  public async fetchCandlesDetailed(symbol: string, granularity = 60, count = 120): Promise<DetailedCandleResult> {
     await this.ensureSymbolSubscribed(symbol);
     try {
       const resp = await this.request<{
@@ -446,43 +450,69 @@ export class DerivWebSocketClient {
           style: 'candles',
           granularity,
         },
-        5000
+        7000
       );
       if (resp?.candles && resp.candles.length > 0) {
-        return resp.candles.map((c) => ({
+        const candles = resp.candles.map((c) => ({
           time: Number(c.epoch),
           open: Number(c.open),
           high: Number(c.high),
           low: Number(c.low),
           close: Number(c.close),
         }));
+        return {
+          candles,
+          source: 'deriv_ws',
+          lastUpdated: Date.now(),
+        };
       }
-    } catch {
-      // Fallback to realistic candles anchored to live tick price
+      return {
+        candles: [],
+        source: 'unavailable',
+        error: 'Deriv returned no candles for this symbol and timeframe.',
+        lastUpdated: null,
+      };
+    } catch (err) {
+      return {
+        candles: [],
+        source: 'unavailable',
+        error: err instanceof Error ? err.message : 'Unable to reach Deriv historical candles API',
+        lastUpdated: null,
+      };
     }
+  }
 
-    const latest = this.latestTicks.get(symbol);
-    const anchor = latest?.quote || 1000.0;
-    const pip = latest?.pipSize || 0.01;
-    const decimals = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
-    const nowSec = Math.floor(Date.now() / 1000);
-    const stepSec = Math.max(1, granularity);
-    const candles: CandleData[] = [];
-    let current = anchor * (1 - 0.012);
+  public async fetchCandles(symbol: string, granularity = 60, count = 120): Promise<CandleData[]> {
+    const detailed = await this.fetchCandlesDetailed(symbol, granularity, count);
+    return detailed.candles;
+  }
 
-    for (let i = count; i >= 1; i--) {
-      const time = nowSec - i * stepSec;
-      const open = Number(current.toFixed(decimals));
-      const drift = (i === 1 ? anchor - open : (Math.sin(i * 0.35) * 0.0016 + (Math.random() - 0.48) * 0.0022) * open);
-      const close = Number(Math.max(pip * 10, open + drift).toFixed(decimals));
-      const wickUp = Math.abs(Math.random() * 0.0012 * open);
-      const wickDown = Math.abs(Math.random() * 0.0012 * open);
-      const high = Number((Math.max(open, close) + wickUp).toFixed(decimals));
-      const low = Number(Math.max(pip * 10, Math.min(open, close) - wickDown).toFixed(decimals));
-      candles.push({ time, open, high, low, close });
-      current = close;
+  public async getContractsFor(symbol: string, currency = 'USD'): Promise<any> {
+    return this.request(
+      {
+        contracts_for: symbol,
+        currency,
+        product_type: 'basic',
+      },
+      6000
+    );
+  }
+
+  public async getProposal(payload: Record<string, unknown>, token?: string | null): Promise<any> {
+    const req = { proposal: 1, ...payload };
+    if (token && !token.startsWith('ory_at_')) {
+      return this.requestWithToken(token, req, 7000);
     }
-    return candles;
+    return this.request(req, 6000);
+  }
+
+  public async getTradingTimes(dateStr = 'today'): Promise<any> {
+    return this.request(
+      {
+        trading_times: dateStr,
+      },
+      7000
+    );
   }
 }
 

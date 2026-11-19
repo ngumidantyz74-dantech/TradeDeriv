@@ -5,7 +5,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 
 export const LandingHero: React.FC = () => {
-  const { launchDerivOAuth, loginWithToken, showToast } = useApp();
+  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap } = useApp();
   const [menuOpen, setMenuOpen] = useState(false);
   const [authModal, setAuthModal] = useState<'login' | 'register' | null>(null);
   const [email, setEmail] = useState('');
@@ -51,7 +51,7 @@ export const LandingHero: React.FC = () => {
 
       {/* Top Header Bar */}
       <header className="relative z-20 flex items-center justify-between gap-4 px-5 sm:px-8 lg:px-14 pt-5 pb-4 max-w-7xl w-full mx-auto">
-        <TradeDerivLogo variant="dark" size="md" />
+        <TradeDerivLogo variant="dark" size="md" onClick={registerLogoTap} />
 
         <div className="flex items-center gap-3 shrink-0">
           <button

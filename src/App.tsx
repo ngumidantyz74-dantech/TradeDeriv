@@ -23,7 +23,7 @@ import {
 import { AdminMISPage } from './pages/AdminMISPage';
 
 const MainRouter: React.FC = () => {
-  const { user, loadingAuth, activeTab, publicSettings, toast } = useApp();
+  const { user, loadingAuth, activeTab, publicSettings, toast, adminGateOpen, setAdminGateOpen } = useApp();
   const envSlug = import.meta.env.VITE_ADMIN_PRIVATE_SLUG || 'pf-ops-9482';
   const privateSlug = publicSettings.global?.adminPrivateSlug || envSlug;
 
@@ -53,14 +53,15 @@ const MainRouter: React.FC = () => {
       window.removeEventListener('popstate', checkRoute);
       window.removeEventListener('hashchange', checkRoute);
     };
-  }, [privateSlug]);
+  }, [privateSlug, envSlug]);
 
-  if (isAdminRoute) {
+  if (isAdminRoute || adminGateOpen) {
     return (
       <AdminMISPage
         onReturnToSite={() => {
           window.history.pushState({}, '', '/');
           setIsAdminRoute(false);
+          setAdminGateOpen(false);
         }}
       />
     );

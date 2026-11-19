@@ -40,6 +40,11 @@ async function handleExecuteOrder(req: AuthRequest, res: any) {
       executionMode: body.executionMode || 'virtual',
       connectedAccountId: body.connectedAccountId ? Number(body.connectedAccountId) : null,
       source: body.source || 'manual',
+      strategyKey: body.strategyKey ? String(body.strategyKey) : '',
+      timeframe: body.timeframe ? String(body.timeframe) : '',
+      accountMode: body.accountMode === 'real' ? 'real' : 'demo',
+      notes: body.notes ? String(body.notes) : '',
+      idempotencyKey: body.idempotencyKey ? String(body.idempotencyKey) : undefined,
     });
 
     res.status(201).json({ order });

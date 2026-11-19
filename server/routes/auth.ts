@@ -1,8 +1,8 @@
 import { Router } from 'express';
-import bcrypt from 'bcryptjs';
 import { query, queryOne, execute, requireDb, addNotification, logSecurityEvent, getSetting } from '../db.ts';
 import { config } from '../config.ts';
 import { randomId, decryptToken, maskClientId } from '../crypto.ts';
+import { hashPasswordArgon2id, verifyPasswordHash } from '../password-hash.ts';
 import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
 import { derivWs } from '../deriv-client.ts';
@@ -69,7 +69,7 @@ router.post('/auth/register', requireDb, async (req, res) => {
       return;
     }
 
-    const passwordHash = await bcrypt.hash(String(password), 10);
+    const passwordHash = await hashPasswordArgon2id(String(password));
     const verifyToken = randomId(20);
     const defaultBalance = Number(globalSettings.defaultVirtualBalance ?? 10000);
     const clientCode = `TD${randomId(4).toUpperCase()}`;
@@ -127,11 +127,15 @@ router.post('/auth/login', requireDb, async (req, res) => {
       res.status(401).json({ error: 'Invalid credentials' });
       return;
     }
-    const valid = await bcrypt.compare(String(password), user.password_hash);
+    const { valid, needsRehash } = await verifyPasswordHash(String(password), user.password_hash);
     if (!valid) {
       await logSecurityEvent(user.id, 'login_failed', req.ip);
       res.status(401).json({ error: 'Invalid credentials' });
       return;
+    }
+    if (needsRehash) {
+      const upgraded = await hashPasswordArgon2id(String(password));
+      await execute('UPDATE users SET password_hash = $1 WHERE id = $2', [upgraded, user.id]);
     }
     if (user.status === 'suspended') {
       res.status(403).json({ error: 'Account is suspended' });
@@ -217,7 +221,7 @@ router.post('/auth/reset-password', requireDb, async (req, res) => {
     res.status(400).json({ error: 'Invalid reset token' });
     return;
   }
-  const hash = await bcrypt.hash(String(password), 10);
+  const hash = await hashPasswordArgon2id(String(password));
   await execute('UPDATE users SET password_hash = $1, reset_token = NULL, updated_at = NOW() WHERE id = $2', [
     hash,
     user.id,

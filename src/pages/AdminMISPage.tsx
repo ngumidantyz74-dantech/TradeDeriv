@@ -19,6 +19,8 @@ import {
   RefreshCw,
   CheckCircle2,
   AlertTriangle,
+  Shield,
+  Lock,
 } from 'lucide-react';
 import { TradeDerivLogo } from '../components/TradeDerivLogo';
 
@@ -32,9 +34,18 @@ type AdminTab =
   | 'cashier'
   | 'settings'
   | 'announcements'
-  | 'logs';
+  | 'logs'
+  | 'security';
 
 const ADMIN_TOKEN_KEY = 'tradederiv_admin_jwt';
+let currentAdminReauthToken = '';
+
+class AdminReauthRequiredError extends Error {
+  code = 'REAUTH_REQUIRED';
+  constructor(msg: string) {
+    super(msg);
+  }
+}
 
 async function adminFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
   const token = localStorage.getItem(ADMIN_TOKEN_KEY);
@@ -43,8 +54,12 @@ async function adminFetch<T = any>(path: string, options: RequestInit = {}): Pro
     ...((options.headers as Record<string, string>) || {}),
   };
   if (token) headers.Authorization = `Bearer ${token}`;
-  const resp = await fetch(path, { ...options, headers });
+  if (currentAdminReauthToken) headers['x-admin-reauth'] = currentAdminReauthToken;
+  const resp = await fetch(path, { ...options, headers, credentials: 'include' });
   const data = await resp.json().catch(() => ({}));
+  if (resp.status === 428 && data?.code === 'REAUTH_REQUIRED') {
+    throw new AdminReauthRequiredError(data.error || 'Re-authentication required');
+  }
   if (!resp.ok) throw new Error(data.error || `Error (${resp.status})`);
   return data as T;
 }
@@ -103,6 +118,14 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [userBalances, setUserBalances] = useState<Record<number, string>>({});
   const [accountBalances, setAccountBalances] = useState<Record<number, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
+
+  // Re-authentication modal & Security Diagnostics state
+  const [reauthOpen, setReauthOpen] = useState(false);
+  const [reauthPassword, setReauthPassword] = useState('');
+  const [reauthBusy, setReauthBusy] = useState(false);
+  const [pendingReauthAction, setPendingReauthAction] = useState<(() => Promise<void>) | null>(null);
+  const [diagnostics, setDiagnostics] = useState<any>(null);
+  const [diagLoading, setDiagLoading] = useState(false);
 
   const flash = (msg: string, type: 'ok' | 'err' = 'ok') => {
     setNotice({ msg, type });
@@ -182,10 +205,68 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     }
   };
 
-  const handleSignOutOwner = () => {
+  const handleSignOutOwner = async () => {
+    await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
+    currentAdminReauthToken = '';
     localStorage.removeItem(ADMIN_TOKEN_KEY);
     setAdminToken(null);
     setOverview(null);
+    setDiagnostics(null);
+  };
+
+  const loadDiagnostics = useCallback(async () => {
+    if (!adminToken) return;
+    setDiagLoading(true);
+    try {
+      const diag = await adminFetch('/api/admin/diagnostics');
+      setDiagnostics(diag);
+    } catch {
+      // ignore
+    } finally {
+      setDiagLoading(false);
+    }
+  }, [adminToken]);
+
+  useEffect(() => {
+    if (tab === 'security') {
+      loadDiagnostics();
+    }
+  }, [tab, loadDiagnostics]);
+
+  const runWithReauth = async (action: () => Promise<void>) => {
+    try {
+      await action();
+    } catch (err) {
+      if (err instanceof AdminReauthRequiredError) {
+        setPendingReauthAction(() => action);
+        setReauthOpen(true);
+        return;
+      }
+      flash(err instanceof Error ? err.message : 'Operation failed', 'err');
+    }
+  };
+
+  const handleConfirmReauth = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setReauthBusy(true);
+    try {
+      const res = await adminFetch<{ reauthToken: string }>('/api/admin/reauth', {
+        method: 'POST',
+        body: JSON.stringify({ password: reauthPassword }),
+      });
+      currentAdminReauthToken = res.reauthToken;
+      setReauthPassword('');
+      setReauthOpen(false);
+      const retry = pendingReauthAction;
+      setPendingReauthAction(null);
+      if (retry) {
+        await retry();
+      }
+    } catch (err) {
+      flash(err instanceof Error ? err.message : 'Re-authentication failed', 'err');
+    } finally {
+      setReauthBusy(false);
+    }
   };
 
   if (loadingStatus) {
@@ -289,6 +370,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     { id: 'settings', label: 'Global Settings', icon: Settings },
     { id: 'announcements', label: 'Announcements', icon: Megaphone },
     { id: 'logs', label: 'Audit & Email Logs', icon: FileText },
+    { id: 'security', label: 'Security & Diagnostics', icon: Shield },
   ];
 
   const kpis = overview?.kpis || {};
@@ -623,42 +705,42 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                             <button
                               type="button"
                               disabled={busyAction === `user-${u.id}`}
-                              onClick={async () => {
-                                const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                if (Number.isNaN(val) || val < 0) {
-                                  flash('Enter a valid non-negative balance', 'err');
-                                  return;
-                                }
-                                setBusyAction(`user-${u.id}`);
-                                try {
-                                  await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                onClick={async () => {
+                                  const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                  if (Number.isNaN(val) || val < 0) {
+                                    flash('Enter a valid non-negative balance', 'err');
+                                    return;
+                                  }
+                                  setBusyAction(`user-${u.id}`);
+                                  await runWithReauth(async () => {
+                                    await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                      method: 'PATCH',
+                                      body: JSON.stringify({ balance: val }),
+                                    });
+                                    await loadAllAdminData();
+                                    flash(`Saved DB demo balance ($${val.toFixed(2)}) for ${u.email}`);
+                                  });
+                                  setBusyAction(null);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
+                              >
+                                {busyAction === `user-${u.id}` ? 'Saving...' : 'Save DB Balance'}
+                              </button>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-right space-x-2">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                runWithReauth(async () => {
+                                  await adminFetch(`/api/admin/users/${u.id}/status`, {
                                     method: 'PATCH',
-                                    body: JSON.stringify({ balance: val }),
+                                    body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
                                   });
                                   await loadAllAdminData();
-                                  flash(`Saved DB demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                } catch (err) {
-                                  flash(err instanceof Error ? err.message : 'Save failed', 'err');
-                                } finally {
-                                  setBusyAction(null);
-                                }
-                              }}
-                              className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
-                            >
-                              {busyAction === `user-${u.id}` ? 'Saving...' : 'Save DB Balance'}
-                            </button>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-right space-x-2">
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                method: 'PATCH',
-                                body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                              });
-                              loadAllAdminData();
-                            }}
+                                  flash(`Updated user status for ${u.email}`);
+                                })
+                              }
                             className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
                           >
                             {u.status === 'active' ? 'Suspend' : 'Activate'}
@@ -750,7 +832,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                               return;
                             }
                             setBusyAction(`save-${a.id}`);
-                            try {
+                            await runWithReauth(async () => {
                               await adminFetch(`/api/admin/connected-accounts/${a.id}/balance`, {
                                 method: 'PATCH',
                                 body: JSON.stringify({ balance: val }),
@@ -759,11 +841,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                               flash(
                                 `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency})`
                               );
-                            } catch (err) {
-                              flash(err instanceof Error ? err.message : 'Save failed', 'err');
-                            } finally {
-                              setBusyAction(null);
-                            }
+                            });
+                            setBusyAction(null);
                           }}
                           className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
                         >
@@ -1038,12 +1117,14 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
-                  await adminFetch('/api/admin/settings/admin-credentials', {
-                    method: 'PUT',
-                    body: JSON.stringify({ email: newAdminEmail || undefined, password: newAdminPassword || undefined }),
+                  await runWithReauth(async () => {
+                    await adminFetch('/api/admin/settings/admin-credentials', {
+                      method: 'PUT',
+                      body: JSON.stringify({ email: newAdminEmail || undefined, password: newAdminPassword || undefined }),
+                    });
+                    setNewAdminPassword('');
+                    flash('Owner credentials updated');
                   });
-                  setNewAdminPassword('');
-                  flash('Owner credentials updated');
                 }}
                 className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-4"
               >
@@ -1158,8 +1239,149 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               </div>
             </div>
           )}
+
+          {/* 11. Security & Diagnostics */}
+          {tab === 'security' && (
+            <div className="space-y-6">
+              <div className="flex items-center justify-between">
+                <p className="text-xs text-slate-400">
+                  Real-time server health, Deriv WebSocket relay telemetry, and security audit logs (zero secrets exposed).
+                </p>
+                <button
+                  type="button"
+                  onClick={loadDiagnostics}
+                  disabled={diagLoading}
+                  className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${diagLoading ? 'animate-spin' : ''}`} /> Refresh Diagnostics
+                </button>
+              </div>
+
+              {diagnostics && (
+                <>
+                  <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+                    <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                      <p className="text-xs text-slate-400">PostgreSQL Health</p>
+                      <p className={`font-mono tabular-nums text-lg font-bold mt-1 ${diagnostics.database?.ok ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                        {diagnostics.database?.ok ? 'ONLINE' : 'ERROR'} ({diagnostics.database?.latencyMs ?? 0}ms)
+                      </p>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                      <p className="text-xs text-slate-400">Deriv WS Relay</p>
+                      <p className={`font-mono tabular-nums text-lg font-bold mt-1 ${diagnostics.deriv?.connected ? 'text-[#00A878]' : 'text-amber-400'}`}>
+                        {diagnostics.deriv?.connected ? 'CONNECTED' : 'RECONNECTING'}
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                        Attempts: {diagnostics.deriv?.reconnectAttempts ?? 0} · Symbols: {diagnostics.deriv?.subscribedSymbols?.length ?? 0}
+                      </p>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                      <p className="text-xs text-slate-400">Server Integrations</p>
+                      <p className="text-xs mt-1.5 font-mono">
+                        Gemini AI: <strong className={diagnostics.environment?.geminiConfigured ? 'text-[#00A878]' : 'text-amber-400'}>{diagnostics.environment?.geminiConfigured ? 'Configured' : 'Missing Key'}</strong>
+                      </p>
+                      <p className="text-xs font-mono">
+                        Brevo Mail: <strong className={diagnostics.environment?.brevoConfigured ? 'text-[#00A878]' : 'text-slate-400'}>{diagnostics.environment?.brevoConfigured ? 'Configured' : 'Not Set'}</strong>
+                      </p>
+                    </div>
+                    <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                      <p className="text-xs text-slate-400">Runtime Environment</p>
+                      <p className="font-mono text-sm font-bold mt-1">{diagnostics.environment?.nodeEnv || 'production'}</p>
+                      <p className="text-[11px] text-slate-400 font-mono">Deriv App ID: {diagnostics.environment?.derivAppId}</p>
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
+                      <h2 className="font-display text-sm font-bold mb-2">Admin Login Attempts & Rate-Limit Log</h2>
+                      <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D] text-xs">
+                        {(diagnostics.loginAttempts || []).map((a: any) => (
+                          <div key={a.id} className="py-2 flex items-center justify-between gap-2">
+                            <div>
+                              <span className={a.success ? 'text-[#00A878] font-bold' : 'text-[#FF444F] font-bold'}>
+                                {a.success ? 'SUCCESS' : 'BLOCKED/FAIL'}
+                              </span>{' '}
+                              · {a.email}
+                              <p className="text-[11px] text-slate-400">{a.reason} · IP {a.ip_address}</p>
+                            </div>
+                            <span className="font-mono text-[11px] text-slate-400">
+                              {new Date(a.created_at).toLocaleString()}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
+                      <h2 className="font-display text-sm font-bold mb-2">System Error & Upstream Logs</h2>
+                      <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D] text-xs">
+                        {(diagnostics.errorLogs || []).length === 0 ? (
+                          <p className="text-slate-400 py-4 text-center">No system errors recorded.</p>
+                        ) : (
+                          (diagnostics.errorLogs || []).map((e: any) => (
+                            <div key={e.id} className="py-2 flex items-center justify-between gap-2">
+                              <div>
+                                <span className="font-bold text-[#FF444F]">[{e.source}]</span> {e.message}
+                              </div>
+                              <span className="font-mono text-[11px] text-slate-400 shrink-0">
+                                {new Date(e.created_at).toLocaleTimeString()}
+                              </span>
+                            </div>
+                          ))
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+          )}
         </main>
       </div>
+
+      {/* Sensitive Admin Operation Re-Authentication Modal */}
+      {reauthOpen && (
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-sm bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <h3 className="font-display text-base font-bold flex items-center gap-2">
+                <Lock className="w-4 h-4 text-[#FF444F]" /> Confirm Owner Password
+              </h3>
+              <button
+                type="button"
+                onClick={() => {
+                  setReauthOpen(false);
+                  setPendingReauthAction(null);
+                }}
+                className="text-slate-400 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-xs text-slate-400">
+              Sensitive operations (editing balances, suspending users, or rotating owner credentials) require password re-verification valid for 10 minutes.
+            </p>
+            <form onSubmit={handleConfirmReauth} className="space-y-3">
+              <input
+                type="password"
+                required
+                autoFocus
+                placeholder="Current Owner Password"
+                value={reauthPassword}
+                onChange={(e) => setReauthPassword(e.target.value)}
+                className="w-full px-3.5 py-2.5 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
+              />
+              <button
+                type="submit"
+                disabled={reauthBusy}
+                className="w-full py-2.5 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold cursor-pointer"
+              >
+                {reauthBusy ? 'Verifying...' : 'Verify & Continue'}
+              </button>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };
