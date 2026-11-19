@@ -70,6 +70,16 @@ export const PortfolioHub: React.FC = () => {
   const [verifyCode, setVerifyCode] = useState('');
   const [hintCode, setHintCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
+  const [transferPreview, setTransferPreview] = useState<{
+    fromLabel: string;
+    toLabel: string;
+    amount: number;
+    fee: number;
+    exchangeRate: number;
+    netReceived: number;
+    honestBridgeNote: string;
+    idempotencyKey: string;
+  } | null>(null);
   const [perfSplit, setPerfSplit] = useState<{
     real: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
     demo: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
@@ -134,7 +144,7 @@ export const PortfolioHub: React.FC = () => {
     }
   };
 
-  const handleTransfer = async (e: React.FormEvent) => {
+  const handlePreviewTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (fromAcc === toAcc) {
       showToast('Select two different wallets to transfer', 'error');
@@ -142,7 +152,7 @@ export const PortfolioHub: React.FC = () => {
     }
     setSubmitting(true);
     try {
-      await apiFetch('/api/cashier/transfer', {
+      const preview = await apiFetch<any>('/api/cashier/transfer/preview', {
         method: 'POST',
         body: JSON.stringify({
           account_from: fromAcc,
@@ -152,9 +162,46 @@ export const PortfolioHub: React.FC = () => {
           accountMode,
         }),
       });
+      const idem =
+        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
+          ? crypto.randomUUID()
+          : `trf_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
+      setTransferPreview({
+        fromLabel: preview.fromLabel || fromAcc,
+        toLabel: preview.toLabel || toAcc,
+        amount: Number(preview.amount || amount),
+        fee: Number(preview.fee || 0),
+        exchangeRate: Number(preview.exchangeRate || 1),
+        netReceived: Number(preview.netReceived || amount),
+        honestBridgeNote: preview.honestBridgeNote || '',
+        idempotencyKey: idem,
+      });
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Unable to preview transfer', 'error');
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const handleConfirmTransfer = async () => {
+    if (!transferPreview) return;
+    setSubmitting(true);
+    try {
+      await apiFetch('/api/cashier/transfer', {
+        method: 'POST',
+        body: JSON.stringify({
+          account_from: fromAcc,
+          account_to: toAcc,
+          amount: transferPreview.amount,
+          currency: 'USD',
+          accountMode,
+          idempotencyKey: transferPreview.idempotencyKey,
+        }),
+      });
       await Promise.all([refreshAll(), loadPortfolioData()]);
+      setTransferPreview(null);
       setModal(null);
-      showToast(`Transferred $${Number(amount).toFixed(2)} from ${fromAcc} to ${toAcc}`, 'success');
+      showToast(`Transferred $${transferPreview.amount.toFixed(2)} from ${fromAcc} to ${toAcc}`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Transfer failed', 'error');
     } finally {
@@ -784,8 +831,8 @@ export const PortfolioHub: React.FC = () => {
               </form>
             )}
 
-            {modal === 'transfer' && (
-              <form onSubmit={handleTransfer} className="space-y-4">
+            {modal === 'transfer' && !transferPreview && (
+              <form onSubmit={handlePreviewTransfer} className="space-y-4">
                 <div className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs flex items-center justify-between">
                   <span className="text-slate-500">Active Transfer Scope</span>
                   <span className={`font-bold uppercase ${accountMode === 'real' ? 'text-[#FF444F]' : 'text-[#00A878]'}`}>
@@ -832,11 +879,54 @@ export const PortfolioHub: React.FC = () => {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full py-3 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-sm cursor-pointer disabled:opacity-60"
+                  className="w-full py-3 rounded-full bg-[#151820] dark:bg-[#FF444F] hover:opacity-95 text-white font-semibold text-sm cursor-pointer disabled:opacity-60"
                 >
-                  {submitting ? 'Transferring...' : 'Execute Transfer'}
+                  {submitting ? 'Validating Quote...' : 'Preview Transfer'}
                 </button>
               </form>
+            )}
+
+            {modal === 'transfer' && transferPreview && (
+              <div className="space-y-4">
+                <div className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] space-y-2 text-xs">
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Route</span>
+                    <span className="font-semibold">{transferPreview.fromLabel} → {transferPreview.toLabel}</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Amount</span>
+                    <span className="font-mono tabular-nums font-bold">${transferPreview.amount.toFixed(2)} USD</span>
+                  </div>
+                  <div className="flex justify-between">
+                    <span className="text-slate-500">Fee · Rate</span>
+                    <span className="font-mono tabular-nums">${transferPreview.fee.toFixed(2)} · {transferPreview.exchangeRate.toFixed(4)}</span>
+                  </div>
+                  <div className="flex justify-between pt-2 border-t border-slate-200 dark:border-[#2A2F3D]">
+                    <span className="font-semibold">Net Received</span>
+                    <span className="font-mono tabular-nums font-bold text-[#00A878]">${transferPreview.netReceived.toFixed(2)} USD</span>
+                  </div>
+                </div>
+                {transferPreview.honestBridgeNote && (
+                  <p className="text-[11px] text-slate-500 leading-relaxed">{transferPreview.honestBridgeNote}</p>
+                )}
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setTransferPreview(null)}
+                    className="flex-1 py-2.5 rounded-full border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold cursor-pointer"
+                  >
+                    Edit
+                  </button>
+                  <button
+                    type="button"
+                    disabled={submitting}
+                    onClick={handleConfirmTransfer}
+                    className="flex-[2] py-2.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+                  >
+                    {submitting ? 'Executing...' : 'Confirm & Execute Transfer'}
+                  </button>
+                </div>
+              </div>
             )}
 
             {(modal === 'withdraw' || modal === 'agent-withdraw') && (

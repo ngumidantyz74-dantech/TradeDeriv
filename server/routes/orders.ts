@@ -4,7 +4,18 @@ import { SEEDED_BOT_STRATEGIES } from '../catalog.ts';
 import { derivWs } from '../deriv-client.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
 import { placeUnifiedOrder, closeOrderById, bulkCloseOrders, updateOrderLimits } from '../trade-execution.ts';
-import { startBotSession, stopBotSession, closeAllBotOrders, getBotStatus } from '../bot-engine-service.ts';
+import {
+  startBotSession,
+  pauseBotSession,
+  resumeBotSession,
+  resetBotSession,
+  stopBotSession,
+  emergencyKillAllBots,
+  closeAllBotOrders,
+  getBotStatus,
+  validateBotAst,
+} from '../bot-engine-service.ts';
+import { runStrategyBacktest } from '../../src/lib/quant-engine.ts';
 
 const router = Router();
 
@@ -24,7 +35,7 @@ router.get('/orders', requireDb, requireAuth, async (req: AuthRequest, res) => {
     derivWs.ensureSymbolSubscribed(o.symbol).catch(() => {});
     const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
     const t = derivWs.getLatestTick(o.symbol);
-    if (isMult && t && t.source === 'deriv_ws' && Number(o.entry_price) > 0) {
+    if (isMult && t && (t.source === 'deriv_ws' || t.source === 'sync_stream') && Number(o.entry_price) > 0) {
       const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
       const pctDiff = (t.quote - Number(o.entry_price)) / Number(o.entry_price);
       const directional = isUp ? pctDiff : -pctDiff;
@@ -69,6 +80,7 @@ async function handleExecuteOrder(req: AuthRequest, res: any) {
       accountMode: body.accountMode === 'real' ? 'real' : 'demo',
       notes: body.notes ? String(body.notes) : '',
       idempotencyKey: body.idempotencyKey ? String(body.idempotencyKey) : undefined,
+      growthRate: body.growthRate !== undefined ? Number(body.growthRate) : undefined,
     });
 
     res.status(201).json({ order });
@@ -144,7 +156,7 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
     const liveTick = derivWs.getLatestTick(symbol);
     const enrichedOrders = orders.map((o) => {
       const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
-      if (isMult && liveTick && liveTick.source === 'deriv_ws' && Number(o.entry_price) > 0) {
+      if (isMult && liveTick && (liveTick.source === 'deriv_ws' || liveTick.source === 'sync_stream') && Number(o.entry_price) > 0) {
         const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
         const pctDiff = (liveTick.quote - Number(o.entry_price)) / Number(o.entry_price);
         const directional = isUp ? pctDiff : -pctDiff;
@@ -305,9 +317,38 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
   }
 });
 
-router.post('/bots/stop', requireAuth, (req: AuthRequest, res) => {
-  const telemetry = stopBotSession(req.user!.id, 'Stopped by trader');
+router.post('/bots/pause', requireAuth, async (req: AuthRequest, res) => {
+  const telemetry = await pauseBotSession(req.user!.id);
   res.json({ telemetry: telemetry || getBotStatus(req.user!.id) });
+});
+
+router.post('/bots/resume', requireAuth, async (req: AuthRequest, res) => {
+  const telemetry = await resumeBotSession(req.user!.id);
+  res.json({ telemetry: telemetry || getBotStatus(req.user!.id) });
+});
+
+router.post('/bots/reset', requireAuth, async (req: AuthRequest, res) => {
+  const telemetry = await resetBotSession(req.user!.id);
+  res.json({ telemetry });
+});
+
+router.post('/bots/stop', requireAuth, async (req: AuthRequest, res) => {
+  const telemetry = await stopBotSession(req.user!.id, 'Stopped by trader');
+  res.json({ telemetry: telemetry || getBotStatus(req.user!.id) });
+});
+
+router.post('/bots/kill-all', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const isAdmin = req.user!.role === 'owner' || req.user!.role === 'admin';
+  let stoppedCount = 0;
+  if (isAdmin) {
+    const k = await emergencyKillAllBots('Global Kill Switch Activated by Admin');
+    stoppedCount = k.stoppedCount;
+  } else {
+    const s = await stopBotSession(req.user!.id, 'Emergency Kill Switch Activated by Trader');
+    stoppedCount = s ? 1 : 0;
+  }
+  const closed = await closeAllBotOrders(req.user!.id);
+  res.json({ ok: true, stoppedCount, closedOrders: closed.closedCount, telemetry: getBotStatus(req.user!.id) });
 });
 
 router.post('/bots/close-all', requireDb, requireAuth, async (req: AuthRequest, res) => {
@@ -317,6 +358,207 @@ router.post('/bots/close-all', requireDb, requireAuth, async (req: AuthRequest, 
 
 router.get('/bots/status', requireAuth, (req: AuthRequest, res) => {
   res.json({ telemetry: getBotStatus(req.user!.id) });
+});
+
+router.get('/bots/runs', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const runs = await query('SELECT * FROM bot_runs WHERE user_id = $1 ORDER BY id DESC LIMIT 50', [req.user!.id]);
+  res.json({ runs });
+});
+
+router.get('/bots/logs', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const logs = await query('SELECT * FROM bot_execution_logs WHERE user_id = $1 ORDER BY id DESC LIMIT 120', [
+    req.user!.id,
+  ]);
+  res.json({ logs });
+});
+
+// Visual Blockly AST Strategy Builder Endpoints
+router.get('/bots/ast/definitions', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const personal = await query('SELECT * FROM bot_definitions WHERE user_id = $1 ORDER BY id DESC', [req.user!.id]);
+  const templates = await query(
+    "SELECT * FROM bot_definitions WHERE is_template = TRUE OR visibility = 'public' ORDER BY id DESC"
+  );
+  res.json({ definitions: personal, templates });
+});
+
+router.post('/bots/ast/definitions', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const b = req.body || {};
+  const check = validateBotAst(b.ast);
+  if (!check.valid || !check.ast) {
+    res.status(400).json({ error: check.errors.join(' '), errors: check.errors });
+    return;
+  }
+
+  const row = await queryOne<any>(
+    `INSERT INTO bot_definitions (
+      user_id, name, description, category, ast_json, xml_source, symbol, timeframe, contract_type,
+      config_json, risk_json, demo_tested, is_template, visibility
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, FALSE, 'private')
+    RETURNING *`,
+    [
+      req.user!.id,
+      check.ast.name,
+      String(b.description || ''),
+      String(b.category || check.ast.market.category || 'Custom'),
+      JSON.stringify(check.ast),
+      String(b.xmlSource || ''),
+      check.ast.market.instrument,
+      check.ast.market.timeframe,
+      check.ast.market.contractType,
+      JSON.stringify({ actions: check.ast.actions, conditions: check.ast.conditions }),
+      JSON.stringify(check.ast.risk),
+      Boolean(b.demoTested),
+    ]
+  );
+
+  res.status(201).json({ definition: row });
+});
+
+router.put('/bots/ast/definitions/:id', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const b = req.body || {};
+  const check = validateBotAst(b.ast);
+  if (!check.valid || !check.ast) {
+    res.status(400).json({ error: check.errors.join(' '), errors: check.errors });
+    return;
+  }
+
+  const row = await queryOne<any>(
+    `UPDATE bot_definitions SET
+      name = $1, description = $2, category = $3, ast_json = $4, xml_source = $5,
+      symbol = $6, timeframe = $7, contract_type = $8, config_json = $9, risk_json = $10,
+      demo_tested = COALESCE($11, demo_tested), updated_at = NOW()
+     WHERE id = $12 AND user_id = $13
+     RETURNING *`,
+    [
+      check.ast.name,
+      String(b.description || ''),
+      String(b.category || check.ast.market.category || 'Custom'),
+      JSON.stringify(check.ast),
+      String(b.xmlSource || ''),
+      check.ast.market.instrument,
+      check.ast.market.timeframe,
+      check.ast.market.contractType,
+      JSON.stringify({ actions: check.ast.actions, conditions: check.ast.conditions }),
+      JSON.stringify(check.ast.risk),
+      b.demoTested !== undefined ? Boolean(b.demoTested) : null,
+      Number(req.params.id),
+      req.user!.id,
+    ]
+  );
+  if (!row) {
+    res.status(404).json({ error: 'Bot definition not found' });
+    return;
+  }
+  res.json({ definition: row });
+});
+
+router.delete('/bots/ast/definitions/:id', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  await execute('DELETE FROM bot_definitions WHERE id = $1 AND user_id = $2', [
+    Number(req.params.id),
+    req.user!.id,
+  ]);
+  res.json({ ok: true });
+});
+
+router.post('/bots/ast/definitions/:id/backtest', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const def = await queryOne<any>('SELECT * FROM bot_definitions WHERE id = $1 AND user_id = $2', [
+    Number(req.params.id),
+    req.user!.id,
+  ]);
+  if (!def) {
+    res.status(404).json({ error: 'Bot definition not found' });
+    return;
+  }
+
+  let ast: any = {};
+  try {
+    ast = JSON.parse(def.ast_json || '{}');
+  } catch {
+    ast = {};
+  }
+  const symbol = String(req.body?.symbol || ast?.market?.instrument || def.symbol || '1HZ100V');
+  const gran = Number(req.body?.granularity || ast?.market?.granularity || 300);
+  const detailed = await derivWs.fetchCandlesDetailed(symbol, Math.max(60, gran), 240);
+  if (detailed.candles.length < 60) {
+    res.status(503).json({ error: 'Minimum 60 historical candles required for backtest' });
+    return;
+  }
+
+  const stakeAct = (ast.actions || []).find((a: any) => a.type === 'SET_STAKE');
+  const stake = Number(stakeAct?.params?.stake || 5);
+  const condTypes = new Set((ast.conditions || []).map((c: any) => c.type));
+  const stratKey = condTypes.has('rsi_condition') || condTypes.has('bollinger_condition')
+    ? 'mean_reversion'
+    : condTypes.has('sr_condition')
+      ? 'breakout'
+      : 'trend_following';
+
+  const report = runStrategyBacktest(stratKey as any, detailed.candles, {
+    stake,
+    spreadCostPct: 0.0006,
+  });
+
+  await execute('UPDATE bot_definitions SET demo_tested = TRUE WHERE id = $1 AND user_id = $2', [
+    def.id,
+    req.user!.id,
+  ]);
+
+  res.json({
+    ok: true,
+    definitionId: def.id,
+    demoTested: true,
+    source: detailed.source,
+    symbol,
+    granularity: gran,
+    report,
+  });
+});
+
+router.post('/bots/ast/run', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const b = req.body || {};
+    const check = validateBotAst(b.ast);
+    if (!check.valid || !check.ast) {
+      res.status(400).json({ error: check.errors.join(' ') });
+      return;
+    }
+
+    const telemetry = await startBotSession({
+      userId: req.user!.id,
+      botDefinitionId: b.definitionId ? Number(b.definitionId) : null,
+      strategyName: check.ast.name,
+      symbol: check.ast.market.instrument,
+      contractType: check.ast.market.contractType,
+      baseStake: Number(
+        check.ast.actions.find((a) => a.type === 'SET_STAKE')?.params?.stake ?? b.baseStake ?? 1
+      ),
+      barrier: b.barrier !== undefined ? String(b.barrier) : '2',
+      duration: Number(
+        check.ast.actions.find((a) => a.type === 'SET_DURATION')?.params?.duration ?? b.duration ?? 1
+      ),
+      durationUnit: String(
+        check.ast.actions.find((a) => a.type === 'SET_DURATION')?.params?.durationUnit ?? b.durationUnit ?? 't'
+      ),
+      multiplier: Number(b.multiplier || 100),
+      growthRate: Number(b.growthRate || 0.02),
+      martingale: check.ast.risk.martingaleFactor,
+      takeProfit: check.ast.risk.takeProfit,
+      stopLoss: check.ast.risk.stopLoss,
+      maxDailyLoss: check.ast.risk.maxDailyLoss,
+      maxStake: check.ast.risk.maxStake,
+      cooldownSeconds: check.ast.risk.cooldownSeconds,
+      maxConsecutiveLosses: check.ast.risk.maxConsecutiveLosses,
+      maxTrades: check.ast.risk.maxSessions,
+      executionMode: b.executionMode || 'virtual',
+      connectedAccountId: b.connectedAccountId ? Number(b.connectedAccountId) : null,
+      accountMode: b.accountMode === 'real' ? 'real' : 'demo',
+      executionSpeed: b.executionSpeed === 'normal' ? 'normal' : 'fast',
+      ast: check.ast,
+    });
+    res.json({ telemetry });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to start AST bot' });
+  }
 });
 
 export default router;

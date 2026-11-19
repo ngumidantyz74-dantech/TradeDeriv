@@ -40,6 +40,7 @@ export interface PlaceOrderInput {
   accountMode?: 'demo' | 'real';
   notes?: string;
   idempotencyKey?: string;
+  growthRate?: number;
 }
 
 const recentOrderLocks = new Map<string, number>();
@@ -56,6 +57,7 @@ function normalizeContractType(side: string, explicitType?: string): string {
   if (['DIFF', 'DIGITDIFF'].includes(s)) return 'DIGITDIFF';
   if (['RISE', 'CALL'].includes(s)) return 'CALL';
   if (['FALL', 'PUT'].includes(s)) return 'PUT';
+  if (['ACCU', 'ACCUMULATOR'].includes(s)) return 'ACCU';
   return s || 'MULTUP';
 }
 
@@ -241,14 +243,14 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     await checkUserRiskLimits(input.userId, stake, input.source || 'manual');
   }
 
-  // Digital contracts do not support price SL/TP on Deriv; only Multipliers support limit_order
-  const supportsLimits = contractType === 'MULTUP' || contractType === 'MULTDOWN';
+  // Digital contracts do not support price SL/TP on Deriv; Multipliers and Accumulators support limit_order
+  const supportsLimits = contractType === 'MULTUP' || contractType === 'MULTDOWN' || contractType === 'ACCU';
   let slUsd = supportsLimits && input.slUsd !== undefined && input.slUsd !== null ? Math.abs(Number(input.slUsd)) : null;
   let tpUsd = supportsLimits && input.tpUsd !== undefined && input.tpUsd !== null ? Math.abs(Number(input.tpUsd)) : null;
-  let slPrice = supportsLimits ? input.slPrice ?? null : null;
-  let tpPrice = supportsLimits ? input.tpPrice ?? null : null;
+  let slPrice = contractType === 'MULTUP' || contractType === 'MULTDOWN' ? input.slPrice ?? null : null;
+  let tpPrice = contractType === 'MULTUP' || contractType === 'MULTDOWN' ? input.tpPrice ?? null : null;
 
-  const isUp = ['MULTUP', 'CALL', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY'].includes(contractType);
+  const isUp = ['MULTUP', 'CALL', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY', 'ACCU'].includes(contractType);
   if (supportsLimits) {
     if (slUsd && !slPrice) {
       const pctMove = Math.min(0.45, slUsd / Math.max(1, stake * multiplier));
@@ -391,6 +393,13 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             if (tpUsd && tpUsd >= 0.5) limitOrder.take_profit = Number(tpUsd.toFixed(2));
             if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
             if (Object.keys(limitOrder).length > 0) proposalPayload.limit_order = limitOrder;
+          } else if (effectiveType === 'ACCU') {
+            const rawGr = Number(input.growthRate ?? input.barrier ?? 0.02);
+            const normalizedGr = rawGr > 1 ? rawGr / 100 : rawGr;
+            proposalPayload.growth_rate = Math.max(0.01, Math.min(0.05, Number(normalizedGr.toFixed(2))));
+            if (tpUsd && tpUsd >= 0.5) {
+              proposalPayload.limit_order = { take_profit: Number(tpUsd.toFixed(2)) };
+            }
           } else {
             proposalPayload.duration = effectiveDuration;
             proposalPayload.duration_unit = effectiveDurationUnit;
@@ -572,7 +581,9 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
 
   const latest = await derivWs.getLiveQuote(order.symbol);
   const exitPrice = latest?.quote || order.entry_price;
-  const priceStr = exitPrice.toFixed(latest?.pipSize && latest.pipSize < 0.001 ? 5 : 2);
+  const pip = latest?.pipSize ?? 0.01;
+  const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
+  const priceStr = exitPrice.toFixed(dec);
   const lastDigit = Number(priceStr[priceStr.length - 1] || 0);
   const barrier = Number(order.barrier ?? 5);
 
@@ -732,10 +743,14 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
       }
     }
   } else {
-    const isUp = ['MULTUP', 'CALL', 'BUY', 'DIGITOVER'].includes(order.contract_type);
-    const pctDiff = (exitPrice - order.entry_price) / (order.entry_price || 1);
-    const directional = isUp ? pctDiff : -pctDiff;
-    pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
+    if (String(order.contract_type || '').toUpperCase() === 'ACCU') {
+      pnl = Number(Math.max(-order.stake, Number(order.pnl || 0)).toFixed(2));
+    } else {
+      const isUp = ['MULTUP', 'CALL', 'BUY', 'DIGITOVER'].includes(order.contract_type);
+      const pctDiff = (exitPrice - order.entry_price) / (order.entry_price || 1);
+      const directional = isUp ? pctDiff : -pctDiff;
+      pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
+    }
     const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
     if (order.account_mode === 'real') {
       const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
@@ -916,11 +931,60 @@ let mtmSweepBusy = false;
 
 async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
   if (mtmClosingLocks.has(order.id)) return;
-  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(order.contract_type || '').toUpperCase())) return;
+  const ct = String(order.contract_type || '').toUpperCase();
   const entry = Number(order.entry_price || 0);
   if (!(entry > 0) || !Number.isFinite(quotePrice)) return;
 
-  const isUp = order.contract_type === 'MULTUP' || order.side === 'BUY';
+  if (ct === 'ACCU' && order.execution_mode !== 'deriv') {
+    const rawGr = Number(order.barrier ?? 0.02);
+    const gr = rawGr > 1 ? rawGr / 100 : Math.max(0.01, Math.min(0.05, rawGr || 0.02));
+    const barrierHalfBandPct = Math.max(0.00025, 0.0012 - gr * 0.015);
+    const moveFromPrev = Math.abs(quotePrice - Number(order.current_price || entry)) / (Number(order.current_price || entry) || 1);
+    const knockedOut = moveFromPrev > barrierHalfBandPct;
+
+    if (knockedOut) {
+      mtmClosingLocks.add(order.id);
+      await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+        quotePrice,
+        -Number(order.stake),
+        order.id,
+      ]);
+      closeOrderById(order.id, order.user_id)
+        .then((closed) => {
+          if (closed) {
+            addNotification(
+              order.user_id,
+              `Accumulator Knocked Out (${order.symbol})`,
+              `Price barrier exceeded (${(moveFromPrev * 100).toFixed(3)}% move). Settled -$${Number(order.stake).toFixed(2)}.`,
+              'trading'
+            ).catch(() => {});
+          }
+        })
+        .finally(() => mtmClosingLocks.delete(order.id))
+        .catch(() => {});
+      return;
+    }
+
+    const nextValue = Math.max(Number(order.stake), (Number(order.stake) + Number(order.pnl || 0)) * (1 + gr));
+    const livePnl = Number((nextValue - Number(order.stake)).toFixed(2));
+    await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [quotePrice, livePnl, order.id]);
+    derivWs.emitUserEvent(order.user_id, 'order_updated', {
+      id: order.id,
+      current_price: quotePrice,
+      pnl: livePnl,
+    });
+    if (order.tp_usd && Number(order.tp_usd) > 0 && livePnl >= Number(order.tp_usd)) {
+      mtmClosingLocks.add(order.id);
+      closeOrderById(order.id, order.user_id)
+        .finally(() => mtmClosingLocks.delete(order.id))
+        .catch(() => {});
+    }
+    return;
+  }
+
+  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(ct)) return;
+
+  const isUp = ct === 'MULTUP' || order.side === 'BUY';
   const pctDiff = (quotePrice - entry) / entry;
   const directional = isUp ? pctDiff : -pctDiff;
   const livePnl = Number(Math.max(-Number(order.stake), directional * Number(order.stake) * Number(order.multiplier || 100)).toFixed(2));
@@ -974,7 +1038,7 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
 
 export function startMtmPositionMonitor(): void {
   derivWs.onTick(async (tick) => {
-    if (tick.source !== 'deriv_ws') return;
+    if (tick.source !== 'deriv_ws' && tick.source !== 'sync_stream') return;
     try {
       const openOrders = await query<any>(
         "SELECT * FROM virtual_orders WHERE symbol = $1 AND status = 'OPEN' AND source != 'bot'",
@@ -994,12 +1058,12 @@ export function startMtmPositionMonitor(): void {
     mtmSweepBusy = true;
     try {
       const openOrders = await query<any>(
-        "SELECT * FROM virtual_orders WHERE status = 'OPEN' AND contract_type IN ('MULTUP','MULTDOWN','BUY','SELL') LIMIT 100"
+        "SELECT * FROM virtual_orders WHERE status = 'OPEN' AND contract_type IN ('MULTUP','MULTDOWN','BUY','SELL','ACCU') LIMIT 100"
       );
       for (const order of openOrders) {
         await derivWs.ensureSymbolSubscribed(order.symbol);
         const t = derivWs.getLatestTick(order.symbol);
-        if (t && t.source === 'deriv_ws') {
+        if (t && (t.source === 'deriv_ws' || t.source === 'sync_stream')) {
           await evaluateMtmOrder(order, t.quote);
         }
       }

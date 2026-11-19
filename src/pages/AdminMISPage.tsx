@@ -33,6 +33,7 @@ type AdminTab =
   | 'accounts'
   | 'strategies'
   | 'orders'
+  | 'ecosystem'
   | 'cashier'
   | 'settings'
   | 'announcements'
@@ -130,6 +131,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [pendingReauthAction, setPendingReauthAction] = useState<(() => Promise<void>) | null>(null);
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [diagLoading, setDiagLoading] = useState(false);
+  const [ecosystemHealth, setEcosystemHealth] = useState<any>(null);
+  const [ecosystemLoading, setEcosystemLoading] = useState(false);
 
   const flash = (msg: string, type: 'ok' | 'err' = 'ok') => {
     setNotice({ msg, type });
@@ -242,11 +245,26 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     }
   }, [adminToken]);
 
+  const loadEcosystemHealth = useCallback(async () => {
+    if (!adminToken) return;
+    setEcosystemLoading(true);
+    try {
+      const res = await adminFetch('/api/admin/ecosystem-health');
+      setEcosystemHealth(res);
+    } catch {
+      // ignore
+    } finally {
+      setEcosystemLoading(false);
+    }
+  }, [adminToken]);
+
   useEffect(() => {
     if (tab === 'security') {
       loadDiagnostics();
+    } else if (tab === 'ecosystem') {
+      loadEcosystemHealth();
     }
-  }, [tab, loadDiagnostics]);
+  }, [tab, loadDiagnostics, loadEcosystemHealth]);
 
   const runWithReauth = async (action: () => Promise<void>) => {
     try {
@@ -380,6 +398,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     { id: 'users', label: 'Users CRUD', icon: Users },
     { id: 'accounts', label: 'Connected Deriv', icon: Link2 },
     { id: 'strategies', label: 'Bot Strategies', icon: Bot },
+    { id: 'ecosystem', label: 'Ecosystem & Bots', icon: Shield },
     { id: 'orders', label: 'Orders Oversight', icon: Activity },
     { id: 'cashier', label: 'Cashier Logs', icon: Wallet },
     { id: 'settings', label: 'Global Settings', icon: Settings },
@@ -1737,6 +1756,130 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     <span className="text-[#00A878]">{e.status}</span>
                   </div>
                 ))}
+              </div>
+            </div>
+          )}
+
+          {/* 10B. Ecosystem & Bots Oversight */}
+          {tab === 'ecosystem' && (
+            <div className="space-y-6">
+              <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D] flex flex-wrap items-center justify-between gap-4">
+                <div>
+                  <h2 className="font-display text-sm font-bold text-white">Automated Trading Engine &amp; Standalone Ecosystem Control</h2>
+                  <p className="text-xs text-slate-400 mt-0.5">
+                    Real-time oversight of active user bots, MT5 EA bridges, and the Independent AI Analyser feed.
+                  </p>
+                </div>
+                <div className="flex items-center gap-2.5">
+                  <button
+                    type="button"
+                    onClick={loadEcosystemHealth}
+                    disabled={ecosystemLoading}
+                    className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <RefreshCw className={`w-3.5 h-3.5 ${ecosystemLoading ? 'animate-spin' : ''}`} /> Refresh
+                  </button>
+                  <button
+                    type="button"
+                    onClick={async () => {
+                      await runWithReauth(async () => {
+                        await adminFetch('/api/admin/bots/kill-all', { method: 'POST' });
+                        flash('Global Bot Kill Switch executed — all active workers stopped');
+                        loadEcosystemHealth();
+                      });
+                    }}
+                    className="px-4 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <AlertTriangle className="w-3.5 h-3.5" /> Global Bot Kill Switch
+                  </button>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
+                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                  <p className="text-xs text-slate-400">Active Workers</p>
+                  <p className="font-mono tabular-nums text-2xl font-bold mt-1 text-[#00A878]">
+                    {ecosystemHealth?.activeWorkersCount ?? (ecosystemHealth?.activeBots || []).length ?? 0}
+                  </p>
+                </div>
+                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                  <p className="text-xs text-slate-400">Recent Bot Runs</p>
+                  <p className="font-mono tabular-nums text-2xl font-bold mt-1">
+                    {(ecosystemHealth?.botRuns || []).length}
+                  </p>
+                </div>
+                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                  <p className="text-xs text-slate-400">MT5 EA Bridges</p>
+                  <p className="font-mono tabular-nums text-2xl font-bold mt-1">
+                    {(ecosystemHealth?.mt5Bridges || []).length}
+                  </p>
+                </div>
+                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
+                  <p className="text-xs text-slate-400">Analyser Feed</p>
+                  <p className={`font-mono text-base font-bold mt-1 uppercase ${
+                    ecosystemHealth?.analyserHealth?.status === 'live' ? 'text-[#00A878]' : 'text-amber-400'
+                  }`}>
+                    {ecosystemHealth?.analyserHealth?.status || 'loading'}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
+                  <h3 className="font-display text-sm font-bold mb-2">Bot Runs &amp; Active Workers</h3>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D] text-xs">
+                    {(ecosystemHealth?.botRuns || []).length === 0 ? (
+                      <p className="text-slate-400 py-4 text-center">No bot runs recorded yet.</p>
+                    ) : (
+                      (ecosystemHealth?.botRuns || []).slice(0, 25).map((r: any) => (
+                        <div key={r.id} className="py-2 flex items-center justify-between gap-2">
+                          <div>
+                            <p className="font-bold">{r.strategy_name} <span className="text-slate-400 font-mono">({r.symbol})</span></p>
+                            <p className="text-[11px] text-slate-400">
+                              User #{r.user_id} · {r.account_mode?.toUpperCase()} · {r.trades_placed || 0} trades
+                            </p>
+                          </div>
+                          <div className="text-right font-mono tabular-nums">
+                            <span className={`font-bold uppercase ${r.status === 'running' ? 'text-[#00A878]' : 'text-slate-400'}`}>
+                              {r.status}
+                            </span>
+                            <p className={`text-[11px] ${Number(r.realized_pnl || 0) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                              ${Number(r.realized_pnl || 0).toFixed(2)}
+                            </p>
+                          </div>
+                        </div>
+                      ))
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
+                  <h3 className="font-display text-sm font-bold mb-2">MT5 EA Bridges &amp; Analyser Signals</h3>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D] text-xs">
+                    {(ecosystemHealth?.mt5Bridges || []).map((b: any) => (
+                      <div key={`br-${b.id}`} className="py-2 flex items-center justify-between gap-2">
+                        <div>
+                          <p className="font-bold">{b.bridge_name} · {b.broker_name || 'Pending Terminal'}</p>
+                          <p className="text-[11px] text-slate-400">Login {b.account_login || '—'} · Status: {b.status}</p>
+                        </div>
+                        <span className="font-mono text-[11px] text-slate-400">
+                          {b.last_heartbeat_at ? new Date(b.last_heartbeat_at).toLocaleTimeString() : 'No heartbeat'}
+                        </span>
+                      </div>
+                    ))}
+                    {(ecosystemHealth?.analyserSignals || []).slice(0, 12).map((s: any) => (
+                      <div key={`sig-${s.id}`} className="py-2 flex items-center justify-between gap-2">
+                        <div>
+                          <p className="font-bold">{s.instrument} {s.direction} ({s.timeframe})</p>
+                          <p className="text-[11px] text-slate-400">Score {s.quality_score}/100 · {s.lifecycle_status}</p>
+                        </div>
+                        <span className="font-mono tabular-nums text-[11px] text-slate-300">
+                          Entry {s.entry_price}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
               </div>
             </div>
           )}

@@ -21,6 +21,8 @@ import {
   User,
   X,
   Shield,
+  ExternalLink,
+  Compass,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TradeDerivLogo } from './TradeDerivLogo';
@@ -194,6 +196,18 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                   </button>
                 );
               })}
+              <a
+                href="/analyser"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-sm font-medium text-[#1958B7] dark:text-sky-400 bg-sky-500/5 hover:bg-sky-500/10 border border-sky-500/15 transition-colors cursor-pointer whitespace-nowrap mt-2"
+              >
+                <span className="flex items-center gap-3">
+                  <Compass className="w-4 h-4 shrink-0" />
+                  <span>AI Analyser App</span>
+                </span>
+                <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-75" />
+              </a>
             </nav>
           </div>
         </div>
@@ -471,6 +485,18 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                   <span className="font-mono-num text-sm font-semibold">{inst.price}</span>
                 </button>
               ))}
+            </div>
+            <div className="px-4 py-2.5 border-t border-slate-100 dark:border-[#2A2F3D] bg-slate-50/60 dark:bg-[#111319] flex items-center justify-between">
+              <span className="text-xs text-slate-500">Independent XAUUSD &amp; Forex Intelligence</span>
+              <a
+                href="/analyser"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1958B7] dark:text-sky-400 hover:underline"
+              >
+                <span>Open Standalone AI Analyser</span>
+                <ExternalLink className="w-3.5 h-3.5" />
+              </a>
             </div>
           </div>
         </div>

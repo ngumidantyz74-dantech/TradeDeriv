@@ -217,6 +217,106 @@ router.get('/market/digit-analysis', async (req, res) => {
   });
 });
 
+// Most Active Markets ranked strictly by measurable volatility %, live tick frequency, and platform trade counts
+router.get('/market/most-active', async (_req, res) => {
+  const ticks = derivWs.getAllLatestTicks();
+  let orderCountsBySymbol = new Map<string, number>();
+
+  if (pool) {
+    try {
+      const orders = await query<{ symbol: string }>('SELECT symbol FROM virtual_orders LIMIT 500');
+      for (const o of orders) {
+        orderCountsBySymbol.set(o.symbol, (orderCountsBySymbol.get(o.symbol) || 0) + 1);
+      }
+    } catch {
+      orderCountsBySymbol = new Map();
+    }
+  }
+
+  const ranked = CURATED_DERIV_INSTRUMENTS.map((inst) => {
+    const tick = ticks[inst.symbol];
+    const stats = derivWs.getMarketActivityStats(inst.symbol);
+    const platformTrades = orderCountsBySymbol.get(inst.symbol) || 0;
+    const price = tick?.quote ?? inst.base_price;
+    const activityScore = Number(
+      (stats.volatilityPct * 120 + stats.ticksPerMinute * 0.85 + platformTrades * 4).toFixed(2)
+    );
+    return {
+      symbol: inst.symbol,
+      display_name: inst.display_name,
+      category: inst.category,
+      price,
+      bid: tick?.bid ?? price,
+      ask: tick?.ask ?? price,
+      spread: inst.spread,
+      ticksPerMinute: stats.ticksPerMinute,
+      volatilityPct: stats.volatilityPct,
+      platformTrades,
+      activityScore,
+      tickSource: tick?.source || 'cached',
+    };
+  })
+    .sort((a, b) => b.activityScore - a.activityScore)
+    .slice(0, 20);
+
+  res.json({
+    instruments: ranked,
+    metricBasis:
+      'Ranked strictly by measured recent range volatility %, ticks observed per minute on the live stream, and platform order count. No external market-volume figures are invented.',
+    generatedAt: new Date().toISOString(),
+  });
+});
+
+// Savable MT5 Chart Workspace Layouts
+router.get('/workspace/layouts', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const rows = await query<any>('SELECT * FROM chart_layouts WHERE user_id = $1 ORDER BY id DESC', [req.user!.id]);
+  const layouts = rows.map((r) => ({
+    ...r,
+    layout: (() => {
+      try {
+        return JSON.parse(r.layout_json || '{}');
+      } catch {
+        return {};
+      }
+    })(),
+  }));
+  res.json({ layouts });
+});
+
+router.post('/workspace/layouts', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const b = req.body || {};
+  const name = String(b.name || 'Default MT5 Layout').trim().slice(0, 60);
+  const symbol = String(b.symbol || '1HZ100V');
+  const timeframe = Number(b.timeframe || 60);
+  const layoutJson = JSON.stringify(b.layout || {});
+  const isDefault = Boolean(b.isDefault);
+
+  const row = await queryOne<any>(
+    `INSERT INTO chart_layouts (user_id, name, symbol, timeframe, layout_json, is_default, updated_at)
+     VALUES ($1, $2, $3, $4, $5, $6, NOW())
+     ON CONFLICT (user_id, name) DO UPDATE SET
+       symbol = EXCLUDED.symbol,
+       timeframe = EXCLUDED.timeframe,
+       layout_json = EXCLUDED.layout_json,
+       is_default = EXCLUDED.is_default,
+       updated_at = NOW()
+     RETURNING *`,
+    [req.user!.id, name, symbol, timeframe, layoutJson, isDefault]
+  );
+
+  res.status(201).json({
+    layout: {
+      ...row,
+      layout: b.layout || {},
+    },
+  });
+});
+
+router.delete('/workspace/layouts/:id', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  await execute('DELETE FROM chart_layouts WHERE id = $1 AND user_id = $2', [Number(req.params.id), req.user!.id]);
+  res.json({ ok: true });
+});
+
 // Crypto Exchange pairs & orders
 router.get('/exchange/pairs', (req, res) => {
   const filter = String(req.query.filter || 'trending').toLowerCase();

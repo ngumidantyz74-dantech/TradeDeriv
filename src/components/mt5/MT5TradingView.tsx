@@ -41,12 +41,16 @@ import {
   ChevronDown,
   ChevronUp,
   Edit3,
+  PanelLeft,
+  PanelRight,
+  Bookmark,
+  Save,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../../lib/balances';
 import { computeAllIndicators, STRATEGY_CATALOG } from '../../lib/quant-engine';
-import type { CandleData, MarketInstrument, WorkspacePreferences } from '../../types';
+import type { CandleData, ChartLayoutPreset, MarketInstrument, WorkspacePreferences } from '../../types';
 
 const TIMEFRAMES: Array<{ label: string; granularity: number }> = [
   { label: '1t', granularity: 1 },
@@ -65,7 +69,8 @@ const TIMEFRAMES: Array<{ label: string; granularity: number }> = [
 ];
 
 type SlTpUnit = 'USD' | 'Price' | '%' | 'Pips';
-type TradeMode = 'MT5 Market' | 'Over/Under' | 'Rise/Fall';
+type TradeMode = 'MT5 Market' | 'Rise/Fall' | 'Digits' | 'Accumulators';
+type DigitCategory = 'matches_differs' | 'over_under' | 'even_odd';
 type DockTab = 'open' | 'history' | 'exposure';
 type ChartMode = 'candles' | 'line' | 'area';
 type DrawMode = 'crosshair' | 'hline' | 'trendline' | 'fib' | 'fibext';
@@ -143,13 +148,21 @@ export const MT5TradingView: React.FC = () => {
     showToast,
     workspacePreferences,
     saveWorkspacePreferences,
+    desiredTradeMode,
+    setDesiredTradeMode,
   } = useApp();
 
-  // MarketWatch Panel
+  // MarketWatch & Collapsible Workspace State
   const [catFilter, setCatFilter] = useState<'All' | MarketInstrument['category']>('All');
   const [mwSearch, setMwSearch] = useState('');
   const [showWatchlistOnly, setShowWatchlistOnly] = useState(false);
   const [mobileMwOpen, setMobileMwOpen] = useState(false);
+  const [showMarketWatch, setShowMarketWatch] = useState(true);
+  const [showOrderTicket, setShowOrderTicket] = useState(true);
+  const [savedLayouts, setSavedLayouts] = useState<ChartLayoutPreset[]>([]);
+  const [layoutsOpen, setLayoutsOpen] = useState(false);
+  const [layoutNameInput, setLayoutNameInput] = useState('');
+  const [savingLayout, setSavingLayout] = useState(false);
 
   // Chart & Data State
   const [timeframe, setTimeframe] = useState(900);
@@ -241,15 +254,42 @@ export const MT5TradingView: React.FC = () => {
     [selectedSymbol, workspacePreferences.chartDrawings, saveWorkspacePreferences]
   );
 
-  // Order Ticket State (calibrated for pro <$50 micro-account risk management)
+  // Order Ticket State (calibrated for pro micro-account risk management)
   const [tradeMode, setTradeMode] = useState<TradeMode>('MT5 Market');
+  const [digitCategory, setDigitCategory] = useState<DigitCategory>('over_under');
   const [lots, setLots] = useState(0.02);
   const [stakeUsd, setStakeUsd] = useState(2);
   const [multiplier, setMultiplier] = useState(100);
+  const [growthRate, setGrowthRate] = useState(0.02);
+  const [accuTpUsd, setAccuTpUsd] = useState('10');
   const [bulkCount, setBulkCount] = useState(1);
   const [barrier, setBarrier] = useState('4');
   const [durationTicks, setDurationTicks] = useState(5);
+  const [durationUnit, setDurationUnit] = useState<'t' | 'm' | 'h'>('t');
   const [strategyTag, setStrategyTag] = useState<string>('');
+
+  useEffect(() => {
+    if (!desiredTradeMode) return;
+    if (desiredTradeMode === 'Rise/Fall') setTradeMode('Rise/Fall');
+    else if (desiredTradeMode === 'Digits') setTradeMode('Digits');
+    else if (desiredTradeMode === 'Accumulators') setTradeMode('Accumulators');
+    else setTradeMode('MT5 Market');
+    setShowOrderTicket(true);
+    setDesiredTradeMode(null);
+  }, [desiredTradeMode, setDesiredTradeMode]);
+
+  const loadWorkspaceLayouts = useCallback(async () => {
+    try {
+      const res = await apiFetch<{ layouts: ChartLayoutPreset[] }>('/api/workspace/layouts');
+      setSavedLayouts(res.layouts || []);
+    } catch {
+      // ignore if guest
+    }
+  }, []);
+
+  useEffect(() => {
+    loadWorkspaceLayouts();
+  }, [loadWorkspaceLayouts]);
 
   // Contract capabilities & live Deriv proposal
   const [contractsAvailable, setContractsAvailable] = useState<string[]>([]);
@@ -308,7 +348,7 @@ export const MT5TradingView: React.FC = () => {
   );
 
   const liveTick = ticks[selectedSymbol];
-  const hasLiveWsTick = liveTick?.source === 'deriv_ws';
+  const hasLiveWsTick = Boolean(liveTick && (liveTick.source === 'deriv_ws' || liveTick.source === 'sync_stream'));
   const lastCandleClose = candles.length > 0 ? candles[candles.length - 1].close : undefined;
   const currentPrice = hasLiveWsTick ? liveTick.quote : (lastCandleClose ?? liveTick?.quote ?? activeInst?.price ?? 1000);
   const spreadVal = activeInst?.spread ?? 0.2;
@@ -712,7 +752,7 @@ export const MT5TradingView: React.FC = () => {
     if (
       !liveTick ||
       liveTick.symbol !== selectedSymbol ||
-      liveTick.source !== 'deriv_ws' ||
+      (liveTick.source !== 'deriv_ws' && liveTick.source !== 'sync_stream') ||
       !mainSeriesRef.current ||
       currentCandles.length === 0
     ) {
@@ -1054,8 +1094,69 @@ export const MT5TradingView: React.FC = () => {
     setTpValue(String(Number((base * ratio).toFixed(2))));
   };
 
+  const handleSaveChartLayout = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanName = layoutNameInput.trim();
+    if (!cleanName || savingLayout) return;
+    setSavingLayout(true);
+    const tfLabel = TIMEFRAMES.find((t) => t.granularity === timeframe)?.label || '15m';
+    try {
+      await apiFetch('/api/workspace/layouts', {
+        method: 'POST',
+        body: JSON.stringify({
+          name: cleanName,
+          symbol: selectedSymbol,
+          timeframe: timeframe,
+          layout: {
+            indicators: indPrefs,
+            chartMode: indPrefs.chartMode,
+            showMarketWatch,
+            showOrderTicket,
+            activeMode: tradeMode,
+          },
+          isDefault: false,
+        }),
+      });
+      setLayoutNameInput('');
+      await loadWorkspaceLayouts();
+      showToast(`Saved chart layout "${cleanName}"`, 'success');
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Unable to save layout'), 'error');
+    } finally {
+      setSavingLayout(false);
+    }
+  };
+
+  const applySavedLayout = (preset: ChartLayoutPreset) => {
+    if (preset.symbol) setSelectedSymbol(preset.symbol);
+    const tfMatch = TIMEFRAMES.find(
+      (t) => t.label === String(preset.timeframe) || t.granularity === Number(preset.timeframe)
+    );
+    if (tfMatch) setTimeframe(tfMatch.granularity);
+    const l = preset.layout || {};
+    if (l.indicators) updateIndPrefs(l.indicators as Partial<IndicatorPrefs>);
+    if (typeof l.showMarketWatch === 'boolean') setShowMarketWatch(l.showMarketWatch);
+    if (typeof l.showOrderTicket === 'boolean') setShowOrderTicket(l.showOrderTicket);
+    if (l.activeMode && ['MT5 Market', 'Rise/Fall', 'Digits', 'Accumulators'].includes(String(l.activeMode))) {
+      setTradeMode(l.activeMode as TradeMode);
+    }
+    setLayoutsOpen(false);
+    showToast(`Loaded layout "${preset.name}"`, 'info');
+  };
+
+  const handleDeleteLayout = async (id: number) => {
+    try {
+      await apiFetch(`/api/workspace/layouts/${id}`, { method: 'DELETE' });
+      await loadWorkspaceLayouts();
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Unable to remove layout'), 'error');
+    }
+  };
+
   const previewProposal = async (contractType: string) => {
     try {
+      const needsBarrier =
+        tradeMode === 'Digits' && (digitCategory === 'over_under' || digitCategory === 'matches_differs');
       const res = await apiFetch<{ proposal: any }>('/api/deriv/proposal', {
         method: 'POST',
         body: JSON.stringify({
@@ -1063,9 +1164,10 @@ export const MT5TradingView: React.FC = () => {
           contractType,
           stake: stakeUsd,
           multiplier,
-          barrier: tradeMode === 'Over/Under' ? barrier : undefined,
-          duration: durationTicks,
-          durationUnit: 't',
+          growthRate: tradeMode === 'Accumulators' ? growthRate : undefined,
+          barrier: needsBarrier ? barrier : undefined,
+          duration: tradeMode === 'Digits' ? Math.min(10, Math.max(1, durationTicks)) : durationTicks,
+          durationUnit: tradeMode === 'Digits' ? 't' : durationUnit,
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });
@@ -1083,36 +1185,51 @@ export const MT5TradingView: React.FC = () => {
     setPlacing(true);
     try {
       const normalizedSide =
-        sideInput === 'BUY' || sideInput === 'CALL' || sideInput === 'DIGITOVER' ? 'BUY' : 'SELL';
+        sideInput === 'BUY' ||
+        sideInput === 'CALL' ||
+        sideInput === 'DIGITOVER' ||
+        sideInput === 'DIGITMATCH' ||
+        sideInput === 'DIGITEVEN' ||
+        sideInput === 'ACCU'
+          ? 'BUY'
+          : 'SELL';
       const isMultiplier = tradeMode === 'MT5 Market';
+      const isAccu = tradeMode === 'Accumulators';
       const slData =
         isMultiplier && slEnabled ? convertToUsdAndPrice(slValue, slUnit, false, normalizedSide) : { usd: null, price: null };
       const tpData =
-        isMultiplier && tpEnabled ? convertToUsdAndPrice(tpValue, tpUnit, true, normalizedSide) : { usd: null, price: null };
+        isMultiplier && tpEnabled
+          ? convertToUsdAndPrice(tpValue, tpUnit, true, normalizedSide)
+          : isAccu && Number(accuTpUsd) > 0
+            ? { usd: Number(accuTpUsd), price: null }
+            : { usd: null, price: null };
 
       const tfLabel = TIMEFRAMES.find((t) => t.granularity === timeframe)?.label || '15m';
       const idempotencyKey = `${selectedSymbol}-${sideInput}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      const needsBarrier =
+        tradeMode === 'Digits' && (digitCategory === 'over_under' || digitCategory === 'matches_differs');
 
-      const endpoint = bulkCount > 1 ? '/api/orders/bulk' : '/api/orders';
+      const endpoint = bulkCount > 1 && !isAccu ? '/api/orders/bulk' : '/api/orders';
       await apiFetch(endpoint, {
         method: 'POST',
         body: JSON.stringify({
-          count: bulkCount,
+          count: isAccu ? 1 : bulkCount,
           symbol: selectedSymbol,
           side: sideInput,
           contractType:
             contractTypeOverride ||
-            (tradeMode === 'MT5 Market' ? (normalizedSide === 'BUY' ? 'MULTUP' : 'MULTDOWN') : undefined),
+            (isMultiplier ? (normalizedSide === 'BUY' ? 'MULTUP' : 'MULTDOWN') : isAccu ? 'ACCU' : undefined),
           lots,
           stake: stakeUsd,
           multiplier,
+          growthRate: isAccu ? growthRate : undefined,
           slUsd: slData.usd,
           tpUsd: tpData.usd,
           slPrice: slData.price,
           tpPrice: tpData.price,
-          barrier: tradeMode === 'Over/Under' ? barrier : null,
-          duration: tradeMode === 'MT5 Market' ? 5 : durationTicks,
-          durationUnit: 't',
+          barrier: needsBarrier ? barrier : null,
+          duration: tradeMode === 'MT5 Market' || isAccu ? 5 : durationTicks,
+          durationUnit: tradeMode === 'Digits' ? 't' : durationUnit,
           executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
           strategyKey: strategyTag,
@@ -1123,7 +1240,7 @@ export const MT5TradingView: React.FC = () => {
       });
       await Promise.all([refreshOrders(), refreshAll()]);
       showToast(
-        `${bulkCount > 1 ? `${bulkCount}x ` : ''}${sideInput} order executed on ${selectedSymbol}`,
+        `${bulkCount > 1 && !isAccu ? `${bulkCount}x ` : ''}${sideInput} order executed on ${selectedSymbol}`,
         'success'
       );
     } catch (err) {
@@ -1479,9 +1596,104 @@ export const MT5TradingView: React.FC = () => {
         )}
       </div>
 
+      {/* Desktop Workspace Controls & Layout Presets Bar */}
+      <div className="hidden xl:flex items-center justify-between gap-3 px-3 py-2 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D]">
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setShowMarketWatch((v) => !v)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              showMarketWatch
+                ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
+                : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <PanelLeft className="w-3.5 h-3.5" />
+            {showMarketWatch ? 'Hide MarketWatch' : 'Show MarketWatch'}
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowOrderTicket((v) => !v)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              showOrderTicket
+                ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
+                : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            <PanelRight className="w-3.5 h-3.5" />
+            {showOrderTicket ? 'Hide Trade Ticket' : 'Show Trade Ticket'}
+          </button>
+          <span className="text-xs text-slate-400">·</span>
+          <span className="text-xs text-slate-500">
+            Active: <strong className="text-[#0E1117] dark:text-white">{tradeMode}</strong>
+          </span>
+        </div>
+
+        <div className="relative flex items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setLayoutsOpen((v) => !v)}
+            className="px-3 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer hover:text-[#FF444F] whitespace-nowrap"
+          >
+            <Bookmark className="w-3.5 h-3.5 text-[#1958B7]" />
+            Saved Layouts ({savedLayouts.length})
+          </button>
+
+          {layoutsOpen && (
+            <div className="absolute right-0 top-10 z-40 w-80 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] shadow-xl p-3 space-y-3">
+              <form onSubmit={handleSaveChartLayout} className="flex items-center gap-1.5">
+                <input
+                  type="text"
+                  value={layoutNameInput}
+                  onChange={(e) => setLayoutNameInput(e.target.value)}
+                  placeholder="Preset name (e.g. V100 Scalping)"
+                  className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#F4F5F7] dark:bg-[#111319] text-xs outline-none"
+                />
+                <button
+                  type="submit"
+                  disabled={savingLayout || !layoutNameInput.trim()}
+                  className="px-2.5 py-1.5 rounded-lg bg-[#00A878] text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                >
+                  <Save className="w-3 h-3" /> Save
+                </button>
+              </form>
+              <div className="max-h-48 overflow-y-auto divide-y divide-slate-100 dark:divide-[#2A2F3D]">
+                {savedLayouts.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-2">No saved chart layouts yet.</p>
+                ) : (
+                  savedLayouts.map((preset) => (
+                    <div key={preset.id} className="py-2 flex items-center justify-between gap-2 text-xs">
+                      <button
+                        type="button"
+                        onClick={() => applySavedLayout(preset)}
+                        className="text-left flex-1 min-w-0 hover:text-[#FF444F] cursor-pointer"
+                      >
+                        <p className="font-semibold truncate">{preset.name}</p>
+                        <p className="text-[11px] text-slate-400 font-mono tabular-nums">
+                          {preset.symbol} · {preset.timeframe}
+                        </p>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDeleteLayout(preset.id)}
+                        className="p-1 text-slate-400 hover:text-[#FF444F] cursor-pointer"
+                        aria-label="Delete layout"
+                      >
+                        <Trash2 className="w-3.5 h-3.5" />
+                      </button>
+                    </div>
+                  ))
+                )}
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
       {/* Top 3-Column Trading Workspace */}
       <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-        {/* Desktop Left MarketWatch Panel (3 cols, hidden on mobile to keep Chart first) */}
+        {/* Desktop Left MarketWatch Panel (3 cols, collapsible) */}
+        {showMarketWatch && (
         <aside className="hidden xl:flex xl:col-span-3 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] flex-col max-h-[600px]">
           <div className="p-3 border-b border-slate-100 dark:border-[#2A2F3D] space-y-2.5">
             <div className="flex items-center justify-between">
@@ -1565,11 +1777,18 @@ export const MT5TradingView: React.FC = () => {
             })}
           </div>
         </aside>
+        )}
 
-        {/* Center Institutional Chart + Indicators + Drawing Toolbar (6 cols, or fullscreen) */}
+        {/* Center Institutional Chart + Indicators + Drawing Toolbar (expands dynamically when side panels collapse) */}
         <section
           className={`${
-            isFullscreen ? 'fixed inset-3 z-50 shadow-2xl' : 'xl:col-span-6'
+            isFullscreen
+              ? 'fixed inset-3 z-50 shadow-2xl'
+              : showMarketWatch && showOrderTicket
+                ? 'xl:col-span-6'
+                : showMarketWatch || showOrderTicket
+                  ? 'xl:col-span-9'
+                  : 'xl:col-span-12'
           } bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden flex flex-col relative`}
         >
           {/* Chart Header */}
@@ -2054,28 +2273,27 @@ export const MT5TradingView: React.FC = () => {
           )}
         </section>
 
-        {/* Right Contract-Aware Order Ticket (3 cols) */}
+        {/* Right Contract-Aware Order Ticket (3 cols, collapsible) */}
+        {showOrderTicket && (
         <aside className="xl:col-span-3 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-3.5">
           <div className="flex items-center justify-between text-[11px]">
             <span className="font-semibold text-slate-500">Execution Mode</span>
             <span
-              className={`px-2.5 py-0.5 rounded-full font-bold ${
-                accountMode === 'real'
-                  ? 'bg-[#FF444F]/15 text-[#FF444F]'
-                  : 'bg-[#00A878]/15 text-[#00A878]'
+              className={`font-bold font-mono tabular-nums ${
+                accountMode === 'real' ? 'text-[#FF444F]' : 'text-[#00A878]'
               }`}
             >
               {accountMode === 'real'
                 ? activeConnectedAccount
-                  ? `REAL (${activeConnectedAccount.deriv_account_id})`
+                  ? `REAL · ${activeConnectedAccount.deriv_account_id}`
                   : 'REAL WALLET (DB)'
                 : 'DEMO WORKSPACE'}
             </span>
           </div>
 
-          {/* Trade Mode Selector */}
-          <div className="grid grid-cols-3 gap-1 bg-[#F4F5F7] dark:bg-[#111319] p-1 rounded-xl">
-            {(['MT5 Market', 'Over/Under', 'Rise/Fall'] as TradeMode[]).map((m) => (
+          {/* Complete 4-Mode Deriv Product Switcher */}
+          <div className="grid grid-cols-2 gap-1 bg-[#F4F5F7] dark:bg-[#111319] p-1 rounded-xl">
+            {(['MT5 Market', 'Rise/Fall', 'Digits', 'Accumulators'] as TradeMode[]).map((m) => (
               <button
                 key={m}
                 type="button"
@@ -2083,8 +2301,8 @@ export const MT5TradingView: React.FC = () => {
                   setTradeMode(m);
                   setProposalInfo(null);
                 }}
-                className={`py-1.5 rounded-lg text-[11px] font-bold cursor-pointer ${
-                  tradeMode === m ? 'bg-white dark:bg-[#2A2F3D] shadow-xs' : 'text-slate-500'
+                className={`py-1.5 rounded-lg text-[11px] font-bold cursor-pointer whitespace-nowrap ${
+                  tradeMode === m ? 'bg-white dark:bg-[#2A2F3D] shadow-xs text-[#0E1117] dark:text-white' : 'text-slate-500'
                 }`}
               >
                 {m}
@@ -2092,132 +2310,245 @@ export const MT5TradingView: React.FC = () => {
             ))}
           </div>
 
-          {/* Volume Lots synced 1:100 USD */}
-          <div>
-            <div className="flex items-center justify-between text-xs mb-1.5">
-              <span className="font-semibold text-slate-500">Volume, Lots</span>
-              <span className="font-mono-num font-semibold text-slate-700 dark:text-slate-300">
-                Stake: ${stakeUsd.toFixed(2)}
-              </span>
-            </div>
-            <div className="flex items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleLotsChange(lots - 0.01)}
-                className="w-9 h-9 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-bold cursor-pointer"
-              >
-                -
-              </button>
-              <input
-                type="number"
-                step="0.01"
-                min="0.01"
-                max="100"
-                value={lots}
-                onChange={(e) => handleLotsChange(Number(e.target.value))}
-                className="flex-1 text-center py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
-              />
-              <button
-                type="button"
-                onClick={() => handleLotsChange(lots + 0.01)}
-                className="w-9 h-9 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-bold cursor-pointer"
-              >
-                +
-              </button>
-            </div>
-            <div className="grid grid-cols-5 gap-1 mt-2">
-              {[0.01, 0.02, 0.05, 0.1, 0.25].map((preset) => (
+          {/* Volume Lots (MT5 Market) */}
+          {tradeMode === 'MT5 Market' && (
+            <div>
+              <div className="flex items-center justify-between text-xs mb-1.5">
+                <span className="font-semibold text-slate-500">Volume, Lots</span>
+                <span className="font-mono-num font-semibold text-slate-700 dark:text-slate-300">
+                  Stake: ${stakeUsd.toFixed(2)}
+                </span>
+              </div>
+              <div className="flex items-center gap-1.5">
                 <button
-                  key={preset}
                   type="button"
-                  onClick={() => handleLotsChange(preset)}
-                  className={`py-1 rounded-lg font-mono-num text-[11px] font-semibold cursor-pointer ${
-                    Math.abs(lots - preset) < 0.001
-                      ? 'bg-[#1958B7] text-white'
-                      : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
-                  }`}
+                  onClick={() => handleLotsChange(lots - 0.01)}
+                  className="w-9 h-9 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-bold cursor-pointer"
                 >
-                  {preset}
+                  -
                 </button>
-              ))}
+                <input
+                  type="number"
+                  step="0.01"
+                  min="0.01"
+                  max="100"
+                  value={lots}
+                  onChange={(e) => handleLotsChange(Number(e.target.value))}
+                  className="flex-1 text-center py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
+                />
+                <button
+                  type="button"
+                  onClick={() => handleLotsChange(lots + 0.01)}
+                  className="w-9 h-9 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-bold cursor-pointer"
+                >
+                  +
+                </button>
+              </div>
+              <div className="grid grid-cols-5 gap-1 mt-2">
+                {[0.01, 0.02, 0.05, 0.1, 0.25].map((preset) => (
+                  <button
+                    key={preset}
+                    type="button"
+                    onClick={() => handleLotsChange(preset)}
+                    className={`py-1 rounded-lg font-mono-num text-[11px] font-semibold cursor-pointer ${
+                      Math.abs(lots - preset) < 0.001
+                        ? 'bg-[#1958B7] text-white'
+                        : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+                    }`}
+                  >
+                    {preset}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
+          )}
 
-          {/* Stake USD + Multiplier */}
+          {/* Stake USD + Multiplier / Duration Controls */}
           <div className="grid grid-cols-2 gap-2.5">
             <div>
               <label className="block text-[11px] font-semibold text-slate-500 mb-1">Stake (USD)</label>
               <input
                 type="number"
-                min="1"
+                min="0.35"
+                step="0.1"
                 value={stakeUsd}
                 onChange={(e) => handleStakeChange(Number(e.target.value))}
                 className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
               />
             </div>
-            <div>
-              <label className="block text-[11px] font-semibold text-slate-500 mb-1">Leverage</label>
-              <div className="grid grid-cols-4 gap-1">
-                {[50, 100, 200, 400].map((m) => (
-                  <button
-                    key={m}
-                    type="button"
-                    onClick={() => setMultiplier(m)}
-                    className={`py-2 rounded-lg text-[10px] font-mono-num font-bold cursor-pointer ${
-                      multiplier === m
-                        ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
-                        : 'bg-[#F4F5F7] dark:bg-[#111319]'
-                    }`}
-                  >
-                    x{m}
-                  </button>
-                ))}
-              </div>
-            </div>
-          </div>
 
-          {tradeMode === 'Over/Under' && (
-            <div className="grid grid-cols-2 gap-2">
+            {tradeMode === 'MT5 Market' ? (
               <div>
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Barrier Digit (0–9)</label>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Leverage</label>
+                <div className="grid grid-cols-4 gap-1">
+                  {[50, 100, 200, 400].map((m) => (
+                    <button
+                      key={m}
+                      type="button"
+                      onClick={() => setMultiplier(m)}
+                      className={`py-2 rounded-lg text-[10px] font-mono-num font-bold cursor-pointer ${
+                        multiplier === m
+                          ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
+                          : 'bg-[#F4F5F7] dark:bg-[#111319]'
+                      }`}
+                    >
+                      x{m}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : tradeMode === 'Accumulators' ? (
+              <div>
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Take Profit ($)</label>
                 <input
                   type="number"
                   min="0"
-                  max="9"
-                  value={barrier}
-                  onChange={(e) => setBarrier(e.target.value)}
+                  step="1"
+                  value={accuTpUsd}
+                  onChange={(e) => setAccuTpUsd(e.target.value)}
+                  placeholder="Optional"
                   className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
                 />
               </div>
+            ) : (
               <div>
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Duration (Ticks)</label>
-                <input
-                  type="number"
-                  min="1"
-                  max="10"
-                  value={durationTicks}
-                  onChange={(e) => setDurationTicks(Number(e.target.value))}
-                  className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
-                />
+                <label className="block text-[11px] font-semibold text-slate-500 mb-1">Duration</label>
+                <div className="flex items-center gap-1">
+                  <input
+                    type="number"
+                    min="1"
+                    max={tradeMode === 'Digits' ? 10 : 1440}
+                    value={durationTicks}
+                    onChange={(e) => setDurationTicks(Math.max(1, Number(e.target.value)))}
+                    className="w-16 px-2 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold text-center"
+                  />
+                  {tradeMode === 'Rise/Fall' ? (
+                    <select
+                      value={durationUnit}
+                      onChange={(e) => setDurationUnit(e.target.value as 't' | 'm' | 'h')}
+                      className="flex-1 px-2 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-bold"
+                    >
+                      <option value="t">Ticks</option>
+                      <option value="m">Min</option>
+                      <option value="h">Hour</option>
+                    </select>
+                  ) : (
+                    <span className="text-xs font-semibold text-slate-500 pl-1">Ticks</span>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+
+          {/* Digits Mode Controls: Matches/Differs, Over/Under, Even/Odd + Live Last Digit */}
+          {tradeMode === 'Digits' && (
+            <div className="space-y-2.5 pt-1 border-t border-slate-100 dark:border-[#2A2F3D]">
+              <div className="grid grid-cols-3 gap-1 bg-[#F4F5F7] dark:bg-[#111319] p-1 rounded-xl">
+                {(
+                  [
+                    { id: 'matches_differs', label: 'Match/Differ' },
+                    { id: 'over_under', label: 'Over/Under' },
+                    { id: 'even_odd', label: 'Even/Odd' },
+                  ] as Array<{ id: DigitCategory; label: string }>
+                ).map((dc) => (
+                  <button
+                    key={dc.id}
+                    type="button"
+                    onClick={() => {
+                      setDigitCategory(dc.id);
+                      setProposalInfo(null);
+                    }}
+                    className={`py-1 rounded-lg text-[10px] font-bold cursor-pointer whitespace-nowrap ${
+                      digitCategory === dc.id ? 'bg-white dark:bg-[#2A2F3D] shadow-xs' : 'text-slate-500'
+                    }`}
+                  >
+                    {dc.label}
+                  </button>
+                ))}
+              </div>
+
+              {/* Live Spot + Highlighted Last Digit */}
+              {(() => {
+                const quoteStr = currentPrice.toFixed(decimals);
+                const lastDigit = quoteStr.slice(-1);
+                return (
+                  <div className="flex items-center justify-between px-3 py-2 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] text-xs">
+                    <span className="text-slate-500">Live Tick</span>
+                    <span className="font-mono-num font-bold">
+                      {quoteStr.slice(0, -1)}
+                      <span className="text-[#FF444F] underline decoration-2 ml-0.5 text-sm">{lastDigit}</span>
+                    </span>
+                  </div>
+                );
+              })()}
+
+              {(digitCategory === 'matches_differs' || digitCategory === 'over_under') && (
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 mb-1.5">
+                    Target Digit (0–9)
+                  </label>
+                  <div className="grid grid-cols-5 gap-1">
+                    {Array.from({ length: 10 }, (_, d) => String(d)).map((d) => (
+                      <button
+                        key={d}
+                        type="button"
+                        onClick={() => {
+                          setBarrier(d);
+                          setProposalInfo(null);
+                        }}
+                        className={`py-1.5 rounded-lg font-mono-num text-xs font-bold cursor-pointer ${
+                          barrier === d
+                            ? 'bg-[#FF444F] text-white'
+                            : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+                        }`}
+                      >
+                        {d}
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Accumulators Growth Rate & Risk Notice */}
+          {tradeMode === 'Accumulators' && (
+            <div className="space-y-2.5 pt-1 border-t border-slate-100 dark:border-[#2A2F3D]">
+              <div>
+                <div className="flex items-center justify-between text-[11px] mb-1">
+                  <span className="font-semibold text-slate-500">Growth Rate (Per Tick)</span>
+                  <span className="font-mono-num font-bold text-[#00A878]">{(growthRate * 100).toFixed(0)}%</span>
+                </div>
+                <div className="grid grid-cols-5 gap-1">
+                  {[0.01, 0.02, 0.03, 0.04, 0.05].map((gr) => (
+                    <button
+                      key={gr}
+                      type="button"
+                      onClick={() => {
+                        setGrowthRate(gr);
+                        setProposalInfo(null);
+                      }}
+                      className={`py-1.5 rounded-lg font-mono-num text-xs font-bold cursor-pointer ${
+                        Math.abs(growthRate - gr) < 0.001
+                          ? 'bg-[#00A878] text-white'
+                          : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      {(gr * 100).toFixed(0)}%
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <div className="p-2.5 rounded-xl bg-amber-500/10 text-[11px] text-amber-700 dark:text-amber-300 space-y-1">
+                <p className="font-semibold">Accumulator Barrier & Knockout Risk</p>
+                <p>
+                  Payout compounds {(growthRate * 100).toFixed(0)}% each tick spot stays inside Deriv's upper/lower range barriers. Touching either barrier knocks out the contract immediately with full stake loss.
+                </p>
               </div>
             </div>
           )}
 
-          {tradeMode === 'Rise/Fall' && (
-            <div>
-              <label className="block text-[11px] font-semibold text-slate-500 mb-1">Duration (Ticks)</label>
-              <input
-                type="number"
-                min="1"
-                max="10"
-                value={durationTicks}
-                onChange={(e) => setDurationTicks(Number(e.target.value))}
-                className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
-              />
-            </div>
-          )}
-
-          {/* SL & TP 4-Mode Controls (Supported on Multipliers only) */}
+          {/* SL & TP 4-Mode Controls (Multipliers only) */}
           {tradeMode === 'MT5 Market' ? (
             <div className="space-y-2.5 pt-1 border-t border-slate-100 dark:border-[#2A2F3D]">
               <div>
@@ -2304,11 +2635,11 @@ export const MT5TradingView: React.FC = () => {
                 </div>
               </div>
             </div>
-          ) : (
+          ) : tradeMode !== 'Accumulators' ? (
             <div className="p-2.5 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] text-[11px] text-slate-500">
-              Fixed-payout Deriv option contract: risk is strictly capped at your stake (${stakeUsd.toFixed(2)}); price SL/TP limits apply to Multipliers only.
+              Fixed-payout contract: risk capped at stake (${stakeUsd.toFixed(2)}). Check live quoted payout below before executing.
             </div>
-          )}
+          ) : null}
 
           {/* Strategy Tag & Bulk Count */}
           <div className="grid grid-cols-2 gap-2">
@@ -2330,9 +2661,10 @@ export const MT5TradingView: React.FC = () => {
             <div>
               <label className="block text-[10px] font-semibold text-slate-500 mb-1">Bulk Orders</label>
               <select
-                value={bulkCount}
+                value={tradeMode === 'Accumulators' ? 1 : bulkCount}
+                disabled={tradeMode === 'Accumulators'}
                 onChange={(e) => setBulkCount(Number(e.target.value))}
-                className="w-full px-2.5 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-[11px] font-bold"
+                className="w-full px-2.5 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-[11px] font-bold disabled:opacity-50"
               >
                 {[1, 2, 3, 5, 10].map((c) => (
                   <option key={c} value={c}>
@@ -2349,7 +2681,17 @@ export const MT5TradingView: React.FC = () => {
               type="button"
               onClick={() =>
                 previewProposal(
-                  tradeMode === 'MT5 Market' ? 'MULTUP' : tradeMode === 'Over/Under' ? 'DIGITOVER' : 'CALL'
+                  tradeMode === 'MT5 Market'
+                    ? 'MULTUP'
+                    : tradeMode === 'Accumulators'
+                      ? 'ACCU'
+                      : tradeMode === 'Rise/Fall'
+                        ? 'CALL'
+                        : digitCategory === 'matches_differs'
+                          ? 'DIGITMATCH'
+                          : digitCategory === 'even_odd'
+                            ? 'DIGITEVEN'
+                            : 'DIGITOVER'
                 )
               }
               className="text-[#1958B7] font-semibold hover:underline cursor-pointer"
@@ -2395,7 +2737,49 @@ export const MT5TradingView: React.FC = () => {
             </div>
           )}
 
-          {tradeMode === 'Over/Under' && (
+          {tradeMode === 'Rise/Fall' && (
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={placing}
+                onClick={() => handlePlaceOrder('CALL', 'CALL')}
+                className="py-3 rounded-2xl bg-[#00A878] hover:bg-[#00966B] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
+              >
+                RISE (CALL)
+              </button>
+              <button
+                type="button"
+                disabled={placing}
+                onClick={() => handlePlaceOrder('PUT', 'PUT')}
+                className="py-3 rounded-2xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
+              >
+                FALL (PUT)
+              </button>
+            </div>
+          )}
+
+          {tradeMode === 'Digits' && digitCategory === 'matches_differs' && (
+            <div className="grid grid-cols-2 gap-2.5 pt-1">
+              <button
+                type="button"
+                disabled={placing}
+                onClick={() => handlePlaceOrder('DIGITMATCH', 'DIGITMATCH')}
+                className="py-3 rounded-2xl bg-[#00A878] hover:bg-[#00966B] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
+              >
+                MATCHES {barrier}
+              </button>
+              <button
+                type="button"
+                disabled={placing}
+                onClick={() => handlePlaceOrder('DIGITDIFF', 'DIGITDIFF')}
+                className="py-3 rounded-2xl bg-[#1958B7] hover:bg-[#144694] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
+              >
+                DIFFERS {barrier}
+              </button>
+            </div>
+          )}
+
+          {tradeMode === 'Digits' && digitCategory === 'over_under' && (
             <div className="grid grid-cols-2 gap-2.5 pt-1">
               <button
                 type="button"
@@ -2416,27 +2800,41 @@ export const MT5TradingView: React.FC = () => {
             </div>
           )}
 
-          {tradeMode === 'Rise/Fall' && (
+          {tradeMode === 'Digits' && digitCategory === 'even_odd' && (
             <div className="grid grid-cols-2 gap-2.5 pt-1">
               <button
                 type="button"
                 disabled={placing}
-                onClick={() => handlePlaceOrder('CALL', 'CALL')}
+                onClick={() => handlePlaceOrder('DIGITEVEN', 'DIGITEVEN')}
                 className="py-3 rounded-2xl bg-[#00A878] hover:bg-[#00966B] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
               >
-                RISE / CALL
+                EVEN
               </button>
               <button
                 type="button"
                 disabled={placing}
-                onClick={() => handlePlaceOrder('PUT', 'PUT')}
+                onClick={() => handlePlaceOrder('DIGITODD', 'DIGITODD')}
                 className="py-3 rounded-2xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
               >
-                FALL / PUT
+                ODD
+              </button>
+            </div>
+          )}
+
+          {tradeMode === 'Accumulators' && (
+            <div className="pt-1">
+              <button
+                type="button"
+                disabled={placing}
+                onClick={() => handlePlaceOrder('ACCU', 'ACCU')}
+                className="w-full py-3 rounded-2xl bg-[#00A878] hover:bg-[#00966B] text-white font-bold text-xs cursor-pointer disabled:opacity-60"
+              >
+                Start Accumulator ({(growthRate * 100).toFixed(0)}%)
               </button>
             </div>
           )}
         </aside>
+        )}
       </div>
 
       {/* Bottom MT5 Terminal Dock */}
@@ -2593,10 +2991,10 @@ export const MT5TradingView: React.FC = () => {
                         </td>
                         <td className="px-4 py-2.5">
                           <span
-                            className={`px-2 py-0.5 rounded-full font-bold text-[10px] ${
-                              o.side === 'BUY' || o.side === 'CALL' || o.side === 'DIGITOVER'
-                                ? 'bg-[#00A878]/15 text-[#00A878]'
-                                : 'bg-[#FF444F]/15 text-[#FF444F]'
+                            className={`font-bold text-[11px] ${
+                              ['BUY', 'CALL', 'DIGITOVER', 'DIGITMATCH', 'DIGITEVEN', 'ACCU'].includes(o.side)
+                                ? 'text-[#00A878]'
+                                : 'text-[#FF444F]'
                             }`}
                           >
                             {o.side}

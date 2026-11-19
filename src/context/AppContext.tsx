@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type {
   NavTab,
+  TradeWorkspaceMode,
   UserProfile,
   ConnectedAccount,
   MarketInstrument,
@@ -28,6 +29,8 @@ interface AppContextValue {
   toggleTheme: () => void;
   activeTab: NavTab;
   setActiveTab: (t: NavTab) => void;
+  desiredTradeMode: TradeWorkspaceMode | null;
+  setDesiredTradeMode: (m: TradeWorkspaceMode | null) => void;
   selectedSymbol: string;
   setSelectedSymbol: (s: string) => void;
   ticks: Record<string, TickData>;
@@ -75,6 +78,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return (localStorage.getItem('td_theme') as 'light' | 'dark') || 'light';
   });
   const [activeTab, setActiveTabState] = useState<NavTab>('home');
+  const [desiredTradeMode, setDesiredTradeMode] = useState<TradeWorkspaceMode | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<string>('1HZ100V');
   const [ticks, setTicks] = useState<Record<string, TickData>>({});
   const [wsConnected, setWsConnected] = useState<boolean>(false);
@@ -122,13 +126,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [resetLogoTaps]
   );
 
-  // Hidden 30-tap gesture within 2.5s rolling timeout to open Owner MIS Portal (zero visible hints)
   const registerLogoTap = useCallback(() => {
     if (tapTimerRef.current) {
       clearTimeout(tapTimerRef.current);
     }
     tapCountRef.current += 1;
-    if (tapCountRef.current >= 30) {
+    if (tapCountRef.current >= 20) {
       resetLogoTaps();
       setAdminGateOpen(true);
       return;
@@ -379,7 +382,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const next = { ...prev };
               for (const [sym, incoming] of Object.entries(msg.ticks as Record<string, TickData>)) {
                 const cur = next[sym];
-                if (!cur || cur.source !== 'deriv_ws' || (incoming.source === 'deriv_ws' && incoming.epoch >= cur.epoch)) {
+                if (
+                  !cur ||
+                  cur.source !== 'deriv_ws' ||
+                  incoming.source === 'deriv_ws' ||
+                  incoming.epoch - cur.epoch > 5
+                ) {
                   next[sym] = incoming;
                 }
               }
@@ -389,7 +397,12 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           } else if (msg.type === 'tick' && msg.tick) {
             setTicks((prev) => {
               const cur = prev[msg.tick.symbol];
-              if (cur && cur.source === 'deriv_ws' && msg.tick.source !== 'deriv_ws') {
+              if (
+                cur &&
+                cur.source === 'deriv_ws' &&
+                msg.tick.source !== 'deriv_ws' &&
+                msg.tick.epoch - cur.epoch <= 5
+              ) {
                 return prev;
               }
               return { ...prev, [msg.tick.symbol]: msg.tick };
@@ -693,6 +706,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleTheme,
         activeTab,
         setActiveTab,
+        desiredTradeMode,
+        setDesiredTradeMode,
         selectedSymbol,
         setSelectedSymbol,
         ticks,

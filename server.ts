@@ -19,6 +19,7 @@ import {
 } from './server/db.ts';
 import { derivWs } from './server/deriv-client.ts';
 import { startMtmPositionMonitor } from './server/trade-execution.ts';
+import { independentFeed } from './server/independent-feed.ts';
 
 import authRoutes from './server/routes/auth.ts';
 import derivRoutes, { handleDerivOAuthCallback } from './server/routes/deriv.ts';
@@ -27,6 +28,8 @@ import marketRoutes from './server/routes/market.ts';
 import ordersRoutes from './server/routes/orders.ts';
 import adminRoutes from './server/routes/admin.ts';
 import intelligenceRoutes, { evaluateSmartAlertsForTick } from './server/routes/intelligence.ts';
+import analyserRoutes from './server/routes/analyser.ts';
+import mt5BridgeRoutes from './server/routes/mt5-bridge.ts';
 
 async function bootstrapServer() {
   // Non-blocking Neon schema wakeup so Render binds PORT immediately and health checks stay responsive
@@ -40,6 +43,7 @@ async function bootstrapServer() {
 
   derivWs.startMarketFeed();
   startMtmPositionMonitor();
+  independentFeed.start();
 
   const app = express();
   app.set('trust proxy', 1);
@@ -131,6 +135,8 @@ async function bootstrapServer() {
   app.use('/api', ordersRoutes);
   app.use('/api', adminRoutes);
   app.use('/api', intelligenceRoutes);
+  app.use('/api', analyserRoutes);
+  app.use('/api', mt5BridgeRoutes);
 
   // Root /callback alias for Deriv OAuth redirect URIs
   app.get(['/callback', '/callback/'], requireDb, handleDerivOAuthCallback);
@@ -236,16 +242,27 @@ async function bootstrapServer() {
     }
   });
 
-  // Production static SPA build vs Development Vite Middleware
+  // Production static SPA build vs Development Vite Middleware (Dual-App Main + Independent Analyser)
+  const isAnalyserRequest = (req: express.Request) => {
+    const host = String(req.headers.host || '').toLowerCase();
+    const p = req.path || '/';
+    return host.startsWith('analyser.') || p === '/analyser' || p.startsWith('/analyser/');
+  };
+
   const distPath = path.resolve(process.cwd(), 'dist');
   const distIndexPath = path.join(distPath, 'index.html');
+  const distAnalyserPath = path.join(distPath, 'analyser.html');
   if (config.nodeEnv === 'production' && fs.existsSync(distIndexPath)) {
     app.use('/api', (_req, res) => {
       res.status(404).json({ error: 'API endpoint not found' });
     });
 
     app.use(express.static(distPath));
-    app.get('*', (_req, res) => {
+    app.get('*', (req, res) => {
+      if (isAnalyserRequest(req) && fs.existsSync(distAnalyserPath)) {
+        res.sendFile(distAnalyserPath);
+        return;
+      }
       res.sendFile(distIndexPath);
     });
   } else {
@@ -253,6 +270,23 @@ async function bootstrapServer() {
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
+    });
+    app.use(async (req, res, next) => {
+      if (req.method === 'GET' && !req.path.startsWith('/api') && !req.path.startsWith('/ws') && isAnalyserRequest(req)) {
+        const devAnalyserHtmlPath = path.resolve(process.cwd(), 'analyser.html');
+        if (fs.existsSync(devAnalyserHtmlPath)) {
+          try {
+            const rawHtml = fs.readFileSync(devAnalyserHtmlPath, 'utf-8');
+            const html = await vite.transformIndexHtml(req.originalUrl, rawHtml);
+            res.status(200).set({ 'Content-Type': 'text/html' }).end(html);
+            return;
+          } catch (e) {
+            next(e);
+            return;
+          }
+        }
+      }
+      next();
     });
     app.use(vite.middlewares);
   }

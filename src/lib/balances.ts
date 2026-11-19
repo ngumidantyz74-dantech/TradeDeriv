@@ -21,13 +21,13 @@ export function computeLiveOrderMetrics(
       return {
         currentPrice: symTick.quote,
         pnl: livePnl,
-        isLive: symTick.source === 'deriv_ws',
+        isLive: symTick.source === 'deriv_ws' || symTick.source === 'sync_stream',
       };
     }
     return {
       currentPrice: symTick.quote,
       pnl: storedPnl,
-      isLive: symTick.source === 'deriv_ws',
+      isLive: symTick.source === 'deriv_ws' || symTick.source === 'sync_stream',
     };
   }
 

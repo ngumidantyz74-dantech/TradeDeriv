@@ -38,6 +38,12 @@ export default defineConfig(() => {
     },
     build: {
       chunkSizeWarningLimit: 1500,
+      rollupOptions: {
+        input: {
+          main: path.resolve(rootDir, 'index.html'),
+          analyser: path.resolve(rootDir, 'analyser.html'),
+        },
+      },
     },
     server: {
       // Allow Render and reverse-proxy domains when Vite middleware runs

@@ -14,13 +14,17 @@ import {
   Send,
   ShieldAlert,
   Search,
+  ExternalLink,
+  Flame,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch, fetchDerivTickHistoryDirect, subscribeDerivTicksDirect, sanitizeUiError } from '../lib/api';
 import type { SmcAnalysis, BuyLowSellHighResult, StrategySetup } from '../lib/quant-engine';
+import type { MostActiveInstrument } from '../types';
 
 type AnalyserTab =
   | 'radar'
+  | 'most-active'
   | 'smc'
   | 'blsh'
   | 'sessions'
@@ -139,6 +143,12 @@ export const AnalysisToolPage: React.FC = () => {
   const [radarSearch, setRadarSearch] = useState('');
   const [radarSort, setRadarSort] = useState<'setups' | 'volatility' | 'adx'>('setups');
 
+  // Most Active live feed ranking state
+  const [mostActiveLoading, setMostActiveLoading] = useState(false);
+  const [mostActiveRows, setMostActiveRows] = useState<MostActiveInstrument[]>([]);
+  const [mostActiveBasis, setMostActiveBasis] = useState<string>('');
+  const [mostActiveGeneratedAt, setMostActiveGeneratedAt] = useState<string | null>(null);
+
   // SMC & Buy Low/Sell High analysis state
   const [analyzeLoading, setAnalyzeLoading] = useState(false);
   const [analyzeData, setAnalyzeData] = useState<AnalyzeResponse | null>(null);
@@ -214,6 +224,30 @@ export const AnalysisToolPage: React.FC = () => {
       if (radarReqRef.current === reqId) setRadarLoading(false);
     }
   }, [granularity]);
+
+  const loadMostActive = useCallback(async () => {
+    setMostActiveLoading(true);
+    try {
+      const res = await apiFetch<{
+        instruments: MostActiveInstrument[];
+        metricBasis: string;
+        generatedAt: string;
+      }>(`/api/market/most-active?_t=${Date.now()}`, { skipAuth: true, cache: 'no-store' });
+      setMostActiveRows(res.instruments || []);
+      setMostActiveBasis(res.metricBasis || '');
+      setMostActiveGeneratedAt(res.generatedAt || null);
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Unable to load Most Active telemetry.'), 'error');
+    } finally {
+      setMostActiveLoading(false);
+    }
+  }, [showToast]);
+
+  useEffect(() => {
+    if (tab === 'most-active') {
+      loadMostActive();
+    }
+  }, [tab, loadMostActive]);
 
   const loadAnalyze = useCallback(async () => {
     const reqId = ++analyzeReqRef.current;
@@ -431,6 +465,7 @@ export const AnalysisToolPage: React.FC = () => {
 
   const tabItems: Array<{ id: AnalyserTab; label: string }> = [
     { id: 'radar', label: 'Market Radar' },
+    { id: 'most-active', label: 'Most Active' },
     { id: 'smc', label: 'SMC & Structure' },
     { id: 'blsh', label: 'Buy Low / Sell High' },
     { id: 'sessions', label: 'Sessions & Schedule' },
@@ -451,7 +486,17 @@ export const AnalysisToolPage: React.FC = () => {
           <div className="flex items-center gap-2 text-xs text-[#00A878] font-semibold mb-1">
             <Activity className="w-4 h-4" /> Real-Time Deriv Quant & Tick Intelligence
           </div>
-          <h1 className="font-display text-2xl font-bold">Market Intelligence Hub</h1>
+          <div className="flex flex-wrap items-center gap-3">
+            <h1 className="font-display text-2xl font-bold">Market Intelligence Hub</h1>
+            <a
+              href="/analyser"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 border border-sky-400/30 text-sky-300 text-xs font-semibold"
+            >
+              Standalone AI Analyser (XAUUSD &amp; FX) <ExternalLink className="w-3.5 h-3.5" />
+            </a>
+          </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-2.5">
@@ -748,6 +793,90 @@ export const AnalysisToolPage: React.FC = () => {
                     ))}
                   </tbody>
                 </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* 1B. MOST ACTIVE MARKETS (REAL METRICS ONLY) */}
+      {tab === 'most-active' && (
+        <div className="space-y-4">
+          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 flex flex-wrap items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-sm font-bold flex items-center gap-2">
+                <Flame className="w-4 h-4 text-[#FF444F]" /> Most Active Instruments (Measured Stream Telemetry)
+              </h2>
+              <p className="text-xs text-slate-500 mt-0.5">
+                {mostActiveBasis || 'Ranked by observed range volatility %, ticks/minute on the live stream, and platform order count.'}
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={loadMostActive}
+              disabled={mostActiveLoading}
+              className="px-3.5 py-1.5 rounded-xl bg-[#151820] dark:bg-[#FF444F] text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${mostActiveLoading ? 'animate-spin' : ''}`} />
+              {mostActiveLoading ? 'Refreshing...' : 'Refresh Activity'}
+            </button>
+          </div>
+
+          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden">
+            {mostActiveLoading && mostActiveRows.length === 0 ? (
+              <div className="p-8 text-center text-xs text-slate-500">Measuring live stream activity...</div>
+            ) : mostActiveRows.length === 0 ? (
+              <div className="p-8 text-center text-xs text-slate-500">No telemetry recorded yet. Click Refresh Activity.</div>
+            ) : (
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
+                      <th className="text-left px-4 py-3 font-semibold">Rank</th>
+                      <th className="text-left px-4 py-3 font-semibold">Instrument</th>
+                      <th className="text-right px-4 py-3 font-semibold">Spot Price</th>
+                      <th className="text-right px-4 py-3 font-semibold">Change %</th>
+                      <th className="text-right px-4 py-3 font-semibold">Volatility %</th>
+                      <th className="text-right px-4 py-3 font-semibold">Ticks / Min</th>
+                      <th className="text-right px-4 py-3 font-semibold">Platform Orders</th>
+                      <th className="text-right px-4 py-3 font-semibold">Action</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
+                    {mostActiveRows.map((row) => (
+                      <tr key={row.symbol} className="hover:bg-[#F8F9FB] dark:hover:bg-[#111319]/60">
+                        <td className="px-4 py-3 font-mono tabular-nums font-bold text-slate-400">#{row.rank}</td>
+                        <td className="px-4 py-3">
+                          <div className="font-bold">{row.display_name}</div>
+                          <div className="text-[11px] text-slate-500 font-mono">{row.symbol} · {row.category}</div>
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono tabular-nums font-bold">
+                          {Number(row.price).toFixed(row.price < 10 ? 4 : 2)}
+                        </td>
+                        <td className={`px-4 py-3 text-right font-mono tabular-nums font-semibold ${row.change_pct >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                          {row.change_pct >= 0 ? '+' : ''}{Number(row.change_pct).toFixed(2)}%
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono tabular-nums">{Number(row.volatilityPct).toFixed(3)}%</td>
+                        <td className="px-4 py-3 text-right font-mono tabular-nums font-semibold">{row.ticksPerMinute}</td>
+                        <td className="px-4 py-3 text-right font-mono tabular-nums">{row.platformTrades}</td>
+                        <td className="px-4 py-3 text-right">
+                          <button
+                            type="button"
+                            onClick={() => openInChart(row.symbol)}
+                            className="px-2.5 py-1.5 rounded-lg bg-[#1958B7]/10 text-[#1958B7] hover:bg-[#1958B7]/20 font-semibold cursor-pointer inline-flex items-center gap-1"
+                          >
+                            Trade <ArrowUpRight className="w-3 h-3" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+            {mostActiveGeneratedAt && (
+              <div className="px-4 py-2 border-t border-slate-100 dark:border-[#2A2F3D] text-[11px] text-slate-400 font-mono tabular-nums">
+                Updated {new Date(mostActiveGeneratedAt).toLocaleTimeString()}
               </div>
             )}
           </div>
@@ -1421,14 +1550,21 @@ export const AnalysisToolPage: React.FC = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="p-4 rounded-2xl bg-[#00A878]/10 border border-[#00A878]/30">
-              <p className="text-xs font-semibold text-[#00A878]">Over {barrier} Probability</p>
+              <p className="text-xs font-semibold text-[#00A878]">
+                Historical Over {barrier} Frequency ({prices.length} ticks)
+              </p>
               <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.overPct}%</p>
             </div>
             <div className="p-4 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30">
-              <p className="text-xs font-semibold text-[#FF444F]">Under {barrier} Probability</p>
+              <p className="text-xs font-semibold text-[#FF444F]">
+                Historical Under {barrier} Frequency ({prices.length} ticks)
+              </p>
               <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.underPct}%</p>
             </div>
           </div>
+          <p className="text-[11px] text-slate-500">
+            Sampled historical digit distribution only — future Deriv ticks remain independent random draws.
+          </p>
         </div>
       )}
 
@@ -1438,7 +1574,7 @@ export const AnalysisToolPage: React.FC = () => {
           <div className="p-5 rounded-2xl bg-[#00A878]/10 border border-[#00A878]/30 flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold text-[#00A878] flex items-center gap-1">
-                <TrendingUp className="w-4 h-4" /> Rise Momentum
+                <TrendingUp className="w-4 h-4" /> Sample Up-Tick Share ({prices.length} ticks)
               </p>
               <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.risePct}%</p>
             </div>
@@ -1454,7 +1590,7 @@ export const AnalysisToolPage: React.FC = () => {
           <div className="p-5 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30 flex items-center justify-between">
             <div>
               <p className="text-xs font-semibold text-[#FF444F] flex items-center gap-1">
-                <TrendingDown className="w-4 h-4" /> Fall Momentum
+                <TrendingDown className="w-4 h-4" /> Sample Down-Tick Share ({prices.length} ticks)
               </p>
               <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.fallPct}%</p>
             </div>

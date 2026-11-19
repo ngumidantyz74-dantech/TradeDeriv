@@ -369,11 +369,7 @@ router.post('/cashier/withdraw', requireDb, requireAuth, async (req: AuthRequest
   res.json({ transaction: tx, cashierUrl });
 });
 
-router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  if (req.user!.role === 'owner' || req.user!.role === 'admin') {
-    res.status(403).json({ error: 'Owner / Admin MIS accounts are not trading wallets.' });
-    return;
-  }
+router.post('/cashier/transfer/preview', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const {
     account_from = 'USD Wallet',
     account_to = 'MT5 Standard',
@@ -397,9 +393,75 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     return;
   }
 
+  const fee = 0;
+  const exchangeRate = 1.0;
+  const netReceived = Number((amt - fee).toFixed(2));
+  const involvesMt5 = fromBucket.startsWith('mt5_') || toBucket.startsWith('mt5_');
+
+  res.json({
+    fromBucket,
+    toBucket,
+    fromLabel: bucketDisplayName(fromBucket),
+    toLabel: bucketDisplayName(toBucket),
+    accountMode: mode,
+    currency,
+    amount: amt,
+    fee,
+    exchangeRate,
+    netReceived,
+    honestBridgeNote: involvesMt5
+      ? 'Platform wallet allocation is atomic in PostgreSQL. External MT5 broker terminal balance only updates if a live Deriv MT5 account or MT5 EA Bridge is linked.'
+      : 'Instant internal platform wallet transfer with $0.00 fee.',
+  });
+});
+
+router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  if (req.user!.role === 'owner' || req.user!.role === 'admin') {
+    res.status(403).json({ error: 'Owner / Admin MIS accounts are not trading wallets.' });
+    return;
+  }
+  const {
+    account_from = 'USD Wallet',
+    account_to = 'MT5 Standard',
+    amount,
+    currency = 'USD',
+    accountMode = 'demo',
+    idempotencyKey = '',
+  } = req.body || {};
+
+  const mode: ModeKey = accountMode === 'real' ? 'real' : 'demo';
+  const fromBucket = normalizeWalletBucket(account_from);
+  const toBucket = normalizeWalletBucket(account_to);
+
+  if (fromBucket === toBucket) {
+    res.status(400).json({ error: 'Source and destination wallets must be different' });
+    return;
+  }
+
+  const amt = Number(amount);
+  if (Number.isNaN(amt) || amt <= 0) {
+    res.status(400).json({ error: 'Transfer amount must be positive' });
+    return;
+  }
+
   if (!pool) {
     res.status(503).json({ error: 'Database unavailable' });
     return;
+  }
+
+  const cleanIdem = String(idempotencyKey || '').trim();
+  if (cleanIdem) {
+    const duplicate = await queryOne<any>(
+      'SELECT * FROM cashier_transactions WHERE user_id = $1 AND idempotency_key = $2',
+      [req.user!.id, cleanIdem]
+    );
+    if (duplicate) {
+      res.status(409).json({
+        error: 'Duplicate transfer prevented by idempotency guard.',
+        transaction: duplicate,
+      });
+      return;
+    }
   }
 
   // Attempt upstream Deriv platform transfer if a Real Deriv token is linked
@@ -562,10 +624,10 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
 
     const ref = `TRF-${randomId(4).toUpperCase()}`;
     const txRes = await client.query(
-      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
-       VALUES ($1, 'transfer', 'Internal Platform Transfer', 'deriv', $2, $3, $4, $5, $6, 'completed', $7)
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, fee, idempotency_key)
+       VALUES ($1, 'transfer', 'Internal Platform Transfer', 'deriv', $2, $3, $4, $5, $6, 'completed', $7, $8, $9)
        RETURNING *`,
-      [req.user!.id, bucketDisplayName(fromBucket), bucketDisplayName(toBucket), amt, currency, ref, mode]
+      [req.user!.id, bucketDisplayName(fromBucket), bucketDisplayName(toBucket), amt, currency, ref, mode, 0, cleanIdem]
     );
 
     await client.query('COMMIT');

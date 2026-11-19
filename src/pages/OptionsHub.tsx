@@ -13,6 +13,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
 import { SparklineSvg } from '../components/SparklineSvg';
+import type { TradeWorkspaceMode } from '../types';
 
 const MOST_TRADED_CODES = ['1HZ100V', '1HZ75V', '1HZ10V', '1HZ25V', 'R_100'];
 
@@ -27,6 +28,7 @@ export const OptionsHub: React.FC = () => {
     ticks,
     refreshAll,
     setActiveTab,
+    setDesiredTradeMode,
     setSelectedSymbol,
     showToast,
   } = useApp();
@@ -67,17 +69,17 @@ export const OptionsHub: React.FC = () => {
     };
   });
 
-  const tradeTypes = [
-    { name: 'Rise/Fall', tab: 'mt5-tv' },
-    { name: 'Higher/Lower', tab: 'mt5-tv' },
-    { name: 'Matches/Differs', tab: 'market-analyser' },
-    { name: 'Even/Odd', tab: 'bulk-trader' },
-    { name: 'Accumulators', tab: 'mt5-tv' },
-    { name: 'Over/Under', tab: 'mt5-tv' },
-    { name: 'Multipliers', tab: 'mt5-tv' },
-    { name: 'Touch/No Touch', tab: 'mt5-tv' },
-    { name: 'Vanillas', tab: 'mt5-tv' },
-    { name: 'Turbos', tab: 'mt5-tv' },
+  const tradeTypes: Array<{ name: string; tab: 'mt5-tv'; mode: TradeWorkspaceMode }> = [
+    { name: 'Rise/Fall', tab: 'mt5-tv', mode: 'Rise/Fall' },
+    { name: 'Higher/Lower', tab: 'mt5-tv', mode: 'Rise/Fall' },
+    { name: 'Matches/Differs', tab: 'mt5-tv', mode: 'Digits' },
+    { name: 'Even/Odd', tab: 'mt5-tv', mode: 'Digits' },
+    { name: 'Accumulators', tab: 'mt5-tv', mode: 'Accumulators' },
+    { name: 'Over/Under', tab: 'mt5-tv', mode: 'Digits' },
+    { name: 'Multipliers', tab: 'mt5-tv', mode: 'MT5 Market' },
+    { name: 'Touch/No Touch', tab: 'mt5-tv', mode: 'Rise/Fall' },
+    { name: 'Vanillas', tab: 'mt5-tv', mode: 'MT5 Market' },
+    { name: 'Turbos', tab: 'mt5-tv', mode: 'MT5 Market' },
   ];
 
   return (
@@ -266,9 +268,14 @@ export const OptionsHub: React.FC = () => {
             <button
               key={tt.name}
               type="button"
-              onClick={() =>
-                setActiveTab(tradeFilter === 'Deriv Bot' ? 'bot-builder' : (tt.tab as any))
-              }
+              onClick={() => {
+                if (tradeFilter === 'Deriv Bot') {
+                  setActiveTab('bot-builder');
+                } else {
+                  setDesiredTradeMode(tt.mode);
+                  setActiveTab(tt.tab);
+                }
+              }}
               className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2.5 text-center cursor-pointer"
             >
               <div className="flex items-center gap-1 text-[#FF444F]">

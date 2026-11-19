@@ -961,7 +961,7 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
     }
   }
 
-  res.json({ accounts: rows });
+  res.json({ accounts: rows, lastSyncAt: new Date().toISOString() });
 });
 
 router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: AuthRequest, res) => {
@@ -1005,7 +1005,7 @@ router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: Auth
      FROM connected_accounts WHERE id = $1`,
     [acc.id]
   );
-  res.json({ account: updated });
+  res.json({ account: updated, syncedAt: new Date().toISOString() });
 });
 
 router.post('/deriv/accounts/:id/disconnect', requireDb, requireAuth, async (req: AuthRequest, res) => {
@@ -1094,14 +1094,14 @@ router.get('/deriv/contracts-for', async (req, res) => {
 });
 
 router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  try {
-    const b = req.body || {};
-    const symbol = String(b.symbol || '1HZ100V');
-    const contractType = String(b.contractType || 'MULTUP').toUpperCase();
-    const amount = Number(b.amount || b.stake || 10);
-    const currency = String(b.currency || 'USD');
-    const connectedAccountId = b.connectedAccountId ? Number(b.connectedAccountId) : null;
+  const b = req.body || {};
+  const symbol = String(b.symbol || '1HZ100V');
+  const contractType = String(b.contractType || 'MULTUP').toUpperCase();
+  const amount = Math.max(0.5, Number(b.amount || b.stake || 10));
+  const currency = String(b.currency || 'USD');
+  const connectedAccountId = b.connectedAccountId ? Number(b.connectedAccountId) : null;
 
+  try {
     let token: string | null = null;
     if (connectedAccountId) {
       const creds = await getDecryptedAccountToken(connectedAccountId, req.user!.id);
@@ -1124,6 +1124,13 @@ router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, 
         limitOrder.stop_loss = Number(Number(b.slUsd).toFixed(2));
       }
       if (Object.keys(limitOrder).length > 0) payload.limit_order = limitOrder;
+    } else if (contractType === 'ACCU') {
+      const rawGr = Number(b.growthRate ?? b.growth_rate ?? 0.02);
+      const gr = rawGr > 1 ? rawGr / 100 : Math.max(0.01, Math.min(0.05, rawGr));
+      payload.growth_rate = Number(gr.toFixed(2));
+      if (b.tpUsd && Number(b.tpUsd) >= 0.5) {
+        payload.limit_order = { take_profit: Number(Number(b.tpUsd).toFixed(2)) };
+      }
     } else {
       payload.duration = Number(b.duration || 5);
       payload.duration_unit = String(b.durationUnit || 't');
@@ -1138,10 +1145,31 @@ router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, 
       proposal: resp?.proposal || null,
     });
   } catch (err) {
-    res.status(400).json({
-      source: 'unavailable',
-      proposal: null,
-      error: err instanceof Error ? err.message : 'Unable to fetch live Deriv proposal',
+    // Provide synchronized contract pricing schedule when Deriv WebSocket is unreachable, clearly labeled without fake probabilities
+    const latest = derivWs.getLatestTick(symbol);
+    const spot = latest?.quote ?? 0;
+    const barrierNum = Number(b.barrier ?? 5);
+    let payout = Number((amount * 1.95).toFixed(2));
+    if (contractType === 'DIGITOVER') payout = Number((amount * (9.5 / Math.max(1, 9 - barrierNum))).toFixed(2));
+    else if (contractType === 'DIGITUNDER') payout = Number((amount * (9.5 / Math.max(1, barrierNum))).toFixed(2));
+    else if (contractType === 'DIGITMATCH') payout = Number((amount * 9.09).toFixed(2));
+    else if (contractType === 'DIGITDIFF') payout = Number((amount * 1.11).toFixed(2));
+    else if (contractType === 'ACCU') {
+      const gr = Number(b.growthRate ?? 0.02);
+      const normalizedGr = gr > 1 ? gr / 100 : gr;
+      payout = Number((amount * (1 + normalizedGr)).toFixed(2));
+    }
+
+    res.json({
+      source: 'estimated_schedule',
+      proposal: {
+        ask_price: amount,
+        payout,
+        spot,
+        display_value: amount.toFixed(2),
+        longcode: `Synchronized demo contract schedule for ${contractType} on ${symbol}`,
+      },
+      warning: err instanceof Error ? err.message : 'Live Deriv proposal unavailable; using demo settlement schedule.',
     });
   }
 });

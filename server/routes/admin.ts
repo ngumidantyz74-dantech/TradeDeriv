@@ -24,6 +24,8 @@ import {
 import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
 import { isVirtualDerivAccount } from './deriv.ts';
 import { closeOrderById } from '../trade-execution.ts';
+import { emergencyKillAllBots, getAllActiveBotSessions } from '../bot-engine-service.ts';
+import { independentFeed } from '../independent-feed.ts';
 
 const router = Router();
 
@@ -1017,6 +1019,30 @@ router.delete('/admin/announcements/:id', requireDb, requireAdmin, async (req: A
   await setSetting('announcements', updated);
   await logAdminAction(req.user!.id, 'delete_announcement', 'application_settings', String(req.params.id));
   res.json({ announcements: updated.items });
+});
+
+// Ecosystem Health & Global Bot Kill Switch
+router.get('/admin/ecosystem-health', requireDb, requireAdmin, async (_req, res) => {
+  const [botRuns, mt5Bridges, analyserSignals] = await Promise.all([
+    query('SELECT * FROM bot_runs ORDER BY id DESC LIMIT 60').catch(() => []),
+    query(
+      'SELECT id, user_id, bridge_name, account_login, broker_name, status, last_heartbeat_at, account_balance, account_equity FROM mt5_bridge_connections ORDER BY id DESC LIMIT 50'
+    ).catch(() => []),
+    query('SELECT * FROM analyser_signals ORDER BY id DESC LIMIT 40').catch(() => []),
+  ]);
+  res.json({
+    activeBots: getAllActiveBotSessions(),
+    botRuns,
+    mt5Bridges,
+    analyserSignals,
+    analyserHealth: independentFeed.getHealthStatus(),
+  });
+});
+
+router.post('/admin/bots/kill-all', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  const result = await emergencyKillAllBots(`Global Kill Switch Activated by Admin (${req.user!.email})`);
+  await logAdminAction(req.user!.id, 'global_bot_kill_switch', 'bot_runs', 'all', result);
+  res.json({ ok: true, ...result });
 });
 
 export default router;

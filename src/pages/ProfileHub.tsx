@@ -24,6 +24,7 @@ import {
   Sun,
   X,
   Shield,
+  RefreshCw,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
@@ -31,6 +32,10 @@ import { apiFetch } from '../lib/api';
 export const ProfileHub: React.FC = () => {
   const {
     user,
+    accounts,
+    accountMode,
+    setAccountMode,
+    refreshAccounts,
     setActiveTab,
     setAdminGateOpen,
     currencyDisplay,
@@ -60,6 +65,21 @@ export const ProfileHub: React.FC = () => {
   const [language, setLanguage] = useState(user?.preferred_language || 'EN');
   const [closeReason, setCloseReason] = useState('No longer trading');
   const [saving, setSaving] = useState(false);
+  const [syncingAccounts, setSyncingAccounts] = useState(false);
+  const [lastSyncedAt, setLastSyncedAt] = useState<string>(() => new Date().toLocaleTimeString());
+
+  const handleSyncProfile = async () => {
+    setSyncingAccounts(true);
+    try {
+      await Promise.all([refreshAccounts(true), refreshAll()]);
+      setLastSyncedAt(new Date().toLocaleTimeString());
+      showToast('Deriv accounts & profile synchronized', 'success');
+    } catch {
+      showToast('Sync failed', 'error');
+    } finally {
+      setSyncingAccounts(false);
+    }
+  };
 
   const loadDetails = useCallback(async () => {
     try {
@@ -153,26 +173,97 @@ export const ProfileHub: React.FC = () => {
           <div className="w-9" />
         </div>
 
-        <div className="flex items-center gap-4">
-          <div className="w-16 h-16 rounded-full bg-[#242936] border border-white/10 flex items-center justify-center font-display text-xl font-bold">
-            {initials}
+        <div className="flex flex-wrap items-center justify-between gap-4">
+          <div className="flex items-center gap-4">
+            <div className="w-16 h-16 rounded-full bg-[#242936] border border-white/10 flex items-center justify-center font-display text-xl font-bold">
+              {initials}
+            </div>
+            <div className="min-w-0">
+              <h1 className="font-display text-xl font-bold truncate">{user?.full_name || 'Deriv Trader'}</h1>
+              <button
+                type="button"
+                onClick={handleCopyId}
+                className="mt-1 inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white cursor-pointer"
+              >
+                <span>Client ID:</span>
+                <span className="font-mono-num text-slate-200">{user?.deriv_client_id || 'TD-DEMO'}</span>
+                <Copy className="w-3.5 h-3.5" />
+              </button>
+              <p className="text-[11px] text-slate-400 mt-0.5 font-mono tabular-nums">
+                Active Scope: {accountMode.toUpperCase()} · Last Synced: {lastSyncedAt}
+              </p>
+            </div>
           </div>
-          <div className="min-w-0">
-            <h1 className="font-display text-xl font-bold truncate">{user?.full_name || 'Deriv Trader'}</h1>
-            <button
-              type="button"
-              onClick={handleCopyId}
-              className="mt-1 inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white cursor-pointer"
-            >
-              <span>Client ID:</span>
-              <span className="font-mono-num text-slate-200">{user?.deriv_client_id || 'TD-DEMO'}</span>
-              <Copy className="w-3.5 h-3.5" />
-            </button>
-          </div>
+
+          <button
+            type="button"
+            disabled={syncingAccounts}
+            onClick={handleSyncProfile}
+            className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+          >
+            <RefreshCw className={`w-3.5 h-3.5 ${syncingAccounts ? 'animate-spin' : ''}`} />
+            {syncingAccounts ? 'Syncing...' : 'Sync Deriv Profile'}
+          </button>
         </div>
       </section>
 
       <div className="px-5 sm:px-8 mt-6 space-y-6">
+        {/* Connected Deriv Accounts */}
+        <section>
+          <div className="flex items-center justify-between mb-2.5 px-1">
+            <h2 className="font-display text-sm font-bold text-slate-500 dark:text-slate-400">
+              Connected Accounts ({accounts.length})
+            </h2>
+            <div className="flex items-center gap-1 bg-slate-200/70 dark:bg-[#181C25] p-0.5 rounded-lg text-[11px] font-semibold">
+              <button
+                type="button"
+                onClick={() => setAccountMode('demo')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer ${accountMode === 'demo' ? 'bg-white dark:bg-[#2A2F3D] text-[#0E1117] dark:text-white' : 'text-slate-500'}`}
+              >
+                Demo
+              </button>
+              <button
+                type="button"
+                onClick={() => setAccountMode('real')}
+                className={`px-2.5 py-1 rounded-md cursor-pointer ${accountMode === 'real' ? 'bg-[#FF444F] text-white' : 'text-slate-500'}`}
+              >
+                Real
+              </button>
+            </div>
+          </div>
+          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] divide-y divide-slate-100 dark:divide-[#2A2F3D]">
+            {accounts.length === 0 ? (
+              <div className="p-4 flex items-center justify-between text-xs">
+                <span className="text-slate-500">No linked Deriv OAuth accounts yet.</span>
+                <button
+                  type="button"
+                  onClick={() => launchDerivOAuth('login')}
+                  className="px-3 py-1.5 rounded-lg bg-[#FF444F] text-white font-semibold cursor-pointer"
+                >
+                  Connect Deriv Account
+                </button>
+              </div>
+            ) : (
+              accounts.map((acc) => (
+                <div key={acc.id} className="px-4 py-3 flex items-center justify-between gap-3 text-xs">
+                  <div>
+                    <p className="font-bold font-mono">{acc.deriv_account_id || acc.deriv_login_id}</p>
+                    <p className="text-slate-500 capitalize">
+                      {acc.platform} · {acc.account_type} · {acc.is_virtual ? 'Demo' : 'Real'} · {acc.currency}
+                    </p>
+                  </div>
+                  <div className="text-right font-mono tabular-nums">
+                    <p className="font-bold text-sm">{Number(acc.balance ?? acc.last_known_balance ?? 0).toFixed(2)} {acc.currency}</p>
+                    <p className={`text-[10px] font-semibold ${acc.status === 'active' ? 'text-[#00A878]' : 'text-slate-400'}`}>
+                      {acc.status}
+                    </p>
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
         {/* About You */}
         <section>
           <h2 className="font-display text-sm font-bold text-slate-500 dark:text-slate-400 mb-2.5 px-1">About you</h2>
