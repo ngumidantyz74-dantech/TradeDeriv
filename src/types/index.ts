@@ -305,4 +305,9 @@ export interface PublicSettings {
     severity: string;
     createdAt: string;
   }>;
+  partner?: {
+    referralLink?: string;
+    referralCode?: string;
+    affiliateTierRate?: number;
+  };
 }

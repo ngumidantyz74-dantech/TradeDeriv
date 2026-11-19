@@ -776,10 +776,10 @@ router.put('/risk/settings', requireDb, requireAuth, async (req: AuthRequest, re
     RETURNING *`,
     [
       req.user!.id,
-      Math.max(0.1, Math.min(25, Number(b.risk_per_trade_pct ?? 1.5))),
-      Math.max(5, Number(b.daily_loss_limit_usd ?? 150)),
-      Math.max(10, Number(b.max_exposure_usd ?? 500)),
-      Math.max(1, Math.min(20, Number(b.max_consecutive_losses ?? 4))),
+      Math.max(0.1, Math.min(25, Number(b.risk_per_trade_pct ?? 2.0))),
+      Math.max(1, Number(b.daily_loss_limit_usd ?? 10)),
+      Math.max(1, Number(b.max_exposure_usd ?? 15)),
+      Math.max(1, Math.min(20, Number(b.max_consecutive_losses ?? 3))),
       Math.max(1, Math.min(1440, Number(b.cooldown_minutes ?? 30))),
       b.enforce_limits !== undefined ? Boolean(b.enforce_limits) : true,
     ]

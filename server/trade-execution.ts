@@ -230,7 +230,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const entryPrice = tick?.quote || 1000.0;
   const pipSize = tick?.pipSize || 0.01;
 
-  const lots = Number(Math.max(0.01, Math.min(100, input.lots ?? (input.stake ? input.stake / 100 : 0.1))).toFixed(2));
+  const lots = Number(Math.max(0.01, Math.min(100, input.lots ?? (input.stake ? input.stake / 100 : 0.02))).toFixed(2));
   const stake = Number(Math.max(0.5, input.stake ?? lots * 100).toFixed(2));
   const multiplier = Number(input.multiplier || 100);
   const contractType = normalizeContractType(input.side, input.contractType);

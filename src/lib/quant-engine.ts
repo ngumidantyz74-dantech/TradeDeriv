@@ -194,7 +194,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['Synthetics (Volatility, Step)', 'Forex Majors', 'Gold & Indices'],
     recommendedTimeframes: ['5m', '15m', '1h', '4h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.5, takeProfitRr: 2.2, adxThreshold: 22, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 3.0, adxThreshold: 22, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
   },
   {
     key: 'rsi_reversal',
@@ -208,7 +208,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['Synthetics', 'Forex', 'Crypto'],
     recommendedTimeframes: ['5m', '15m', '1h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.4, takeProfitRr: 1.8, adxThreshold: 20, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 2.5, adxThreshold: 20, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
   },
   {
     key: 'ema_crossover',
@@ -222,7 +222,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['All Deriv Markets'],
     recommendedTimeframes: ['1m', '5m', '15m', '1h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.6, takeProfitRr: 2.0, adxThreshold: 18, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 3.0, adxThreshold: 18, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
   },
   {
     key: 'macd_momentum',
@@ -236,7 +236,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['Crypto', 'Indices', 'Volatility Indices'],
     recommendedTimeframes: ['15m', '30m', '1h', '4h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.5, takeProfitRr: 2.0, adxThreshold: 20, rsiOversold: 30, rsiOverbought: 70, emaFast: 12, emaSlow: 26 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 3.0, adxThreshold: 20, rsiOversold: 30, rsiOverbought: 70, emaFast: 12, emaSlow: 26 },
   },
   {
     key: 'bollinger_reversion',
@@ -250,7 +250,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['Range-bound Forex', 'Range Break', 'Volatility 10/25'],
     recommendedTimeframes: ['5m', '15m', '30m'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.3, takeProfitRr: 1.7, adxThreshold: 25, rsiOversold: 32, rsiOverbought: 68, emaFast: 9, emaSlow: 20 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.1, takeProfitRr: 2.5, adxThreshold: 25, rsiOversold: 32, rsiOverbought: 68, emaFast: 9, emaSlow: 20 },
   },
   {
     key: 'breakout_trading',
@@ -264,7 +264,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['Gold (XAU/USD)', 'BTC/USD', 'V75 / V100'],
     recommendedTimeframes: ['5m', '15m', '1h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.5, takeProfitRr: 2.4, adxThreshold: 20, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 3.0, adxThreshold: 20, rsiOversold: 30, rsiOverbought: 70, emaFast: 9, emaSlow: 21 },
   },
   {
     key: 'sr_reversal',
@@ -278,7 +278,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['Forex', 'Metals', 'Synthetics'],
     recommendedTimeframes: ['15m', '1h', '4h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.2, takeProfitRr: 2.1, adxThreshold: 22, rsiOversold: 35, rsiOverbought: 65, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.1, takeProfitRr: 2.8, adxThreshold: 22, rsiOversold: 35, rsiOverbought: 65, emaFast: 9, emaSlow: 21 },
   },
   {
     key: 'mtf_confluence',
@@ -292,7 +292,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['All Markets'],
     recommendedTimeframes: ['5m', '15m', '1h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.5, takeProfitRr: 2.3, adxThreshold: 20, rsiOversold: 35, rsiOverbought: 65, emaFast: 9, emaSlow: 50 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 3.0, adxThreshold: 20, rsiOversold: 35, rsiOverbought: 65, emaFast: 9, emaSlow: 50 },
   },
   {
     key: 'smc_liquidity',
@@ -306,7 +306,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['EUR/USD', 'XAU/USD', 'V75 (1s)', 'BTC/USD'],
     recommendedTimeframes: ['5m', '15m', '1h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.4, takeProfitRr: 2.5, adxThreshold: 18, rsiOversold: 35, rsiOverbought: 65, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.2, takeProfitRr: 3.0, adxThreshold: 18, rsiOversold: 35, rsiOverbought: 65, emaFast: 9, emaSlow: 21 },
   },
   {
     key: 'buy_low_sell_high',
@@ -320,7 +320,7 @@ export const STRATEGY_CATALOG: StrategyDefinition[] = [
     ],
     supportedMarkets: ['All Markets'],
     recommendedTimeframes: ['15m', '1h', '4h'],
-    defaultConfig: { stake: 10, stopLossAtrMult: 1.3, takeProfitRr: 2.2, adxThreshold: 28, rsiOversold: 32, rsiOverbought: 68, emaFast: 9, emaSlow: 21 },
+    defaultConfig: { stake: 2, stopLossAtrMult: 1.1, takeProfitRr: 3.0, adxThreshold: 28, rsiOversold: 32, rsiOverbought: 68, emaFast: 9, emaSlow: 21 },
   },
 ];
 

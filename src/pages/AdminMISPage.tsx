@@ -21,6 +21,8 @@ import {
   AlertTriangle,
   Shield,
   Lock,
+  ExternalLink,
+  Copy,
 } from 'lucide-react';
 import { TradeDerivLogo } from '../components/TradeDerivLogo';
 
@@ -88,7 +90,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   // Commission config form
   const [derivAppId, setDerivAppId] = useState('');
   const [markupPct, setMarkupPct] = useState('2.0');
-  const [affiliateLink, setAffiliateLink] = useState('');
+  const [affiliateLink, setAffiliateLink] = useState('https://t.deriv.link?t=FSDRTFVTSKPA');
+  const [affiliateCode, setAffiliateCode] = useState('VNMH2VHBRTFN');
   const [affiliateTier, setAffiliateTier] = useState('30');
   const [ownerAdminToken, setOwnerAdminToken] = useState('');
 
@@ -182,7 +185,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
       setDerivAppId(comm.config?.derivAppId || '');
       setMarkupPct(String(comm.config?.markupPercentage ?? 2.0));
-      setAffiliateLink(comm.config?.affiliateLink || '');
+      setAffiliateLink(comm.config?.affiliateLink || 'https://t.deriv.link?t=FSDRTFVTSKPA');
+      setAffiliateCode(comm.config?.affiliateCode || 'VNMH2VHBRTFN');
       setAffiliateTier(String(comm.config?.affiliateTierRate ?? 30));
     } catch (err) {
       if (err instanceof Error && err.message.includes('401')) {
@@ -609,6 +613,51 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 </div>
               </div>
 
+              {/* Stream 2: Dual-Commission Partner Referral & Crypto Exchange RevShare */}
+              <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D] flex flex-col md:flex-row md:items-center justify-between gap-4">
+                <div className="space-y-1.5">
+                  <div className="flex flex-wrap items-center gap-2">
+                    <span className="px-2.5 py-0.5 rounded-full bg-[#FF444F]/15 text-[#FF444F] text-[10px] font-bold uppercase">
+                      Stream 2 · Deriv Partner Program
+                    </span>
+                    <span className="px-2.5 py-0.5 rounded-full bg-[#00A878]/15 text-[#00A878] text-[10px] font-bold">
+                      {Number(commData.config?.affiliateTierRate ?? 30)}% RevShare (Spot, Futures, Options, CFDs)
+                    </span>
+                  </div>
+                  <p className="text-sm font-bold text-white">
+                    Dual-Commission Referral Attribution Active alongside App ID Markup
+                  </p>
+                  <p className="text-xs text-slate-400">
+                    New traders who register via your Partner link earn{' '}
+                    <strong className="text-white">{Number(commData.config?.affiliateTierRate ?? 30)}% Partner Commission</strong> on Crypto Exchange spot &amp; futures, Options, and CFDs — in addition to App ID ({derivAppId || 'configured'}) markup commissions.
+                  </p>
+                </div>
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2 shrink-0">
+                  <div className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs font-mono-num">
+                    <span className="text-[10px] text-slate-500 block">Partner Code</span>
+                    <strong className="text-white">{commData.config?.affiliateCode || affiliateCode}</strong>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      navigator.clipboard?.writeText(commData.config?.affiliateLink || affiliateLink);
+                      flash('Partner referral link copied');
+                    }}
+                    className="px-3.5 py-2.5 rounded-xl bg-white/10 hover:bg-white/15 text-xs font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    <Copy className="w-3.5 h-3.5" /> Copy Link
+                  </button>
+                  <a
+                    href={commData.config?.affiliateLink || affiliateLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="px-3.5 py-2.5 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center justify-center gap-1.5"
+                  >
+                    Open Partner Link <ExternalLink className="w-3.5 h-3.5" />
+                  </a>
+                </div>
+              </div>
+
               {Array.isArray(commData.markupStatistics?.breakdown) && commData.markupStatistics.breakdown.length > 0 && (
                 <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
                   <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between">
@@ -687,6 +736,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         derivAppId: cleanAppId,
                         markupPercentage: Number(markupPct),
                         affiliateLink,
+                        affiliateCode: affiliateCode.trim(),
                         affiliateTierRate: Number(affiliateTier),
                         ownerAdminToken: ownerAdminToken || undefined,
                       }),
@@ -724,7 +774,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">IB / Affiliate Tracking Link</label>
+                  <label className="block text-xs text-slate-400 mb-1">Partner / Affiliate Referral Link</label>
                   <input
                     type="text"
                     value={affiliateLink}
@@ -733,6 +783,25 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   />
                 </div>
                 <div>
+                  <label className="block text-xs text-slate-400 mb-1">Partner Referral Code &amp; RevShare %</label>
+                  <div className="grid grid-cols-3 gap-2">
+                    <input
+                      type="text"
+                      placeholder="VNMH2VHBRTFN"
+                      value={affiliateCode}
+                      onChange={(e) => setAffiliateCode(e.target.value)}
+                      className="col-span-2 px-3.5 py-2.5 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
+                    />
+                    <input
+                      type="number"
+                      step="1"
+                      value={affiliateTier}
+                      onChange={(e) => setAffiliateTier(e.target.value)}
+                      className="px-3 py-2.5 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm text-center"
+                    />
+                  </div>
+                </div>
+                <div className="md:col-span-2">
                   <label className="block text-xs text-slate-400 mb-1">
                     Owner Personal Access / OAuth Token (application_read)
                   </label>

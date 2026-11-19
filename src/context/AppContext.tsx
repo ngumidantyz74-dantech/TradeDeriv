@@ -89,6 +89,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     branding: { appName: 'TradeDeriv' },
     global: { kesRate: 130.0, tickerText: 'TradeDeriv Live Markets', adminPrivateSlug: 'pf-ops-9482' },
     announcements: [],
+    partner: {
+      referralLink: 'https://t.deriv.link?t=FSDRTFVTSKPA',
+      referralCode: 'VNMH2VHBRTFN',
+      affiliateTierRate: 30.0,
+    },
   });
   const [loadingAuth, setLoadingAuth] = useState<boolean>(true);
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' | 'info' } | null>(null);

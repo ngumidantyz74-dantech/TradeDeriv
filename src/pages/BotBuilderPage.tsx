@@ -86,9 +86,9 @@ export const BotBuilderPage: React.FC = () => {
   const [recoveryPrediction, setRecoveryPrediction] = useState('5');
   const [martingale, setMartingale] = useState('2.1');
   const [useMartingale, setUseMartingale] = useState<'true' | 'false'>('true');
-  const [takeProfit, setTakeProfit] = useState('25');
-  const [stopLoss, setStopLoss] = useState('50');
-  const [maxTrades, setMaxTrades] = useState('50');
+  const [takeProfit, setTakeProfit] = useState('6');
+  const [stopLoss, setStopLoss] = useState('3');
+  const [maxTrades, setMaxTrades] = useState('15');
   const [multiplier, setMultiplier] = useState('100');
 
   // Trade options
@@ -181,9 +181,9 @@ export const BotBuilderPage: React.FC = () => {
     setRecoveryPrediction('5');
     setMartingale('2.1');
     setUseMartingale('true');
-    setTakeProfit('25');
-    setStopLoss('50');
-    setMaxTrades('50');
+    setTakeProfit('6');
+    setStopLoss('3');
+    setMaxTrades('15');
     setDuration('1');
     setDurationUnit('t');
     setEntryCondition('last_digit_gte');

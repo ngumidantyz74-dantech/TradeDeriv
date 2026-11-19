@@ -314,10 +314,10 @@ async function runSchemaAndSeed(): Promise<void> {
 
       CREATE TABLE IF NOT EXISTS risk_settings (
         user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
-        risk_per_trade_pct DOUBLE PRECISION NOT NULL DEFAULT 1.5,
-        daily_loss_limit_usd DOUBLE PRECISION NOT NULL DEFAULT 150.0,
-        max_exposure_usd DOUBLE PRECISION NOT NULL DEFAULT 500.0,
-        max_consecutive_losses INTEGER NOT NULL DEFAULT 4,
+        risk_per_trade_pct DOUBLE PRECISION NOT NULL DEFAULT 2.0,
+        daily_loss_limit_usd DOUBLE PRECISION NOT NULL DEFAULT 10.0,
+        max_exposure_usd DOUBLE PRECISION NOT NULL DEFAULT 15.0,
+        max_consecutive_losses INTEGER NOT NULL DEFAULT 3,
         cooldown_minutes INTEGER NOT NULL DEFAULT 30,
         cooldown_until TIMESTAMPTZ,
         enforce_limits BOOLEAN NOT NULL DEFAULT TRUE,
@@ -445,6 +445,22 @@ async function runSchemaAndSeed(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_smart_alerts_user_status ON smart_alerts (user_id, status);
       CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_email_time ON admin_login_attempts (email, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_journal_user_time ON trading_journal_entries (user_id, created_at DESC);
+
+      ALTER TABLE risk_settings ALTER COLUMN risk_per_trade_pct SET DEFAULT 2.0;
+      ALTER TABLE risk_settings ALTER COLUMN daily_loss_limit_usd SET DEFAULT 10.0;
+      ALTER TABLE risk_settings ALTER COLUMN max_exposure_usd SET DEFAULT 15.0;
+      ALTER TABLE risk_settings ALTER COLUMN max_consecutive_losses SET DEFAULT 3;
+
+      UPDATE risk_settings
+      SET risk_per_trade_pct = 2.0,
+          daily_loss_limit_usd = 10.0,
+          max_exposure_usd = 15.0,
+          max_consecutive_losses = 3,
+          updated_at = NOW()
+      WHERE risk_per_trade_pct = 1.5
+        AND daily_loss_limit_usd = 150.0
+        AND max_exposure_usd = 500.0
+        AND max_consecutive_losses = 4;
     `);
 
     // Seed roles
@@ -531,7 +547,9 @@ async function runSchemaAndSeed(): Promise<void> {
         {
           derivAppId: config.derivAppId,
           markupPercentage: 3.0,
-          affiliateLink: 'https://track.deriv.com/_tradederiv_ib/',
+          affiliateLink: 'https://t.deriv.link?t=FSDRTFVTSKPA',
+          affiliateCode: 'VNMH2VHBRTFN',
+          affiliateToken: 'FSDRTFVTSKPA',
           affiliateTierRate: 30.0,
           hasOwnerToken: false,
         },
@@ -589,11 +607,34 @@ async function runSchemaAndSeed(): Promise<void> {
 
     for (const [key, parsed] of parsedMap.entries()) {
       if ((key === 'global' || key === 'commissions') && parsed && typeof parsed === 'object') {
+        let changed = false;
         const currentId = typeof parsed.derivAppId === 'string' ? parsed.derivAppId.trim() : '';
         const shouldHeal =
           !isValidAppId(currentId) || (currentId === '1089' && preferredAppId !== '1089');
         if (shouldHeal) {
           parsed.derivAppId = preferredAppId;
+          changed = true;
+        }
+        if (key === 'commissions') {
+          const curLink = typeof parsed.affiliateLink === 'string' ? parsed.affiliateLink.trim() : '';
+          if (!curLink || curLink === 'https://track.deriv.com/_tradederiv_ib/') {
+            parsed.affiliateLink = 'https://t.deriv.link?t=FSDRTFVTSKPA';
+            changed = true;
+          }
+          if (!parsed.affiliateCode) {
+            parsed.affiliateCode = 'VNMH2VHBRTFN';
+            changed = true;
+          }
+          if (!parsed.affiliateToken) {
+            parsed.affiliateToken = 'FSDRTFVTSKPA';
+            changed = true;
+          }
+          if (!parsed.affiliateTierRate) {
+            parsed.affiliateTierRate = 30.0;
+            changed = true;
+          }
+        }
+        if (changed) {
           await client.query(
             'UPDATE application_settings SET value_json = $1, updated_at = NOW() WHERE key = $2',
             [JSON.stringify(parsed), key]

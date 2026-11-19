@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { pool, query, execute, ensureDatabaseSchema, requireDb, addNotification } from '../db.ts';
+import { pool, query, queryOne, execute, ensureDatabaseSchema, requireDb, addNotification } from '../db.ts';
 import { SEEDED_BOT_STRATEGIES } from '../catalog.ts';
 import { derivWs } from '../deriv-client.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
@@ -83,38 +83,86 @@ router.post('/trade/execute', requireDb, requireAuth, handleExecuteOrder);
 router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res) => {
   try {
     const body = req.body || {};
+    const symbol = String(body.symbol || '1HZ100V');
     const count = Math.min(25, Math.max(1, Number(body.count || 1)));
-    const orders: any[] = [];
+    const unitStake =
+      body.stake !== undefined
+        ? Math.max(0.5, Number(body.stake))
+        : body.lots !== undefined
+          ? Math.max(0.5, Number(body.lots) * 100)
+          : 2;
+    const totalBatchStake = Number((unitStake * count).toFixed(2));
+    const acctMode = body.accountMode === 'real' ? 'real' : 'demo';
 
+    // Pre-warm live Deriv subscription and spot quote so entry and live P/L stream immediately
+    await derivWs.ensureSymbolSubscribed(symbol).catch(() => {});
+    await derivWs.getLiveQuote(symbol).catch(() => null);
+
+    // Upfront batch balance check for wallet/demo modes to avoid half-filled batches
+    if (acctMode === 'demo' && body.executionMode !== 'deriv') {
+      const u = await queryOne<{ virtual_workspace_balance: number }>(
+        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+        [req.user!.id]
+      );
+      if (Number(u?.virtual_workspace_balance ?? 0) < totalBatchStake) {
+        res.status(400).json({
+          error: `Insufficient Demo balance ($${Number(u?.virtual_workspace_balance ?? 0).toFixed(2)}) for ${count}x $${unitStake.toFixed(2)} batch ($${totalBatchStake.toFixed(2)}).`,
+        });
+        return;
+      }
+    }
+
+    const orders: any[] = [];
     for (let i = 0; i < count; i++) {
       const o = await placeUnifiedOrder({
         userId: req.user!.id,
-        symbol: String(body.symbol || '1HZ100V'),
+        symbol,
         side: String(body.side || 'BUY'),
         contractType: body.contractType,
         lots: body.lots !== undefined ? Number(body.lots) : undefined,
-        stake: body.stake !== undefined ? Number(body.stake) : 10,
+        stake: unitStake,
         multiplier: body.multiplier !== undefined ? Number(body.multiplier) : 100,
         slUsd: body.slUsd !== undefined ? Number(body.slUsd) : null,
         tpUsd: body.tpUsd !== undefined ? Number(body.tpUsd) : null,
+        slPrice: body.slPrice !== undefined ? Number(body.slPrice) : null,
+        tpPrice: body.tpPrice !== undefined ? Number(body.tpPrice) : null,
         barrier: body.barrier !== undefined ? String(body.barrier) : null,
         duration: body.duration !== undefined ? Number(body.duration) : 5,
         durationUnit: body.durationUnit || 't',
         executionMode: body.executionMode || 'virtual',
         connectedAccountId: body.connectedAccountId ? Number(body.connectedAccountId) : null,
-        accountMode: body.accountMode === 'real' ? 'real' : 'demo',
+        accountMode: acctMode,
+        strategyKey: body.strategyKey ? String(body.strategyKey) : '',
+        timeframe: body.timeframe ? String(body.timeframe) : '',
+        notes: body.notes ? String(body.notes) : '',
+        idempotencyKey: body.idempotencyKey ? `${String(body.idempotencyKey)}-${i}` : undefined,
         source: 'bulk',
       });
       orders.push(o);
     }
 
+    const liveTick = derivWs.getLatestTick(symbol);
+    const enrichedOrders = orders.map((o) => {
+      const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
+      if (isMult && liveTick && liveTick.source === 'deriv_ws' && Number(o.entry_price) > 0) {
+        const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
+        const pctDiff = (liveTick.quote - Number(o.entry_price)) / Number(o.entry_price);
+        const directional = isUp ? pctDiff : -pctDiff;
+        const livePnl = Number(
+          Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100)).toFixed(2)
+        );
+        return { ...o, current_price: liveTick.quote, pnl: livePnl };
+      }
+      return o;
+    });
+
     await addNotification(
       req.user!.id,
       'Bulk Order Batch Executed',
-      `Opened ${orders.length} ${body.side} position(s) on ${body.symbol}.`,
+      `Opened ${enrichedOrders.length} ${body.side} position(s) on ${symbol}.`,
       'trading'
     );
-    res.status(201).json({ count: orders.length, orders });
+    res.status(201).json({ count: enrichedOrders.length, orders: enrichedOrders });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Bulk execution failed' });
   }
@@ -243,9 +291,9 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
       durationUnit: String(b.durationUnit || 't'),
       multiplier: Number(b.multiplier || 100),
       martingale: Number(b.martingale || 2.0),
-      takeProfit: Number(b.takeProfit || 25),
-      stopLoss: Number(b.stopLoss || 50),
-      maxTrades: Number(b.maxTrades || 50),
+      takeProfit: Number(b.takeProfit || 6),
+      stopLoss: Number(b.stopLoss || 3),
+      maxTrades: Number(b.maxTrades || 15),
       executionMode: b.executionMode || 'virtual',
       connectedAccountId: b.connectedAccountId ? Number(b.connectedAccountId) : null,
       accountMode: b.accountMode === 'real' ? 'real' : 'demo',

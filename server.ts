@@ -76,19 +76,30 @@ async function bootstrapServer() {
       defaultVirtualBalance: 10000,
       adminPrivateSlug: config.adminPrivateSlug,
     };
+    const defaultPartner = {
+      referralLink: 'https://t.deriv.link?t=FSDRTFVTSKPA',
+      referralCode: 'VNMH2VHBRTFN',
+      affiliateTierRate: 30.0,
+    };
 
     if (pool) {
       try {
         await ensureDatabaseSchema();
-        const [branding, global, announcements] = await Promise.all([
+        const [branding, global, announcements, comm] = await Promise.all([
           getSetting('branding', { appName: 'TradeDeriv' }),
           getSetting('global', defaultGlobal),
           getSetting<{ items?: any[] }>('announcements', { items: [] }),
+          getSetting<any>('commissions', {}),
         ]);
         res.json({
           branding,
           global,
           announcements: announcements.items || [],
+          partner: {
+            referralLink: comm?.affiliateLink || defaultPartner.referralLink,
+            referralCode: comm?.affiliateCode || defaultPartner.referralCode,
+            affiliateTierRate: Number(comm?.affiliateTierRate ?? defaultPartner.affiliateTierRate),
+          },
         });
         return;
       } catch {
@@ -99,10 +110,16 @@ async function bootstrapServer() {
     const branding = getCachedSetting('branding', { appName: 'TradeDeriv' });
     const global = getCachedSetting('global', defaultGlobal);
     const announcements = getCachedSetting<{ items?: any[] }>('announcements', { items: [] });
+    const comm = getCachedSetting<any>('commissions', {});
     res.json({
       branding,
       global,
       announcements: announcements.items || [],
+      partner: {
+        referralLink: comm?.affiliateLink || defaultPartner.referralLink,
+        referralCode: comm?.affiliateCode || defaultPartner.referralCode,
+        affiliateTierRate: Number(comm?.affiliateTierRate ?? defaultPartner.affiliateTierRate),
+      },
     });
   });
 

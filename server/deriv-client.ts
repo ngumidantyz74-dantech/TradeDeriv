@@ -522,6 +522,7 @@ export class DerivWebSocketClient {
       }, timeoutMs);
 
       let authorized = false;
+      let authorizePayload: any = null;
 
       socket.on('open', () => {
         socket.send(JSON.stringify({ authorize: token, req_id: 1 }));
@@ -538,6 +539,7 @@ export class DerivWebSocketClient {
               return;
             }
             authorized = true;
+            authorizePayload = data.authorize || null;
             socket.send(JSON.stringify({ ...payload, req_id: 2 }));
             return;
           }
@@ -546,6 +548,8 @@ export class DerivWebSocketClient {
             socket.close();
             if (data.error) {
               reject(new Error(data.error.message || 'Deriv API call rejected'));
+            } else if (data && typeof data === 'object' && authorizePayload) {
+              resolve({ ...data, _authorize: authorizePayload } as T);
             } else {
               resolve(data as T);
             }

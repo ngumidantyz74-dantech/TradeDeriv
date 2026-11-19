@@ -5,7 +5,9 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 
 export const LandingHero: React.FC = () => {
-  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap } = useApp();
+  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap, publicSettings } = useApp();
+  const partnerLink = publicSettings.partner?.referralLink || 'https://t.deriv.link?t=FSDRTFVTSKPA';
+  const partnerCode = publicSettings.partner?.referralCode || 'VNMH2VHBRTFN';
   const [menuOpen, setMenuOpen] = useState(false);
   const [authModal, setAuthModal] = useState<'login' | 'register' | null>(null);
   const [email, setEmail] = useState('');
@@ -122,6 +124,19 @@ export const LandingHero: React.FC = () => {
               <span>Trustpilot</span>
             </div>
           </div>
+
+          <p className="mt-4 text-xs text-white/70 text-center sm:text-left">
+            New to Deriv?{' '}
+            <a
+              href={partnerLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-white underline hover:text-[#FF444F] font-semibold"
+            >
+              Sign up via Partner Link
+            </a>{' '}
+            <span className="font-mono-num text-white/60">(Code: {partnerCode})</span>
+          </p>
         </div>
       </main>
 
@@ -162,6 +177,15 @@ export const LandingHero: React.FC = () => {
                 >
                   Open Deriv Account
                 </button>
+                <a
+                  href={partnerLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  onClick={() => setMenuOpen(false)}
+                  className="block w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-slate-300 text-center"
+                >
+                  Register with Partner Code: <strong className="font-mono-num text-white">{partnerCode}</strong>
+                </a>
               </div>
 
               <div className="mt-8 pt-6 border-t border-[#2A2F3D] space-y-2">

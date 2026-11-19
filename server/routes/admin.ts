@@ -443,7 +443,12 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
     config: {
       derivAppId: activeAppIdStr,
       markupPercentage: Number(commConfig.markupPercentage ?? 3.0),
-      affiliateLink: commConfig.affiliateLink || 'https://track.deriv.com/_tradederiv_ib/',
+      affiliateLink:
+        commConfig.affiliateLink && commConfig.affiliateLink !== 'https://track.deriv.com/_tradederiv_ib/'
+          ? commConfig.affiliateLink
+          : 'https://t.deriv.link?t=FSDRTFVTSKPA',
+      affiliateCode: commConfig.affiliateCode || 'VNMH2VHBRTFN',
+      affiliateToken: commConfig.affiliateToken || 'FSDRTFVTSKPA',
       affiliateTierRate: Number(commConfig.affiliateTierRate ?? 30.0),
       hasOwnerToken: Boolean(ownerAuth),
     },
@@ -476,7 +481,8 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
 });
 
 router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  const { derivAppId, markupPercentage, affiliateLink, affiliateTierRate, ownerAdminToken } = req.body || {};
+  const { derivAppId, markupPercentage, affiliateLink, affiliateCode, affiliateToken, affiliateTierRate, ownerAdminToken } =
+    req.body || {};
   if (derivAppId !== undefined && String(derivAppId).trim() !== '') {
     if (!/^[A-Za-z0-9_-]{2,64}$/.test(String(derivAppId).trim())) {
       res.status(400).json({
@@ -491,6 +497,8 @@ router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: Aut
     ...(derivAppId ? { derivAppId: String(derivAppId).trim() } : {}),
     ...(markupPercentage !== undefined ? { markupPercentage: Number(markupPercentage) } : {}),
     ...(affiliateLink !== undefined ? { affiliateLink: String(affiliateLink).trim() } : {}),
+    ...(affiliateCode !== undefined ? { affiliateCode: String(affiliateCode).trim() } : {}),
+    ...(affiliateToken !== undefined ? { affiliateToken: String(affiliateToken).trim() } : {}),
     ...(affiliateTierRate !== undefined ? { affiliateTierRate: Number(affiliateTierRate) } : {}),
     hasOwnerToken: Boolean((ownerAdminToken && String(ownerAdminToken).trim().length > 5) || current.hasOwnerToken),
   };

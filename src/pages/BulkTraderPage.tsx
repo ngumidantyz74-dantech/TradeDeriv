@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { Zap, Trash2, TrendingUp, TrendingDown } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { computeLiveOrderMetrics } from '../lib/balances';
 
 export const BulkTraderPage: React.FC = () => {
   const {
@@ -16,22 +17,28 @@ export const BulkTraderPage: React.FC = () => {
   } = useApp();
 
   const [symbol, setSymbol] = useState('1HZ100V');
-  const [count, setCount] = useState(5);
-  const [stake, setStake] = useState('10');
+  const [count, setCount] = useState(3);
+  const [stake, setStake] = useState('2');
   const [multiplier, setMultiplier] = useState(100);
   const [contractType, setContractType] = useState('MULTUP');
-  const [slUsd, setSlUsd] = useState('15');
-  const [tpUsd, setTpUsd] = useState('30');
+  const [slUsd, setSlUsd] = useState('1');
+  const [tpUsd, setTpUsd] = useState('3');
   const [executing, setExecuting] = useState(false);
 
   const live = ticks[symbol];
   const inst = instruments.find((i) => i.symbol === symbol);
   const price = live?.quote ?? inst?.price ?? 1000;
-  const openOrders = orders.filter(
-    (o) =>
-      o.status === 'OPEN' &&
-      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
-  );
+  const openOrders = orders
+    .filter(
+      (o) =>
+        o.status === 'OPEN' &&
+        (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+    )
+    .map((o) => {
+      const m = computeLiveOrderMetrics(o, ticks);
+      return m.currentPrice > 0 ? { ...o, current_price: m.currentPrice, pnl: m.pnl } : o;
+    });
+  const totalFloatingPnl = openOrders.reduce((s, o) => s + Number(o.pnl || 0), 0);
 
   const handleBulkFire = async (side: string, overrideType?: string) => {
     setExecuting(true);
@@ -133,7 +140,8 @@ export const BulkTraderPage: React.FC = () => {
               <label className="block text-xs font-semibold text-slate-500 mb-1">Stake per Order ($)</label>
               <input
                 type="number"
-                min="1"
+                min="0.5"
+                step="0.5"
                 value={stake}
                 onChange={(e) => setStake(e.target.value)}
                 className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono-num text-sm font-bold"
@@ -222,9 +230,14 @@ export const BulkTraderPage: React.FC = () => {
 
         {/* Live Open Batch Table */}
         <div className="lg:col-span-7 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden">
-          <div className="px-5 py-4 border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between">
+          <div className="px-5 py-4 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2">
             <h2 className="font-display text-base font-bold">Active Positions ({openOrders.length})</h2>
-            <span className="text-xs text-slate-500">Total Exposure: ${openOrders.reduce((a, b) => a + b.stake, 0).toFixed(2)}</span>
+            <div className="flex items-center gap-3 text-xs font-mono-num">
+              <span className="text-slate-500">Exposure: ${openOrders.reduce((a, b) => a + b.stake, 0).toFixed(2)}</span>
+              <span className={`font-bold ${totalFloatingPnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                P/L: {totalFloatingPnl >= 0 ? '+' : ''}${totalFloatingPnl.toFixed(2)}
+              </span>
+            </div>
           </div>
           <div className="overflow-x-auto">
             <table className="w-full text-xs">
@@ -234,6 +247,7 @@ export const BulkTraderPage: React.FC = () => {
                   <th className="text-left px-4 py-2.5">Side</th>
                   <th className="text-right px-4 py-2.5">Stake</th>
                   <th className="text-right px-4 py-2.5">Entry</th>
+                  <th className="text-right px-4 py-2.5">Current</th>
                   <th className="text-right px-4 py-2.5">P/L</th>
                 </tr>
               </thead>
@@ -244,6 +258,7 @@ export const BulkTraderPage: React.FC = () => {
                     <td className="px-4 py-2.5">{o.side}</td>
                     <td className="px-4 py-2.5 text-right font-mono-num">${o.stake}</td>
                     <td className="px-4 py-2.5 text-right font-mono-num">{o.entry_price}</td>
+                    <td className="px-4 py-2.5 text-right font-mono-num">{o.current_price}</td>
                     <td
                       className={`px-4 py-2.5 text-right font-mono-num font-bold ${
                         o.pnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'

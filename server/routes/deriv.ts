@@ -15,7 +15,7 @@ import {
 import { encryptToken, decryptToken, generateCodeVerifier, sha256Base64Url, randomId, maskClientId } from '../crypto.ts';
 import { hashPasswordArgon2id } from '../password-hash.ts';
 import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
-import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
+import { derivWs, derivRestRequest, getActiveDerivAppId, OtpDerivClient } from '../deriv-client.ts';
 import { getDecryptedAccountToken } from '../trade-execution.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
 
@@ -156,6 +156,88 @@ async function upsertDerivAccountForUser(params: {
   return accountId;
 }
 
+function cleanDerivFullName(raw?: string): string {
+  const s = String(raw || '').trim();
+  if (!s || s === 'Deriv Trader' || s === 'New Trader') return '';
+  return s;
+}
+
+function normalizeDerivCountry(raw?: string, existing?: string): string | null {
+  const s = String(raw || '').trim();
+  if (!s) return null;
+  if (s.length <= 2) {
+    const map: Record<string, string> = {
+      KE: 'Kenya',
+      UG: 'Uganda',
+      TZ: 'Tanzania',
+      NG: 'Nigeria',
+      ZA: 'South Africa',
+      GH: 'Ghana',
+      RW: 'Rwanda',
+      GB: 'United Kingdom',
+      US: 'United States',
+    };
+    const mapped = map[s.toUpperCase()];
+    if (mapped) return mapped;
+    return existing?.trim() ? null : s.toUpperCase();
+  }
+  return s;
+}
+
+async function syncDerivProfileOnExistingUser(
+  userRow: any,
+  profile: {
+    email?: string;
+    fullName?: string;
+    phone?: string;
+    country?: string;
+    nickname?: string;
+    clientId?: string;
+  }
+): Promise<any> {
+  if (!userRow) return userRow;
+  const incomingName = cleanDerivFullName(profile.fullName) || cleanDerivFullName(profile.nickname);
+  const currentName = String(userRow.full_name || '').trim();
+  const shouldUpdateName = Boolean(
+    incomingName && (!currentName || currentName === 'Deriv Trader' || currentName === 'New Trader')
+  );
+
+  const incomingPhone = String(profile.phone || '').trim();
+  const currentPhone = String(userRow.phone || '').trim();
+  const shouldUpdatePhone = Boolean(incomingPhone && !currentPhone);
+
+  const normalizedCountry = normalizeDerivCountry(profile.country, userRow.country);
+  const currentCountry = String(userRow.country || '').trim();
+  const shouldUpdateCountry = Boolean(normalizedCountry && !currentCountry);
+
+  const incomingNick = String(profile.nickname || '').trim();
+  const incomingClientId = profile.clientId ? maskClientId(profile.clientId) : '';
+
+  if (shouldUpdateName || shouldUpdatePhone || shouldUpdateCountry || incomingNick || incomingClientId) {
+    const fresh = await queryOne<any>(
+      `UPDATE users SET
+        full_name = CASE WHEN $1 <> '' THEN $1 ELSE full_name END,
+        phone = CASE WHEN $2 <> '' THEN $2 ELSE phone END,
+        country = CASE WHEN $3 <> '' THEN $3 ELSE country END,
+        deriv_nickname = COALESCE(NULLIF($4, ''), deriv_nickname),
+        deriv_client_id = COALESCE(NULLIF($5, ''), deriv_client_id),
+        updated_at = NOW()
+       WHERE id = $6
+       RETURNING *`,
+      [
+        shouldUpdateName ? incomingName : '',
+        shouldUpdatePhone ? incomingPhone : '',
+        shouldUpdateCountry ? normalizedCountry! : '',
+        incomingNick,
+        !String(userRow.deriv_client_id || '').trim() ? incomingClientId : '',
+        userRow.id,
+      ]
+    );
+    if (fresh) return fresh;
+  }
+  return userRow;
+}
+
 /**
  * Resolves whether this Deriv login belongs to an existing database user (repeat login)
  * or is a brand-new user (first login).
@@ -164,6 +246,8 @@ async function upsertDerivAccountForUser(params: {
 async function ensureUserFromDerivProfile(profile: {
   email?: string;
   fullName?: string;
+  phone?: string;
+  country?: string;
   nickname?: string;
   clientId?: string;
   loginIds?: string[];
@@ -175,7 +259,8 @@ async function ensureUserFromDerivProfile(profile: {
       [profile.preferredUserId]
     );
     if (existingById) {
-      return { user: existingById, isNew: false, preserveExistingBalances: true };
+      const synced = await syncDerivProfileOnExistingUser(existingById, profile);
+      return { user: synced, isNew: false, preserveExistingBalances: true };
     }
   }
 
@@ -187,14 +272,8 @@ async function ensureUserFromDerivProfile(profile: {
       [candidateEmail]
     );
     if (existingByEmail) {
-      if (profile.nickname || profile.clientId) {
-        await execute(
-          'UPDATE users SET deriv_nickname = COALESCE($1, deriv_nickname), deriv_client_id = COALESCE($2, deriv_client_id), updated_at = NOW() WHERE id = $3',
-          [profile.nickname || null, profile.clientId || null, existingByEmail.id]
-        );
-      }
-      const fresh = await queryOne<any>('SELECT * FROM users WHERE id = $1', [existingByEmail.id]);
-      return { user: fresh, isNew: false, preserveExistingBalances: true };
+      const synced = await syncDerivProfileOnExistingUser(existingByEmail, profile);
+      return { user: synced, isNew: false, preserveExistingBalances: true };
     }
   }
 
@@ -211,7 +290,8 @@ async function ensureUserFromDerivProfile(profile: {
     if (existingConn) {
       const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [existingConn.user_id]);
       if (existingUser) {
-        return { user: existingUser, isNew: false, preserveExistingBalances: true };
+        const synced = await syncDerivProfileOnExistingUser(existingUser, profile);
+        return { user: synced, isNew: false, preserveExistingBalances: true };
       }
     }
   }
@@ -234,20 +314,29 @@ async function ensureUserFromDerivProfile(profile: {
     [cleanEmail]
   );
   if (existingFallback) {
-    return { user: existingFallback, isNew: false, preserveExistingBalances: true };
+    const synced = await syncDerivProfileOnExistingUser(existingFallback, profile);
+    return { user: synced, isNew: false, preserveExistingBalances: true };
   }
 
   // First Login: create new user
   const globalSettings = await getSetting<{ defaultVirtualBalance?: number }>('global', {});
   const hash = await hashPasswordArgon2id(randomId(24));
+  const resolvedName =
+    cleanDerivFullName(profile.fullName) ||
+    cleanDerivFullName(profile.nickname) ||
+    'Deriv Trader';
+  const resolvedPhone = String(profile.phone || '').trim();
+  const resolvedCountry = normalizeDerivCountry(profile.country) || 'Kenya';
   const created = await queryOne<any>(
-    `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id)
-     VALUES ($1, $2, $3, 'user', 'active', TRUE, $4, $5, $6)
+    `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id)
+     VALUES ($1, $2, $3, $4, $5, 'user', 'active', TRUE, $6, $7, $8)
      RETURNING *`,
     [
       cleanEmail,
       hash,
-      profile.fullName || profile.nickname || 'Deriv Trader',
+      resolvedName,
+      resolvedPhone,
+      resolvedCountry,
       Number(globalSettings.defaultVirtualBalance ?? 10000),
       profile.nickname || '',
       maskClientId(profile.clientId || randomId(8)),
@@ -312,22 +401,30 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       }
 
       let email = '';
-      let fullName = 'Deriv Trader';
-      try {
-        const settingsResp = await derivWs.requestWithToken(entries[0].token, { get_settings: 1 }, 4500);
-        if (settingsResp?.get_settings) {
-          email = settingsResp.get_settings.email || '';
-          fullName =
-            `${settingsResp.get_settings.first_name || ''} ${settingsResp.get_settings.last_name || ''}`.trim() ||
-            'Deriv Trader';
+      let fullName = '';
+      let phone = '';
+      let country = '';
+      for (const entry of entries.slice(0, 2)) {
+        try {
+          const settingsResp = await derivWs.requestWithToken(entry.token, { get_settings: 1 }, 4500);
+          const gs = settingsResp?.get_settings || {};
+          const authMeta = settingsResp?._authorize || {};
+          email = email || gs.email || authMeta.email || '';
+          const gsName = `${gs.first_name || ''} ${gs.last_name || ''}`.trim();
+          fullName = fullName || gsName || cleanDerivFullName(authMeta.fullname) || '';
+          phone = phone || String(gs.phone || '').trim();
+          country = country || String(gs.country || authMeta.country || '').trim();
+          if (email && fullName && phone) break;
+        } catch {
+          // continue checking next token
         }
-      } catch {
-        // continue with defaults
       }
 
       const session = await ensureUserFromDerivProfile({
         email,
         fullName,
+        phone,
+        country,
         clientId: entries[0].acct,
         loginIds: entries.map((e) => e.acct),
       });
@@ -474,6 +571,9 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
     const scopes = tokenData.scope || config.derivOAuthScopes;
 
     let nickname = '';
+    let fullName = '';
+    let phone = '';
+    let country = '';
     let externalId = '';
     let email = '';
     if (tokenData.id_token) {
@@ -484,23 +584,45 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
             email?: string;
             sub?: string;
             name?: string;
+            given_name?: string;
+            family_name?: string;
+            preferred_username?: string;
+            phone_number?: string;
+            country?: string;
+            address?: { country?: string };
           };
           if (claims.email) email = claims.email;
           if (claims.sub) externalId = claims.sub;
-          if (claims.name) nickname = claims.name;
+          const claimCombined = `${claims.given_name || ''} ${claims.family_name || ''}`.trim();
+          fullName = cleanDerivFullName(claims.name) || cleanDerivFullName(claimCombined) || fullName;
+          nickname = claims.preferred_username || claims.name || nickname;
+          if (claims.phone_number) phone = String(claims.phone_number).trim();
+          if (claims.country || claims.address?.country) {
+            country = String(claims.country || claims.address?.country || '').trim();
+          }
         }
       } catch {
         // ignore malformed id_token
       }
     }
     try {
-      const nickData = await derivRestRequest<{ nickname?: string; external_id?: string; email?: string }>(
-        '/account/v1/nickname',
-        accessToken
-      );
+      const nickData = await derivRestRequest<{
+        nickname?: string;
+        external_id?: string;
+        email?: string;
+        first_name?: string;
+        last_name?: string;
+        full_name?: string;
+        phone?: string;
+        country?: string;
+      }>('/account/v1/nickname', accessToken);
       nickname = nickData.nickname || nickname;
       externalId = nickData.external_id || externalId;
       email = nickData.email || email;
+      const nickCombined = `${nickData.first_name || ''} ${nickData.last_name || ''}`.trim();
+      fullName = fullName || cleanDerivFullName(nickData.full_name) || cleanDerivFullName(nickCombined) || '';
+      phone = phone || String(nickData.phone || '').trim();
+      country = country || String(nickData.country || '').trim();
     } catch {
       // ignore if endpoint unavailable
     }
@@ -534,8 +656,41 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       // ignore empty list
     }
 
+    // Best-effort profile/get_settings hydration when name or phone is still missing on OAuth2 PKCE
+    if ((!fullName || !phone) && derivAccounts.length > 0) {
+      try {
+        const otpResp = await derivRestRequest<any>(
+          `/trading/v1/options/accounts/${derivAccounts[0].account_id}/otp`,
+          accessToken,
+          { method: 'POST' }
+        );
+        const rawOtp = String(
+          otpResp?.url || otpResp?.ws_url || otpResp?.data?.url || otpResp?.data?.ws_url || otpResp?.otp || otpResp?.data?.otp || ''
+        ).trim();
+        const otpUrl = rawOtp
+          ? rawOtp.startsWith('ws://') || rawOtp.startsWith('wss://')
+            ? rawOtp
+            : `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(appId)}&otp=${encodeURIComponent(rawOtp)}`
+          : '';
+        if (otpUrl) {
+          const settingsResp = await OtpDerivClient.requestOnOtpUrl<any>(otpUrl, { get_settings: 1 }, 3500);
+          const gs = settingsResp?.get_settings || {};
+          const gsName = `${gs.first_name || ''} ${gs.last_name || ''}`.trim();
+          fullName = fullName || cleanDerivFullName(gsName);
+          phone = phone || String(gs.phone || '').trim();
+          country = country || String(gs.country || '').trim();
+          email = email || String(gs.email || '').trim();
+        }
+      } catch {
+        // non-blocking best-effort hydration
+      }
+    }
+
     const session = await ensureUserFromDerivProfile({
       email,
+      fullName,
+      phone,
+      country,
       nickname,
       clientId: externalId || derivAccounts[0]?.account_id,
       loginIds: derivAccounts.map((a) => a.account_id),
@@ -634,6 +789,25 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
       });
     }
 
+    // Best-effort profile hydration from first valid token
+    if (accounts[0]?.token) {
+      try {
+        const settingsResp = await derivWs.requestWithToken(String(accounts[0].token), { get_settings: 1 }, 3500);
+        const gs = settingsResp?.get_settings || {};
+        const authMeta = settingsResp?._authorize || {};
+        const gsName = `${gs.first_name || ''} ${gs.last_name || ''}`.trim() || cleanDerivFullName(authMeta.fullname);
+        const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+        await syncDerivProfileOnExistingUser(existingUser, {
+          fullName: gsName,
+          phone: gs.phone || '',
+          country: gs.country || authMeta.country || '',
+          clientId: String(accounts[0].acct || ''),
+        });
+      } catch {
+        // non-blocking
+      }
+    }
+
     const updated = await query(
       `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
               last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
@@ -686,6 +860,23 @@ router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, r
       scopes: 'read trade',
       preserveExistingBalances: Boolean(alreadyExists),
     });
+
+    // Hydrate user full_name, phone & country from Deriv settings if still placeholder/blank
+    try {
+      const settingsResp = await derivWs.requestWithToken(String(token), { get_settings: 1 }, 3500);
+      const gs = settingsResp?.get_settings || {};
+      const authMeta = settingsResp?._authorize || authResp?._authorize || {};
+      const gsName = `${gs.first_name || ''} ${gs.last_name || ''}`.trim() || cleanDerivFullName(authMeta.fullname);
+      const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+      await syncDerivProfileOnExistingUser(existingUser, {
+        fullName: gsName,
+        phone: gs.phone || '',
+        country: gs.country || authMeta.country || '',
+        clientId: derivLoginId,
+      });
+    } catch {
+      // ignore if token lacks read scope or timed out
+    }
 
     const user = await queryOne<{ email: string; full_name: string }>('SELECT email, full_name FROM users WHERE id = $1', [
       req.user!.id,

@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
-import { getCanonicalBalances } from '../lib/balances';
+import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 
 export const HomeHub: React.FC = () => {
   const {
@@ -78,17 +78,7 @@ export const HomeHub: React.FC = () => {
       o.status === 'OPEN' &&
       (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
   );
-  const floatingPnl = openOrders.reduce((s, o) => {
-    const symTick = ticks[o.symbol];
-    const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
-    if (symTick && symTick.source === 'deriv_ws' && isMult && Number(o.entry_price) > 0) {
-      const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
-      const pctDiff = (symTick.quote - Number(o.entry_price)) / Number(o.entry_price);
-      const directional = isUp ? pctDiff : -pctDiff;
-      return s + Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100));
-    }
-    return s + Number(o.pnl || 0);
-  }, 0);
+  const floatingPnl = openOrders.reduce((s, o) => s + computeLiveOrderMetrics(o, ticks).pnl, 0);
   const usedMargin = openOrders.reduce((s, o) => s + Number(o.stake || 0), 0);
   const equity = activeBalance + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);

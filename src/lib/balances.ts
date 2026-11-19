@@ -1,4 +1,42 @@
-import type { ConnectedAccount, UserProfile } from '../types';
+import type { ConnectedAccount, OrderRecord, TickData, UserProfile } from '../types';
+
+export function computeLiveOrderMetrics(
+  order: OrderRecord,
+  ticks: Record<string, TickData>
+): { currentPrice: number; pnl: number; isLive: boolean } {
+  const entry = Number(order.entry_price || 0);
+  const storedCur = Number(order.current_price || entry || 0);
+  const storedPnl = Number(order.pnl || 0);
+  const symTick = ticks[order.symbol];
+  const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(order.contract_type || '').toUpperCase());
+
+  if (order.status === 'OPEN' && symTick && Number.isFinite(symTick.quote) && symTick.quote > 0 && entry > 0) {
+    if (isMult) {
+      const isUp = String(order.contract_type || '').toUpperCase() === 'MULTUP' || String(order.side || '').toUpperCase() === 'BUY';
+      const pctDiff = (symTick.quote - entry) / entry;
+      const directional = isUp ? pctDiff : -pctDiff;
+      const stake = Number(order.stake || 0);
+      const mult = Number(order.multiplier || 100);
+      const livePnl = Number(Math.max(-stake, directional * stake * mult).toFixed(2));
+      return {
+        currentPrice: symTick.quote,
+        pnl: livePnl,
+        isLive: symTick.source === 'deriv_ws',
+      };
+    }
+    return {
+      currentPrice: symTick.quote,
+      pnl: storedPnl,
+      isLive: symTick.source === 'deriv_ws',
+    };
+  }
+
+  return {
+    currentPrice: storedCur,
+    pnl: storedPnl,
+    isLive: false,
+  };
+}
 
 export interface CanonicalBalances {
   optionsBal: number;

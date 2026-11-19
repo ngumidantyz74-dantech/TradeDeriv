@@ -40,10 +40,10 @@ export const RiskCalculatorPage: React.FC = () => {
   // Server Risk Guardrails state
   const [riskLoading, setRiskLoading] = useState(true);
   const [savingRisk, setSavingRisk] = useState(false);
-  const [riskPerTradePct, setRiskPerTradePct] = useState('1.5');
-  const [dailyLossLimit, setDailyLossLimit] = useState('150');
-  const [maxExposure, setMaxExposure] = useState('500');
-  const [maxConsecLosses, setMaxConsecLosses] = useState('4');
+  const [riskPerTradePct, setRiskPerTradePct] = useState('2');
+  const [dailyLossLimit, setDailyLossLimit] = useState('10');
+  const [maxExposure, setMaxExposure] = useState('15');
+  const [maxConsecLosses, setMaxConsecLosses] = useState('3');
   const [cooldownMins, setCooldownMins] = useState('30');
   const [enforceLimits, setEnforceLimits] = useState(true);
   const [telemetry, setTelemetry] = useState<{
@@ -65,10 +65,10 @@ export const RiskCalculatorPage: React.FC = () => {
     try {
       const res = await apiFetch<{ settings: any; telemetry: any }>('/api/risk/settings');
       if (res.settings) {
-        setRiskPerTradePct(String(res.settings.risk_per_trade_pct ?? 1.5));
-        setDailyLossLimit(String(res.settings.daily_loss_limit_usd ?? 150));
-        setMaxExposure(String(res.settings.max_exposure_usd ?? 500));
-        setMaxConsecLosses(String(res.settings.max_consecutive_losses ?? 4));
+        setRiskPerTradePct(String(res.settings.risk_per_trade_pct ?? 2));
+        setDailyLossLimit(String(res.settings.daily_loss_limit_usd ?? 10));
+        setMaxExposure(String(res.settings.max_exposure_usd ?? 15));
+        setMaxConsecLosses(String(res.settings.max_consecutive_losses ?? 3));
         setCooldownMins(String(res.settings.cooldown_minutes ?? 30));
         setEnforceLimits(Boolean(res.settings.enforce_limits));
       }
@@ -123,13 +123,13 @@ export const RiskCalculatorPage: React.FC = () => {
   const cap = Number(capital) || 0;
   const pct = Number(riskPct) || 2;
   const baseStake = Number(((cap * pct) / 100).toFixed(2));
-  const tpTarget = Number((baseStake * 5).toFixed(2));
-  const slLimit = Number((baseStake * 15).toFixed(2));
+  const tpTarget = Number((baseStake * 3).toFixed(2));
+  const slLimit = Number((baseStake * 1).toFixed(2));
 
   const dailyLossUsed = Math.max(0, -telemetry.dailyPnlUsd);
-  const dailyLossCap = Math.max(1, Number(dailyLossLimit) || 150);
+  const dailyLossCap = Math.max(1, Number(dailyLossLimit) || 10);
   const dailyLossPct = Math.min(100, (dailyLossUsed / dailyLossCap) * 100);
-  const expCap = Math.max(1, Number(maxExposure) || 500);
+  const expCap = Math.max(1, Number(maxExposure) || 15);
   const expPct = Math.min(100, (telemetry.openExposureUsd / expCap) * 100);
 
   return (

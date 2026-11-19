@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { RefreshCw, Plus, Send, ArrowUpDown, ChevronRight, Search, X } from 'lucide-react';
+import { RefreshCw, Plus, Send, ArrowUpDown, ChevronRight, Search, X, ExternalLink } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
@@ -7,7 +7,10 @@ import type { ExchangePair } from '../types';
 import { SparklineSvg } from '../components/SparklineSvg';
 
 export const ExchangeHub: React.FC = () => {
-  const { user, accounts, accountMode, setAccountMode, refreshAll, showToast, setActiveTab, hideBalances } = useApp();
+  const { user, accounts, accountMode, setAccountMode, refreshAll, showToast, setActiveTab, hideBalances, publicSettings } = useApp();
+  const partnerLink = publicSettings.partner?.referralLink || 'https://t.deriv.link?t=FSDRTFVTSKPA';
+  const partnerCode = publicSettings.partner?.referralCode || 'VNMH2VHBRTFN';
+  const partnerTier = Number(publicSettings.partner?.affiliateTierRate ?? 30);
   const [pairs, setPairs] = useState<ExchangePair[]>([]);
   const [filter, setFilter] = useState<'trending' | 'gainers' | 'losers'>('trending');
   const [search, setSearch] = useState('');
@@ -310,15 +313,28 @@ export const ExchangeHub: React.FC = () => {
             </button>
           </div>
 
-          {/* 50x Leverage Promo Banner */}
-          <div className="mt-5 rounded-2xl bg-gradient-to-r from-[#2A0E12] via-[#1B1318] to-[#151820] text-white p-5 border border-[#3A1E24]">
-            <div className="flex items-center gap-2 mb-1.5">
-              <span className="px-2 py-0.5 rounded bg-[#FF444F] text-[10px] font-bold">DXN</span>
-              <h3 className="font-display text-sm font-bold">Trade bigger, hold longer</h3>
+          {/* 50x Leverage + Deriv Crypto Exchange Partner CTA Banner */}
+          <div className="mt-5 rounded-2xl bg-gradient-to-r from-[#2A0E12] via-[#1B1318] to-[#151820] text-white p-5 border border-[#3A1E24] space-y-3">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-2">
+                <span className="px-2 py-0.5 rounded bg-[#FF444F] text-[10px] font-bold">DXN</span>
+                <h3 className="font-display text-sm font-bold">Trade bigger, hold longer</h3>
+              </div>
+              <span className="px-2 py-0.5 rounded-full bg-white/10 text-[10px] font-mono-num text-slate-200">
+                Code: {partnerCode}
+              </span>
             </div>
             <p className="text-xs text-slate-300 leading-relaxed">
-              Open positions worth up to 50x your balance, long or short. Hold as long as you like — no expiry.
+              Open positions worth up to 50x your balance, long or short. Hold as long as you like — Deriv Crypto Exchange Spot &amp; Futures ({partnerTier}% Partner Tier).
             </p>
+            <a
+              href={partnerLink}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold transition-colors"
+            >
+              Open Deriv Crypto Exchange <ExternalLink className="w-3.5 h-3.5" />
+            </a>
           </div>
         </section>
 

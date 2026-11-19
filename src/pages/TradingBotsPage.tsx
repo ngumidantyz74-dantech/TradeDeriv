@@ -65,9 +65,9 @@ export const TradingBotsPage: React.FC = () => {
   const [stratTimeframe, setStratTimeframe] = useState('15m');
   const [execMode, setExecMode] = useState<'paper' | 'live'>('paper');
   const [enabled, setEnabled] = useState(true);
-  const [stake, setStake] = useState('10');
-  const [slAtrMult, setSlAtrMult] = useState('1.5');
-  const [tpRr, setTpRr] = useState('2.2');
+  const [stake, setStake] = useState('2');
+  const [slAtrMult, setSlAtrMult] = useState('1.2');
+  const [tpRr, setTpRr] = useState('3.0');
   const [adxThreshold, setAdxThreshold] = useState('22');
   const [rsiOversold, setRsiOversold] = useState('30');
   const [rsiOverbought, setRsiOverbought] = useState('70');
@@ -182,9 +182,9 @@ export const TradingBotsPage: React.FC = () => {
           symbol: stratSymbol,
           granularity,
           candleCount: Number(candleCount) || 300,
-          stake: Number(stake) || 10,
-          stopLossAtrMult: Number(slAtrMult) || 1.5,
-          takeProfitRr: Number(tpRr) || 2.0,
+          stake: Number(stake) || 2,
+          stopLossAtrMult: Number(slAtrMult) || 1.2,
+          takeProfitRr: Number(tpRr) || 3.0,
           spreadCostPct: (Number(spreadPct) || 0.06) / 100,
           adxThreshold: Number(adxThreshold) || 20,
           rsiOversold: Number(rsiOversold) || 30,
@@ -220,9 +220,9 @@ export const TradingBotsPage: React.FC = () => {
           durationUnit: s.config?.duration_unit ?? 't',
           multiplier: s.config?.multiplier ?? 100,
           martingale: s.config?.martingale ?? 2.0,
-          takeProfit: s.config?.takeProfit ?? 25,
-          stopLoss: s.config?.stopLoss ?? 50,
-          maxTrades: s.config?.maxTrades ?? 50,
+          takeProfit: s.config?.takeProfit ?? 6,
+          stopLoss: s.config?.stopLoss ?? 3,
+          maxTrades: s.config?.maxTrades ?? 15,
           accountMode,
           executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,

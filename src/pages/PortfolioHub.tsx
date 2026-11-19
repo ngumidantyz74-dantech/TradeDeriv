@@ -14,6 +14,7 @@ import {
   ShieldCheck,
   ExternalLink,
   BarChart3,
+  Copy,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
@@ -45,7 +46,10 @@ interface P2PAdvert {
 }
 
 export const PortfolioHub: React.FC = () => {
-  const { user, accounts, accountMode, setAccountMode, formatMoney, refreshAll, refreshAccounts, setActiveTab, showToast } = useApp();
+  const { user, accounts, accountMode, setAccountMode, formatMoney, refreshAll, refreshAccounts, setActiveTab, showToast, publicSettings } = useApp();
+  const partnerLink = publicSettings.partner?.referralLink || 'https://t.deriv.link?t=FSDRTFVTSKPA';
+  const partnerCode = publicSettings.partner?.referralCode || 'VNMH2VHBRTFN';
+  const partnerTier = Number(publicSettings.partner?.affiliateTierRate ?? 30);
   const [subTab, setSubTab] = useState<SubTab>('overview');
   const [transactions, setTransactions] = useState<CashierTransaction[]>([]);
   const [agents, setAgents] = useState<PaymentAgent[]>([]);
@@ -535,13 +539,51 @@ export const PortfolioHub: React.FC = () => {
         )}
 
         {subTab === 'partners' && (
-          <section>
-            <div className="flex items-center justify-between mb-3.5">
-              <div>
-                <h2 className="font-display text-lg font-bold">Verified Payment Agents</h2>
-                <p className="text-xs text-slate-500">Local M-Pesa, Airtel Money & Mobile Money settlement</p>
+          <section className="space-y-6">
+            <div className="p-5 rounded-2xl bg-[#151820] text-white border border-[#2A2F3D] flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1.5">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="px-2.5 py-0.5 rounded-full bg-[#FF444F]/20 text-[#FF444F] text-[10px] font-bold uppercase">
+                    Deriv Partner Program
+                  </span>
+                  <span className="px-2.5 py-0.5 rounded-full bg-[#00A878]/20 text-[#00A878] text-[10px] font-bold">
+                    {partnerTier}% Crypto Exchange, Options &amp; CFDs
+                  </span>
+                </div>
+                <h2 className="font-display text-base font-bold">Official Deriv Partner Referral Link &amp; Code</h2>
+                <p className="text-xs text-slate-300">
+                  Share or register via the official Partner Link (<span className="font-mono-num text-white">{partnerLink}</span>) with code <strong className="font-mono-num text-white">{partnerCode}</strong>.
+                </p>
+              </div>
+              <div className="flex flex-wrap items-center gap-2 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(partnerCode);
+                    showToast(`Copied partner code ${partnerCode}`, 'success');
+                  }}
+                  className="px-3.5 py-2 rounded-full bg-white/10 hover:bg-white/15 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Copy className="w-3.5 h-3.5" /> {partnerCode}
+                </button>
+                <a
+                  href={partnerLink}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-4 py-2 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                >
+                  Open Deriv Partner Link <ExternalLink className="w-3.5 h-3.5" />
+                </a>
               </div>
             </div>
+
+            <div>
+              <div className="flex items-center justify-between mb-3.5">
+                <div>
+                  <h2 className="font-display text-lg font-bold">Verified Payment Agents</h2>
+                  <p className="text-xs text-slate-500">Local M-Pesa, Airtel Money & Mobile Money settlement</p>
+                </div>
+              </div>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               {agents.map((ag) => (
                 <div
@@ -575,6 +617,7 @@ export const PortfolioHub: React.FC = () => {
                   </button>
                 </div>
               ))}
+              </div>
             </div>
           </section>
         )}

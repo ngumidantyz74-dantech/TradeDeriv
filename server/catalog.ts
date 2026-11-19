@@ -166,7 +166,7 @@ export const SEEDED_BOT_STRATEGIES = [
     win_rate_est: 78.4,
     rating: 4.9,
     is_premium: 0,
-    config: { stake: 1.0, barrier: '2', duration: 1, duration_unit: 't', martingale: 2.1, takeProfit: 15, stopLoss: 30, maxTrades: 50 },
+    config: { stake: 1.0, barrier: '2', duration: 1, duration_unit: 't', martingale: 2.1, takeProfit: 6, stopLoss: 3, maxTrades: 15 },
   },
   {
     name: 'AutoDifferbylegoo',
@@ -178,7 +178,7 @@ export const SEEDED_BOT_STRATEGIES = [
     win_rate_est: 89.2,
     rating: 4.8,
     is_premium: 0,
-    config: { stake: 2.0, barrier: '0', duration: 1, duration_unit: 't', martingale: 11.0, takeProfit: 20, stopLoss: 50, maxTrades: 40 },
+    config: { stake: 1.0, barrier: '0', duration: 1, duration_unit: 't', martingale: 11.0, takeProfit: 6, stopLoss: 3, maxTrades: 15 },
   },
   {
     name: 'MagicRecovery',
@@ -190,7 +190,7 @@ export const SEEDED_BOT_STRATEGIES = [
     win_rate_est: 74.6,
     rating: 4.7,
     is_premium: 0,
-    config: { stake: 1.5, barrier: '7', duration: 1, duration_unit: 't', martingale: 2.2, takeProfit: 25, stopLoss: 45, maxTrades: 60 },
+    config: { stake: 1.0, barrier: '7', duration: 1, duration_unit: 't', martingale: 2.1, takeProfit: 6, stopLoss: 3, maxTrades: 15 },
   },
   {
     name: 'Autovolt5Probot1',
@@ -202,7 +202,7 @@ export const SEEDED_BOT_STRATEGIES = [
     win_rate_est: 64.5,
     rating: 4.8,
     is_premium: 1,
-    config: { stake: 2.0, barrier: '', duration: 1, duration_unit: 't', martingale: 2.05, takeProfit: 30, stopLoss: 60, maxTrades: 80 },
+    config: { stake: 1.0, barrier: '', duration: 1, duration_unit: 't', martingale: 2.0, takeProfit: 8, stopLoss: 4, maxTrades: 20 },
   },
   {
     name: 'AlphaVersion2026Edition',
@@ -214,7 +214,7 @@ export const SEEDED_BOT_STRATEGIES = [
     win_rate_est: 68.9,
     rating: 4.9,
     is_premium: 1,
-    config: { stake: 5.0, barrier: '', duration: 5, duration_unit: 't', martingale: 2.0, takeProfit: 50, stopLoss: 75, maxTrades: 30 },
+    config: { stake: 1.5, barrier: '', duration: 5, duration_unit: 't', martingale: 2.0, takeProfit: 8, stopLoss: 4, maxTrades: 15 },
   },
   {
     name: 'SignalSniperAutoBot',
@@ -226,6 +226,6 @@ export const SEEDED_BOT_STRATEGIES = [
     win_rate_est: 71.2,
     rating: 4.8,
     is_premium: 0,
-    config: { stake: 10.0, multiplier: 100, duration: 5, duration_unit: 't', martingale: 1.5, takeProfit: 40, stopLoss: 20, maxTrades: 25 },
+    config: { stake: 2.0, multiplier: 100, duration: 5, duration_unit: 't', martingale: 1.5, takeProfit: 6, stopLoss: 1.5, maxTrades: 15 },
   },
 ];

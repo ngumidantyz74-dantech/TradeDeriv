@@ -44,7 +44,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../../lib/api';
-import { getCanonicalBalances } from '../../lib/balances';
+import { getCanonicalBalances, computeLiveOrderMetrics } from '../../lib/balances';
 import { computeAllIndicators, STRATEGY_CATALOG } from '../../lib/quant-engine';
 import type { CandleData, MarketInstrument, WorkspacePreferences } from '../../types';
 
@@ -160,6 +160,7 @@ export const MT5TradingView: React.FC = () => {
   const [lastUpdated, setLastUpdated] = useState<string | null>(null);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [indPanelOpen, setIndPanelOpen] = useState(false);
+  const [mobileDrawOpen, setMobileDrawOpen] = useState(false);
   const [editingLimitsOrder, setEditingLimitsOrder] = useState<{
     id: number;
     symbol: string;
@@ -240,10 +241,10 @@ export const MT5TradingView: React.FC = () => {
     [selectedSymbol, workspacePreferences.chartDrawings, saveWorkspacePreferences]
   );
 
-  // Order Ticket State
+  // Order Ticket State (calibrated for pro <$50 micro-account risk management)
   const [tradeMode, setTradeMode] = useState<TradeMode>('MT5 Market');
-  const [lots, setLots] = useState(0.1);
-  const [stakeUsd, setStakeUsd] = useState(10);
+  const [lots, setLots] = useState(0.02);
+  const [stakeUsd, setStakeUsd] = useState(2);
   const [multiplier, setMultiplier] = useState(100);
   const [bulkCount, setBulkCount] = useState(1);
   const [barrier, setBarrier] = useState('4');
@@ -254,13 +255,13 @@ export const MT5TradingView: React.FC = () => {
   const [contractsAvailable, setContractsAvailable] = useState<string[]>([]);
   const [proposalInfo, setProposalInfo] = useState<{ payout?: number; ask_price?: number; spot?: number; error?: string } | null>(null);
 
-  // SL / TP Controls
+  // SL / TP Controls (strict 1:3 R:R; SL < stake for valid Deriv Multiplier execution)
   const [slEnabled, setSlEnabled] = useState(true);
   const [tpEnabled, setTpEnabled] = useState(true);
   const [slUnit, setSlUnit] = useState<SlTpUnit>('USD');
   const [tpUnit, setTpUnit] = useState<SlTpUnit>('USD');
-  const [slValue, setSlValue] = useState('15');
-  const [tpValue, setTpValue] = useState('30');
+  const [slValue, setSlValue] = useState('1');
+  const [tpValue, setTpValue] = useState('3');
   const [placing, setPlacing] = useState(false);
 
   // Real-Money Confirmation Modal
@@ -437,7 +438,9 @@ export const MT5TradingView: React.FC = () => {
     if (!el) return;
 
     const isDark = theme === 'dark';
-    const chartHeight = isFullscreen ? Math.max(460, window.innerHeight - 230) : 420;
+    const chartHeight = isFullscreen
+      ? Math.max(480, window.innerHeight - 200)
+      : el.clientHeight || (window.innerWidth >= 1280 ? 560 : window.innerWidth >= 640 ? 520 : 460);
     const chart = createChart(el, {
       width: el.clientWidth,
       height: chartHeight,
@@ -544,7 +547,13 @@ export const MT5TradingView: React.FC = () => {
 
     const ro = new ResizeObserver(() => {
       if (chartContainerRef.current) {
-        chart.applyOptions({ width: chartContainerRef.current.clientWidth });
+        const nextHeight = isFullscreen
+          ? Math.max(480, window.innerHeight - 200)
+          : chartContainerRef.current.clientHeight || chartHeight;
+        chart.applyOptions({
+          width: chartContainerRef.current.clientWidth,
+          height: nextHeight,
+        });
       }
     });
     ro.observe(el);
@@ -900,18 +909,8 @@ export const MT5TradingView: React.FC = () => {
         o.symbol === selectedSymbol &&
         (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
     );
-    const symTick = ticks[selectedSymbol];
     for (const o of symOpenOrders) {
-      let livePnl = Number(o.pnl || 0);
-      const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
-      if (symTick && symTick.source === 'deriv_ws' && isMult && Number(o.entry_price) > 0) {
-        const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
-        const pctDiff = (symTick.quote - Number(o.entry_price)) / Number(o.entry_price);
-        const directional = isUp ? pctDiff : -pctDiff;
-        livePnl = Number(
-          Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100)).toFixed(2)
-        );
-      }
+      const livePnl = computeLiveOrderMetrics(o, ticks).pnl;
 
       priceLinesRef.current.push(
         series.createPriceLine({
@@ -1048,7 +1047,7 @@ export const MT5TradingView: React.FC = () => {
   };
 
   const applyRrPreset = (ratio: number) => {
-    const base = Number(slValue) || 15;
+    const base = Number(slValue) || 1;
     setSlEnabled(true);
     setTpEnabled(true);
     setTpUnit(slUnit);
@@ -1301,18 +1300,10 @@ export const MT5TradingView: React.FC = () => {
           (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
       )
       .map((o) => {
-        const symTick = ticks[o.symbol];
-        const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
-        if (symTick && symTick.source === 'deriv_ws' && isMult && Number(o.entry_price) > 0) {
-          const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
-          const pctDiff = (symTick.quote - Number(o.entry_price)) / Number(o.entry_price);
-          const directional = isUp ? pctDiff : -pctDiff;
-          const livePnl = Number(
-            Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100)).toFixed(2)
-          );
-          return { ...o, current_price: symTick.quote, pnl: livePnl };
-        }
-        return o;
+        const metrics = computeLiveOrderMetrics(o, ticks);
+        return metrics.currentPrice > 0
+          ? { ...o, current_price: metrics.currentPrice, pnl: metrics.pnl }
+          : o;
       });
   }, [orders, accountMode, ticks]);
   const closedOrders = orders.filter((o) => o.status === 'CLOSED');
@@ -1582,15 +1573,15 @@ export const MT5TradingView: React.FC = () => {
           } bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden flex flex-col relative`}
         >
           {/* Chart Header */}
-          <div className="px-4 py-3 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2">
-            <div>
-              <div className="flex flex-wrap items-center gap-2">
-                <h1 className="font-display text-base font-bold">{activeInst?.display_name || selectedSymbol}</h1>
-                <span className="text-xs font-mono-num px-2 py-0.5 rounded-full bg-[#1958B7]/10 text-[#1958B7] font-semibold">
+          <div className="px-3 py-2 sm:px-4 sm:py-3 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
+            <div className="min-w-0">
+              <div className="flex flex-wrap items-center gap-1.5 sm:gap-2">
+                <h1 className="font-display text-sm sm:text-base font-bold truncate">{activeInst?.display_name || selectedSymbol}</h1>
+                <span className="text-[11px] sm:text-xs font-mono-num px-2 py-0.5 rounded-full bg-[#1958B7]/10 text-[#1958B7] font-semibold shrink-0">
                   {selectedSymbol}
                 </span>
                 <span
-                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                  className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
                     marketClosedReason
                       ? 'bg-amber-500/15 text-amber-500'
                       : hasLiveWsTick || (wsConnected && candleSource === 'deriv_ws')
@@ -1600,13 +1591,13 @@ export const MT5TradingView: React.FC = () => {
                 >
                   {hasLiveWsTick || wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
                   {marketClosedReason
-                    ? 'Market Off-Hours'
+                    ? 'Off-Hours'
                     : hasLiveWsTick || (wsConnected && candleSource === 'deriv_ws')
-                      ? 'Deriv WS Live'
+                      ? 'Deriv Live'
                       : 'Reconnecting'}
                 </span>
               </div>
-              <div className="flex flex-wrap items-center gap-3 mt-0.5 text-xs font-mono-num">
+              <div className="flex flex-wrap items-center gap-2.5 sm:gap-3 mt-0.5 text-xs font-mono-num">
                 <span>
                   Bid: <strong className="text-[#FF444F]">{currentBid.toFixed(decimals)}</strong>
                 </span>
@@ -1622,15 +1613,15 @@ export const MT5TradingView: React.FC = () => {
               </div>
             </div>
 
-            {/* Chart Mode, Indicators Manager, AI Co-Pilot & Fullscreen */}
-            <div className="flex items-center gap-1.5 flex-wrap">
-              <div className="flex items-center bg-[#F4F5F7] dark:bg-[#111319] p-0.5 rounded-lg">
+            {/* Chart Mode, Indicators Manager, AI Co-Pilot & Fullscreen (compact single-line scroll on mobile) */}
+            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar max-w-full sm:flex-wrap shrink-0">
+              <div className="flex items-center bg-[#F4F5F7] dark:bg-[#111319] p-0.5 rounded-lg shrink-0">
                 {(['candles', 'line', 'area'] as ChartMode[]).map((m) => (
                   <button
                     key={m}
                     type="button"
                     onClick={() => updateIndPrefs({ chartMode: m })}
-                    className={`px-2 py-1 rounded-md text-[10px] font-bold capitalize cursor-pointer ${
+                    className={`px-2 py-1 rounded-md text-[10px] font-bold capitalize cursor-pointer whitespace-nowrap ${
                       chartMode === m
                         ? 'bg-white dark:bg-[#2A2F3D] text-[#0E1117] dark:text-white shadow-xs'
                         : 'text-slate-500'
@@ -1644,20 +1635,21 @@ export const MT5TradingView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setIndPanelOpen(!indPanelOpen)}
-                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                className={`px-2 py-1 sm:px-2.5 sm:py-1.5 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0 ${
                   indPanelOpen || activeIndicatorCount > 0
                     ? 'bg-[#1958B7]/15 text-[#1958B7]'
                     : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
                 }`}
               >
                 <SlidersHorizontal className="w-3.5 h-3.5" />
-                Indicators ({activeIndicatorCount})
+                <span className="hidden sm:inline">Indicators </span>
+                <span className="sm:hidden">Ind </span>({activeIndicatorCount})
               </button>
 
               <button
                 type="button"
                 onClick={() => updateIndPrefs({ smc: !indPrefs.smc })}
-                className={`px-2.5 py-1.5 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer ${
+                className={`px-2 py-1 sm:px-2.5 sm:py-1.5 rounded-lg text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0 ${
                   indPrefs.smc
                     ? 'bg-cyan-500/15 text-cyan-500'
                     : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
@@ -1670,17 +1662,17 @@ export const MT5TradingView: React.FC = () => {
               <button
                 type="button"
                 onClick={() => setCopilotOpen(true)}
-                className="px-2.5 py-1.5 rounded-lg bg-[#151820] text-white text-[11px] font-semibold inline-flex items-center gap-1 hover:bg-[#242936] cursor-pointer"
+                className="px-2 py-1 sm:px-2.5 sm:py-1.5 rounded-lg bg-[#151820] text-white text-[11px] font-semibold inline-flex items-center gap-1 hover:bg-[#242936] cursor-pointer whitespace-nowrap shrink-0"
               >
                 <Sparkles className="w-3.5 h-3.5 text-[#FF444F]" />
-                AI Co-Pilot
+                <span>AI<span className="hidden sm:inline"> Co-Pilot</span></span>
               </button>
 
               <button
                 type="button"
                 onClick={() => setIsFullscreen(!isFullscreen)}
                 title={isFullscreen ? 'Exit Fullscreen' : 'Fullscreen Chart'}
-                className="p-1.5 rounded-lg bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300 cursor-pointer"
+                className="p-1.5 rounded-lg bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300 cursor-pointer shrink-0"
               >
                 {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
               </button>
@@ -1727,147 +1719,270 @@ export const MT5TradingView: React.FC = () => {
             </div>
           )}
 
-          {/* Timeframe Bar + Expanded Drawing Toolbar */}
-          <div className="px-3 py-2 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2 bg-[#F8F9FB] dark:bg-[#151820]">
-            <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
-              {TIMEFRAMES.map((tf) => (
+          {/* Timeframe Bar + Drawing Toolbar (single compact bar on mobile, full inline on desktop) */}
+          <div className="px-3 py-1.5 sm:py-2 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-col gap-1.5 bg-[#F8F9FB] dark:bg-[#151820]">
+            <div className="flex items-center justify-between gap-2">
+              <div className="flex items-center gap-1 overflow-x-auto no-scrollbar">
+                {TIMEFRAMES.map((tf) => (
+                  <button
+                    key={tf.label}
+                    type="button"
+                    onClick={() => setTimeframe(tf.granularity)}
+                    className={`px-2 py-1 rounded-lg text-[11px] font-mono-num font-semibold cursor-pointer shrink-0 ${
+                      timeframe === tf.granularity
+                        ? 'bg-[#FF444F] text-white'
+                        : 'text-slate-500 hover:bg-slate-200/70 dark:hover:bg-white/10'
+                    }`}
+                  >
+                    {tf.label}
+                  </button>
+                ))}
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setMobileDrawOpen((v) => !v)}
+                className={`sm:hidden px-2 py-1 rounded-lg text-[10px] font-bold inline-flex items-center gap-1 cursor-pointer shrink-0 ${
+                  mobileDrawOpen || drawMode !== 'crosshair'
+                    ? 'bg-[#FF444F]/15 text-[#FF444F]'
+                    : 'bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-slate-600 dark:text-slate-300'
+                }`}
+              >
+                <Slash className="w-3 h-3" />
+                Draw
+              </button>
+
+              <div className="hidden sm:flex items-center gap-1 flex-wrap">
                 <button
-                  key={tf.label}
                   type="button"
-                  onClick={() => setTimeframe(tf.granularity)}
-                  className={`px-2 py-1 rounded-lg text-[11px] font-mono-num font-semibold cursor-pointer ${
-                    timeframe === tf.granularity
-                      ? 'bg-[#FF444F] text-white'
-                      : 'text-slate-500 hover:bg-slate-200/70 dark:hover:bg-white/10'
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode('crosshair');
+                  }}
+                  title="Crosshair"
+                  className={`p-1.5 rounded-lg cursor-pointer ${
+                    drawMode === 'crosshair'
+                      ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
+                      : 'text-slate-500'
                   }`}
                 >
-                  {tf.label}
+                  <Crosshair className="w-3.5 h-3.5" />
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'hline' ? 'crosshair' : 'hline');
+                    showToast('Click chart to place Horizontal Price Line', 'info');
+                  }}
+                  title="Horizontal Price Line"
+                  className={`p-1.5 rounded-lg cursor-pointer ${
+                    drawMode === 'hline' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'trendline' ? 'crosshair' : 'trendline');
+                    showToast('Click 2 points on chart to draw Trendline', 'info');
+                  }}
+                  title="Trendline (2-Click)"
+                  className={`p-1.5 rounded-lg cursor-pointer ${
+                    drawMode === 'trendline' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  <Slash className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'fib' ? 'crosshair' : 'fib');
+                    showToast('Click 2 swing prices for Fibonacci Retracement', 'info');
+                  }}
+                  title="Fib Retracement"
+                  className={`px-1.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer ${
+                    drawMode === 'fib' ? 'bg-[#FF444F] text-white' : 'text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10'
+                  }`}
+                >
+                  Fib
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'fibext' ? 'crosshair' : 'fibext');
+                    showToast('Click 2 swing prices for Fibonacci Extension', 'info');
+                  }}
+                  title="Fib Extension"
+                  className={`px-1.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer ${
+                    drawMode === 'fibext' ? 'bg-[#FF444F] text-white' : 'text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10'
+                  }`}
+                >
+                  Ext
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAlertTargetPrice(currentPrice.toFixed(decimals));
+                    setAlertModalOpen(true);
+                  }}
+                  title="Create Price Alert"
+                  className="p-1.5 rounded-lg text-slate-500 hover:text-[#FF444F] cursor-pointer"
+                >
+                  <BellPlus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleUndoDrawing}
+                  title="Undo"
+                  className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10 cursor-pointer"
+                >
+                  <Undo2 className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleRedoDrawing}
+                  title="Redo"
+                  className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10 cursor-pointer"
+                >
+                  <Redo2 className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawingsVisible(!drawingsVisible)}
+                  title="Show/Hide Drawings"
+                  className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10 cursor-pointer"
+                >
+                  {drawingsVisible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHLines([]);
+                    setTrendLines([]);
+                    setFibs([]);
+                    setPendingPoint(null);
+                    persistDrawings([], [], []);
+                  }}
+                  title="Clear All"
+                  className="p-1.5 rounded-lg text-slate-500 hover:text-[#FF444F] cursor-pointer"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
             </div>
 
-            <div className="flex items-center gap-1 flex-wrap">
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingPoint(null);
-                  setDrawMode('crosshair');
-                }}
-                title="Crosshair"
-                className={`p-1.5 rounded-lg cursor-pointer ${
-                  drawMode === 'crosshair'
-                    ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
-                    : 'text-slate-500'
-                }`}
-              >
-                <Crosshair className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingPoint(null);
-                  setDrawMode(drawMode === 'hline' ? 'crosshair' : 'hline');
-                  showToast('Click chart to place Horizontal Price Line', 'info');
-                }}
-                title="Horizontal Price Line"
-                className={`p-1.5 rounded-lg cursor-pointer ${
-                  drawMode === 'hline' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
-                }`}
-              >
-                <Minus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingPoint(null);
-                  setDrawMode(drawMode === 'trendline' ? 'crosshair' : 'trendline');
-                  showToast('Click 2 points on chart to draw Trendline', 'info');
-                }}
-                title="Trendline (2-Click)"
-                className={`p-1.5 rounded-lg cursor-pointer ${
-                  drawMode === 'trendline' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
-                }`}
-              >
-                <Slash className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingPoint(null);
-                  setDrawMode(drawMode === 'fib' ? 'crosshair' : 'fib');
-                  showToast('Click 2 swing prices for Fibonacci Retracement', 'info');
-                }}
-                title="Fib Retracement"
-                className={`px-1.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer ${
-                  drawMode === 'fib' ? 'bg-[#FF444F] text-white' : 'text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10'
-                }`}
-              >
-                Fib
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setPendingPoint(null);
-                  setDrawMode(drawMode === 'fibext' ? 'crosshair' : 'fibext');
-                  showToast('Click 2 swing prices for Fibonacci Extension', 'info');
-                }}
-                title="Fib Extension"
-                className={`px-1.5 py-1 rounded-lg text-[10px] font-bold cursor-pointer ${
-                  drawMode === 'fibext' ? 'bg-[#FF444F] text-white' : 'text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10'
-                }`}
-              >
-                Ext
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setAlertTargetPrice(currentPrice.toFixed(decimals));
-                  setAlertModalOpen(true);
-                }}
-                title="Create Price Alert"
-                className="p-1.5 rounded-lg text-slate-500 hover:text-[#FF444F] cursor-pointer"
-              >
-                <BellPlus className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleUndoDrawing}
-                title="Undo"
-                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10 cursor-pointer"
-              >
-                <Undo2 className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={handleRedoDrawing}
-                title="Redo"
-                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10 cursor-pointer"
-              >
-                <Redo2 className="w-3.5 h-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setDrawingsVisible(!drawingsVisible)}
-                title="Show/Hide Drawings"
-                className="p-1.5 rounded-lg text-slate-500 hover:bg-slate-200/60 dark:hover:bg-white/10 cursor-pointer"
-              >
-                {drawingsVisible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setHLines([]);
-                  setTrendLines([]);
-                  setFibs([]);
-                  setPendingPoint(null);
-                  persistDrawings([], [], []);
-                }}
-                title="Clear All"
-                className="p-1.5 rounded-lg text-slate-500 hover:text-[#FF444F] cursor-pointer"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
-            </div>
+            {/* Expandable Mobile Drawing Strip */}
+            {mobileDrawOpen && (
+              <div className="sm:hidden flex items-center gap-1 overflow-x-auto no-scrollbar pt-1 border-t border-slate-200/70 dark:border-[#2A2F3D]">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode('crosshair');
+                  }}
+                  className={`p-1.5 rounded-lg cursor-pointer shrink-0 ${
+                    drawMode === 'crosshair'
+                      ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]'
+                      : 'text-slate-500'
+                  }`}
+                >
+                  <Crosshair className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'hline' ? 'crosshair' : 'hline');
+                    showToast('Tap chart to place Horizontal Price Line', 'info');
+                  }}
+                  className={`p-1.5 rounded-lg cursor-pointer shrink-0 ${
+                    drawMode === 'hline' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  <Minus className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'trendline' ? 'crosshair' : 'trendline');
+                    showToast('Tap 2 points on chart to draw Trendline', 'info');
+                  }}
+                  className={`p-1.5 rounded-lg cursor-pointer shrink-0 ${
+                    drawMode === 'trendline' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  <Slash className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'fib' ? 'crosshair' : 'fib');
+                    showToast('Tap 2 swing prices for Fibonacci Retracement', 'info');
+                  }}
+                  className={`px-2 py-1 rounded-lg text-[10px] font-bold cursor-pointer shrink-0 ${
+                    drawMode === 'fib' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  Fib
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setPendingPoint(null);
+                    setDrawMode(drawMode === 'fibext' ? 'crosshair' : 'fibext');
+                    showToast('Tap 2 swing prices for Fibonacci Extension', 'info');
+                  }}
+                  className={`px-2 py-1 rounded-lg text-[10px] font-bold cursor-pointer shrink-0 ${
+                    drawMode === 'fibext' ? 'bg-[#FF444F] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  Ext
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAlertTargetPrice(currentPrice.toFixed(decimals));
+                    setAlertModalOpen(true);
+                  }}
+                  className="p-1.5 rounded-lg text-slate-500 cursor-pointer shrink-0"
+                >
+                  <BellPlus className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={handleUndoDrawing} className="p-1.5 rounded-lg text-slate-500 cursor-pointer shrink-0">
+                  <Undo2 className="w-3.5 h-3.5" />
+                </button>
+                <button type="button" onClick={handleRedoDrawing} className="p-1.5 rounded-lg text-slate-500 cursor-pointer shrink-0">
+                  <Redo2 className="w-3.5 h-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDrawingsVisible(!drawingsVisible)}
+                  className="p-1.5 rounded-lg text-slate-500 cursor-pointer shrink-0"
+                >
+                  {drawingsVisible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5" />}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHLines([]);
+                    setTrendLines([]);
+                    setFibs([]);
+                    setPendingPoint(null);
+                    persistDrawings([], [], []);
+                  }}
+                  className="p-1.5 rounded-lg text-slate-500 hover:text-[#FF444F] cursor-pointer shrink-0"
+                >
+                  <Trash2 className="w-3.5 h-3.5" />
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Truthful Candle / Feed Error Banner if Deriv Candles Unavailable or Market Off-Hours */}
@@ -1889,7 +2004,10 @@ export const MT5TradingView: React.FC = () => {
             </div>
           )}
 
-          <div ref={chartContainerRef} className={`w-full ${isFullscreen ? 'flex-1 min-h-[460px]' : 'h-[420px]'}`} />
+          <div
+            ref={chartContainerRef}
+            className={`w-full ${isFullscreen ? 'flex-1 min-h-[480px]' : 'h-[460px] sm:h-[520px] xl:h-[560px]'}`}
+          />
 
           {/* Oscillator / Volatility Telemetry Strip */}
           {latestIndReadout && (
@@ -2008,7 +2126,7 @@ export const MT5TradingView: React.FC = () => {
               </button>
             </div>
             <div className="grid grid-cols-5 gap-1 mt-2">
-              {[0.01, 0.05, 0.1, 0.5, 1.0].map((preset) => (
+              {[0.01, 0.02, 0.05, 0.1, 0.25].map((preset) => (
                 <button
                   key={preset}
                   type="button"
@@ -2171,8 +2289,8 @@ export const MT5TradingView: React.FC = () => {
                 <div className="flex gap-1">
                   {[
                     { label: '1:1', r: 1 },
-                    { label: '1:1.5', r: 1.5 },
                     { label: '1:2', r: 2 },
+                    { label: '1:3', r: 3 },
                   ].map((p) => (
                     <button
                       key={p.label}
@@ -2851,7 +2969,7 @@ export const MT5TradingView: React.FC = () => {
                   type="number"
                   step="any"
                   min="0"
-                  placeholder="e.g. 15"
+                  placeholder="e.g. 1"
                   value={editingLimitsOrder.slUsdStr}
                   onChange={(e) =>
                     setEditingLimitsOrder((prev) =>
@@ -2883,7 +3001,7 @@ export const MT5TradingView: React.FC = () => {
                   type="number"
                   step="any"
                   min="0"
-                  placeholder="e.g. 30"
+                  placeholder="e.g. 3"
                   value={editingLimitsOrder.tpUsdStr}
                   onChange={(e) =>
                     setEditingLimitsOrder((prev) =>
