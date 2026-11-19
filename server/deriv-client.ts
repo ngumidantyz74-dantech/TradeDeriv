@@ -33,12 +33,18 @@ type TickListener = (tick: TickData) => void;
 type UserEventListener = (userId: number, event: string, payload: unknown) => void;
 
 export function getActiveDerivAppId(): string {
+  const isValidAppId = (val: string) => /^[A-Za-z0-9_-]{2,64}$/.test(val);
   const globalSettings = getCachedSetting<{ derivAppId?: string }>('global', {});
-  const dbCandidate = String(globalSettings.derivAppId || '').trim();
-  if (/^[A-Za-z0-9_-]{2,64}$/.test(dbCandidate)) return dbCandidate;
-  const envCandidate = String(config.derivAppId || '').trim();
-  if (/^[A-Za-z0-9_-]{2,64}$/.test(envCandidate)) return envCandidate;
-  return '1089';
+  const commSettings = getCachedSetting<{ derivAppId?: string }>('commissions', {});
+  const candidates = [
+    String(globalSettings.derivAppId || '').trim(),
+    String(commSettings.derivAppId || '').trim(),
+    String(config.derivAppId || '').trim(),
+  ].filter(isValidAppId);
+
+  const nonDefault = candidates.find((c) => c !== '1089');
+  if (nonDefault) return nonDefault;
+  return candidates[0] || '1089';
 }
 
 export function getWsFeedAppId(): string {

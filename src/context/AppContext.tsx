@@ -256,9 +256,14 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   // Capture oauth_token in URL hash or query after Deriv OAuth2 redirect
   useEffect(() => {
-    const hash = window.location.hash;
-    if (hash.includes('oauth_token=')) {
-      const queryPart = hash.split('?')[1] || '';
+    const hash = window.location.hash || '';
+    const search = window.location.search || '';
+    const queryPart = hash.includes('oauth_token=')
+      ? hash.split('?')[1] || ''
+      : search.includes('oauth_token=')
+        ? search.replace(/^\?/, '')
+        : '';
+    if (queryPart) {
       const params = new URLSearchParams(queryPart);
       const oauthToken = params.get('oauth_token');
       const tab = params.get('tab') as NavTab | null;
@@ -397,9 +402,21 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           ? `/api/deriv/oauth-url?origin=${encodeURIComponent(origin)}`
           : `/api/deriv/oauth-url/public?prompt=${prompt}&origin=${encodeURIComponent(origin)}`;
         const { url } = await apiFetch<{ url: string }>(endpoint, { skipAuth: !token });
+        if (window.self === window.top) {
+          window.location.assign(url);
+          return;
+        }
+        try {
+          if (window.top) {
+            window.top.location.href = url;
+            return;
+          }
+        } catch {
+          // cross-origin iframe fallback to popup
+        }
         const popup = window.open(url, 'deriv_oauth', 'width=540,height=720');
         if (!popup) {
-          window.top ? (window.top.location.href = url) : (window.location.href = url);
+          window.location.assign(url);
         }
       } catch (err) {
         showToast(err instanceof Error ? err.message : 'Unable to launch Deriv OAuth2', 'error');

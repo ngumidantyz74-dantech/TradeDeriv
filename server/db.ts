@@ -559,33 +559,48 @@ async function runSchemaAndSeed(): Promise<void> {
       );
     }
 
-    // Populate in-memory settings cache & sanitize only malformed/whitespace derivAppIds (allow alphanumeric & numeric App IDs)
-    const fallbackAppId = /^[A-Za-z0-9_-]{2,64}$/.test(String(config.derivAppId || '').trim())
-      ? String(config.derivAppId).trim()
-      : '1089';
+    // Populate in-memory settings cache & auto-heal invalid or placeholder '1089' derivAppIds when a real App ID is configured
+    const isValidAppId = (v: unknown) =>
+      typeof v === 'string' && /^[A-Za-z0-9_-]{2,64}$/.test(v.trim());
 
     const cachedRows = await client.query<{ key: string; value_json: string }>(
       'SELECT key, value_json FROM application_settings'
     );
+    const parsedMap = new Map<string, any>();
     for (const row of cachedRows.rows) {
       try {
-        const parsed = JSON.parse(row.value_json);
-        if (
-          (row.key === 'global' || row.key === 'commissions') &&
-          parsed &&
-          typeof parsed.derivAppId === 'string' &&
-          !/^[A-Za-z0-9_-]{2,64}$/.test(parsed.derivAppId.trim())
-        ) {
-          parsed.derivAppId = fallbackAppId;
-          await client.query(
-            'UPDATE application_settings SET value_json = $1, updated_at = NOW() WHERE key = $2',
-            [JSON.stringify(parsed), row.key]
-          );
-        }
-        settingsCache.set(row.key, parsed);
+        parsedMap.set(row.key, JSON.parse(row.value_json));
       } catch {
         // ignore invalid JSON
       }
+    }
+
+    const envAppId = isValidAppId(config.derivAppId) ? String(config.derivAppId).trim() : '1089';
+    const globalAppId = isValidAppId(parsedMap.get('global')?.derivAppId)
+      ? String(parsedMap.get('global').derivAppId).trim()
+      : '';
+    const commAppId = isValidAppId(parsedMap.get('commissions')?.derivAppId)
+      ? String(parsedMap.get('commissions').derivAppId).trim()
+      : '';
+    const preferredAppId =
+      [commAppId, globalAppId, envAppId].find((id) => isValidAppId(id) && id !== '1089') ||
+      [commAppId, globalAppId, envAppId].find(isValidAppId) ||
+      '1089';
+
+    for (const [key, parsed] of parsedMap.entries()) {
+      if ((key === 'global' || key === 'commissions') && parsed && typeof parsed === 'object') {
+        const currentId = typeof parsed.derivAppId === 'string' ? parsed.derivAppId.trim() : '';
+        const shouldHeal =
+          !isValidAppId(currentId) || (currentId === '1089' && preferredAppId !== '1089');
+        if (shouldHeal) {
+          parsed.derivAppId = preferredAppId;
+          await client.query(
+            'UPDATE application_settings SET value_json = $1, updated_at = NOW() WHERE key = $2',
+            [JSON.stringify(parsed), key]
+          );
+        }
+      }
+      settingsCache.set(key, parsed);
     }
   } finally {
     client.release();

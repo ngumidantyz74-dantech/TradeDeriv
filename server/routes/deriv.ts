@@ -2,6 +2,8 @@ import { Router, type Request } from 'express';
 import jwt from 'jsonwebtoken';
 import { config, getDerivRedirectUri } from '../config.ts';
 import {
+  pool,
+  ensureDatabaseSchema,
   query,
   queryOne,
   execute,
@@ -47,12 +49,14 @@ function buildOAuth2PkceUrls(options: {
 }) {
   cleanupReplayGuard();
   const appId = getActiveDerivAppId();
-  const redirectUri = getDerivRedirectUri(options.req, options.origin);
+  const redirectUri = getDerivRedirectUri(options.req, options.origin).replace(/\/+$/, '');
   const codeVerifier = generateCodeVerifier();
   const codeChallenge = sha256Base64Url(codeVerifier);
   const jti = randomId(16);
 
-  const encVerifier = encryptToken(JSON.stringify({ codeVerifier, redirectUri, userId: options.userId || null }));
+  const encVerifier = encryptToken(
+    JSON.stringify({ codeVerifier, redirectUri, userId: options.userId || null, appId })
+  );
   const state = jwt.sign({ jti, payload: encVerifier }, config.jwtSecret, { expiresIn: '20m' });
 
   const params = new URLSearchParams({
@@ -70,8 +74,17 @@ function buildOAuth2PkceUrls(options: {
 
   const pkceUrl = `${config.derivOAuthUrl}?${params.toString()}`;
   const legacyUrl = `${config.derivLegacyOAuthUrl}?app_id=${encodeURIComponent(appId)}&l=EN&brand=deriv`;
+  // Numeric-only Deriv IDs (e.g. 1089) are WebSocket legacy App IDs and do not exist as Ory OAuth2 PKCE clients
+  const isLegacyNumericAppId = /^\d+$/.test(appId);
 
-  return { url: pkceUrl, legacyUrl, redirectUri, appId };
+  return {
+    url: isLegacyNumericAppId ? legacyUrl : pkceUrl,
+    pkceUrl,
+    legacyUrl,
+    redirectUri,
+    appId,
+    flow: isLegacyNumericAppId ? 'legacy_oauth' : 'oauth2_pkce',
+  };
 }
 
 /**
@@ -250,7 +263,14 @@ async function ensureUserFromDerivProfile(profile: {
   return { user: created, isNew: true, preserveExistingBalances: false };
 }
 
-router.get('/deriv/oauth-url/public', (req, res) => {
+router.get('/deriv/oauth-url/public', async (req, res) => {
+  if (pool) {
+    try {
+      await ensureDatabaseSchema();
+    } catch {
+      // fallback to env config if DB temporarily unavailable
+    }
+  }
   const prompt = req.query.prompt === 'registration' ? 'registration' : 'login';
   const origin = typeof req.query.origin === 'string' ? req.query.origin : undefined;
   const result = buildOAuth2PkceUrls({ req, prompt, origin });
@@ -345,15 +365,18 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
         preservedDbBalances: session.preserveExistingBalances,
       });
 
+      const nextUrl = `/#/?oauth_token=${encodeURIComponent(jwtToken)}&tab=home`;
       res.send(`
         <html><body style="font-family:sans-serif;padding:24px;background:#151820;color:#fff;">
           <p>Connected ${entries.length} Deriv account(s). Redirecting to TradeDeriv...</p>
           <script>
+            var nextUrl = ${JSON.stringify(nextUrl)};
             if (window.opener) {
-              window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*');
-              window.close();
+              try { window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*'); } catch (e) {}
+              try { window.close(); } catch (e) {}
+              setTimeout(function () { window.location.replace(nextUrl); }, 450);
             } else {
-              window.location.href = '/#/?oauth_token=' + encodeURIComponent(${JSON.stringify(jwtToken)}) + '&tab=home';
+              window.location.replace(nextUrl);
             }
           </script>
         </body></html>
@@ -381,9 +404,9 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
 
     const verifierJson = JSON.parse(
       decryptToken(decodedState.payload.encryptedToken, decodedState.payload.iv, decodedState.payload.authTag)
-    ) as { codeVerifier: string; redirectUri: string; userId: number | null };
+    ) as { codeVerifier: string; redirectUri: string; userId: number | null; appId?: string };
 
-    const appId = getActiveDerivAppId();
+    const appId = verifierJson.appId || getActiveDerivAppId();
     const baseTokenParams = {
       grant_type: 'authorization_code',
       client_id: appId,
@@ -542,15 +565,18 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       preservedDbBalances: session.preserveExistingBalances,
     });
 
+    const nextUrl = `/#/?oauth_token=${encodeURIComponent(jwtToken)}&tab=home`;
     res.send(`
       <html><body style="font-family:sans-serif;padding:24px;background:#151820;color:#fff;">
         <p>TradeDeriv connected! Redirecting...</p>
         <script>
+          var nextUrl = ${JSON.stringify(nextUrl)};
           if (window.opener) {
-            window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*');
-            window.close();
+            try { window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*'); } catch (e) {}
+            try { window.close(); } catch (e) {}
+            setTimeout(function () { window.location.replace(nextUrl); }, 450);
           } else {
-            window.location.href = '/#/?oauth_token=' + encodeURIComponent(${JSON.stringify(jwtToken)}) + '&tab=home';
+            window.location.replace(nextUrl);
           }
         </script>
       </body></html>

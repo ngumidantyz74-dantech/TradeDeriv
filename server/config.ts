@@ -23,15 +23,15 @@ export const config = {
   tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY || derivedFallbackSecret,
   adminPrivateSlug: (process.env.ADMIN_PRIVATE_SLUG || 'pf-ops-9482').replace(/^\/+/, ''),
 
-  derivAppId: process.env.DERIV_APP_ID || process.env.VITE_DERIV_APP_ID || '1089',
-  derivClientSecret: process.env.DERIV_CLIENT_SECRET || '',
-  derivOAuthUrl: process.env.DERIV_OAUTH_URL || 'https://auth.deriv.com/oauth2/auth',
+  derivAppId: (process.env.DERIV_APP_ID || process.env.VITE_DERIV_APP_ID || '1089').trim(),
+  derivClientSecret: (process.env.DERIV_CLIENT_SECRET || '').trim(),
+  derivOAuthUrl: (process.env.DERIV_OAUTH_URL || 'https://auth.deriv.com/oauth2/auth').trim(),
   derivLegacyOAuthUrl: 'https://oauth.deriv.com/oauth2/authorize',
   derivTokenUrl: 'https://auth.deriv.com/oauth2/token',
   derivApiBase: 'https://api.derivws.com',
-  derivOAuthRedirectUri: (process.env.DERIV_OAUTH_REDIRECT_URI || '').trim(),
-  derivOAuthScopes: process.env.DERIV_OAUTH_SCOPES || 'trade account_manage',
-  derivWsUrl: process.env.DERIV_WS_URL || 'wss://red.derivws.com/websockets/v3',
+  derivOAuthRedirectUri: (process.env.DERIV_OAUTH_REDIRECT_URI || '').trim().replace(/\/+$/, ''),
+  derivOAuthScopes: (process.env.DERIV_OAUTH_SCOPES || 'trade account_manage').trim(),
+  derivWsUrl: (process.env.DERIV_WS_URL || 'wss://red.derivws.com/websockets/v3').trim(),
   derivWsClusters: [
     'wss://red.derivws.com/websockets/v3',
     'wss://ws.derivws.com/websockets/v3',
@@ -66,10 +66,10 @@ export function resolvePublicOrigin(req?: Request): string {
 
 export function getDerivRedirectUri(req?: Request, explicitOrigin?: string): string {
   if (config.derivOAuthRedirectUri && !isLocalUrl(config.derivOAuthRedirectUri)) {
-    return config.derivOAuthRedirectUri;
+    return config.derivOAuthRedirectUri.replace(/\/+$/, '');
   }
   if (explicitOrigin && !isLocalUrl(explicitOrigin)) {
     return `${explicitOrigin.replace(/\/+$/, '')}/api/deriv/oauth/callback`;
   }
-  return `${resolvePublicOrigin(req)}/api/deriv/oauth/callback`;
+  return `${resolvePublicOrigin(req).replace(/\/+$/, '')}/api/deriv/oauth/callback`;
 }
