@@ -518,7 +518,7 @@ async function runSchemaAndSeed(): Promise<void> {
         {
           kesRate: 130.0,
           tickerText:
-            'BTC/USD +2.18% · Volatility 100 (1s) Live · XAU/USD $2,684.50 · Instant M-Pesa & Crypto Cashier · Zero-Delay Deriv Bot Engine Active',
+            'BTC/USD +2.18% · Volatility 100 (1s) Live · XAU/USD $3,735.00 · Instant M-Pesa & Crypto Cashier · Zero-Delay Deriv Bot Engine Active',
           maintenanceMode: false,
           allowRegistration: true,
           defaultVirtualBalance: 10000.0,
@@ -530,7 +530,7 @@ async function runSchemaAndSeed(): Promise<void> {
         'commissions',
         {
           derivAppId: config.derivAppId,
-          markupPercentage: 2.0,
+          markupPercentage: 3.0,
           affiliateLink: 'https://track.deriv.com/_tradederiv_ib/',
           affiliateTierRate: 30.0,
           hasOwnerToken: false,
@@ -559,8 +559,8 @@ async function runSchemaAndSeed(): Promise<void> {
       );
     }
 
-    // Populate in-memory settings cache & auto-sanitize any non-numeric derivAppId saved accidentally
-    const fallbackNumericAppId = /^\d+$/.test(String(config.derivAppId || '').trim())
+    // Populate in-memory settings cache & sanitize only malformed/whitespace derivAppIds (allow alphanumeric & numeric App IDs)
+    const fallbackAppId = /^[A-Za-z0-9_-]{2,64}$/.test(String(config.derivAppId || '').trim())
       ? String(config.derivAppId).trim()
       : '1089';
 
@@ -574,9 +574,9 @@ async function runSchemaAndSeed(): Promise<void> {
           (row.key === 'global' || row.key === 'commissions') &&
           parsed &&
           typeof parsed.derivAppId === 'string' &&
-          !/^\d+$/.test(parsed.derivAppId.trim())
+          !/^[A-Za-z0-9_-]{2,64}$/.test(parsed.derivAppId.trim())
         ) {
-          parsed.derivAppId = fallbackNumericAppId;
+          parsed.derivAppId = fallbackAppId;
           await client.query(
             'UPDATE application_settings SET value_json = $1, updated_at = NOW() WHERE key = $2',
             [JSON.stringify(parsed), row.key]

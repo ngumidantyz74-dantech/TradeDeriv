@@ -11,6 +11,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
 import { SparklineSvg } from '../components/SparklineSvg';
 
 const MOST_TRADED_CODES = ['1HZ100V', '1HZ75V', '1HZ10V', '1HZ25V', 'R_100'];
@@ -33,12 +34,7 @@ export const OptionsHub: React.FC = () => {
   const [tradeFilter, setTradeFilter] = useState<'Deriv Trader' | 'Deriv Bot' | 'SmartTrader'>('Deriv Trader');
   const [resetting, setResetting] = useState(false);
 
-  const realAcc = accounts.find((a) => !a.is_virtual && a.status === 'active');
-  const demoAcc = accounts.find((a) => Boolean(a.is_virtual) && a.status === 'active');
-  const totalValue =
-    accountMode === 'real'
-      ? Number(realAcc?.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? demoAcc?.balance ?? 10000);
+  const { optionsBal: totalValue } = getCanonicalBalances(user, accounts, accountMode, null);
 
   const handleResetBalance = async () => {
     if (accountMode !== 'demo') return;

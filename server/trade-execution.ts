@@ -45,8 +45,7 @@ export interface PlaceOrderInput {
 const recentOrderLocks = new Map<string, number>();
 
 function normalizeContractType(side: string, explicitType?: string): string {
-  if (explicitType) return explicitType.toUpperCase();
-  const s = side.toUpperCase();
+  const s = String(explicitType || side || '').toUpperCase().trim();
   if (s === 'BUY' || s === 'MULTUP') return 'MULTUP';
   if (s === 'SELL' || s === 'MULTDOWN') return 'MULTDOWN';
   if (['OVER', 'DIGITOVER'].includes(s)) return 'DIGITOVER';
@@ -57,7 +56,24 @@ function normalizeContractType(side: string, explicitType?: string): string {
   if (['DIFF', 'DIGITDIFF'].includes(s)) return 'DIGITDIFF';
   if (['RISE', 'CALL'].includes(s)) return 'CALL';
   if (['FALL', 'PUT'].includes(s)) return 'PUT';
-  return 'MULTUP';
+  return s || 'MULTUP';
+}
+
+function parseDerivDuration(raw?: string): { duration: number; unit: string } | null {
+  if (!raw) return null;
+  const m = String(raw).trim().match(/^(\d+)([tsmhd])$/i);
+  if (!m) return null;
+  return { duration: Number(m[1]), unit: m[2].toLowerCase() };
+}
+
+function durationToSeconds(duration: number, unit: string): number {
+  const u = unit.toLowerCase();
+  if (u === 't') return duration * 2;
+  if (u === 's') return duration;
+  if (u === 'm') return duration * 60;
+  if (u === 'h') return duration * 3600;
+  if (u === 'd') return duration * 86400;
+  return duration;
 }
 
 export async function getDecryptedAccountToken(
@@ -295,13 +311,25 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
           let effectiveType = contractType;
           let effectiveMult = multiplier;
+          let effectiveDuration = duration;
+          let effectiveDurationUnit = durationUnit;
 
-          if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
-            try {
-              const cfResp = await derivWs.request<{
-                contracts_for?: { available?: Array<{ contract_type: string; multiplier_range?: number[] }> };
-              }>({ contracts_for: input.symbol, currency: creds.account.currency }, 4500);
-              const multContract = cfResp?.contracts_for?.available?.find((c) => c.contract_type === effectiveType);
+          try {
+            const cfResp = await derivWs.request<{
+              contracts_for?: {
+                available?: Array<{
+                  contract_type: string;
+                  multiplier_range?: number[];
+                  min_contract_duration?: string;
+                  max_contract_duration?: string;
+                }>;
+              };
+            }>({ contracts_for: input.symbol, currency: creds.account.currency }, 4500);
+
+            const available = cfResp?.contracts_for?.available || [];
+
+            if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
+              const multContract = available.find((c) => c.contract_type === effectiveType);
               if (!multContract) {
                 effectiveType = effectiveType === 'MULTUP' ? 'CALL' : 'PUT';
               } else if (multContract.multiplier_range && multContract.multiplier_range.length > 0) {
@@ -311,8 +339,41 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
                   );
                 }
               }
-            } catch {
-              // proceed with requested parameters
+            }
+
+            if (effectiveType !== 'MULTUP' && effectiveType !== 'MULTDOWN') {
+              const matchingContracts = available.filter((c) => c.contract_type === effectiveType);
+              const chosenContract =
+                matchingContracts.find((c) => {
+                  const minD = parseDerivDuration(c.min_contract_duration);
+                  return minD && minD.unit === effectiveDurationUnit;
+                }) || matchingContracts[0];
+
+              if (chosenContract?.min_contract_duration) {
+                const minD = parseDerivDuration(chosenContract.min_contract_duration);
+                if (minD) {
+                  const reqSecs = durationToSeconds(effectiveDuration, effectiveDurationUnit);
+                  const minSecs = durationToSeconds(minD.duration, minD.unit);
+                  if (reqSecs < minSecs || (effectiveDurationUnit === 't' && minD.unit !== 't')) {
+                    effectiveDuration = minD.duration;
+                    effectiveDurationUnit = minD.unit;
+                  }
+                }
+              } else if (!input.symbol.startsWith('1HZ') && !input.symbol.startsWith('R_') && !input.symbol.startsWith('JD') && !input.symbol.startsWith('BOOM') && !input.symbol.startsWith('CRASH') && effectiveDurationUnit === 't') {
+                effectiveDuration = 15;
+                effectiveDurationUnit = 'm';
+              }
+            }
+          } catch {
+            if (
+              effectiveType !== 'MULTUP' &&
+              effectiveType !== 'MULTDOWN' &&
+              !input.symbol.startsWith('1HZ') &&
+              !input.symbol.startsWith('R_') &&
+              effectiveDurationUnit === 't'
+            ) {
+              effectiveDuration = 15;
+              effectiveDurationUnit = 'm';
             }
           }
 
@@ -332,8 +393,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
             if (Object.keys(limitOrder).length > 0) proposalPayload.limit_order = limitOrder;
           } else {
-            proposalPayload.duration = duration;
-            proposalPayload.duration_unit = durationUnit;
+            proposalPayload.duration = effectiveDuration;
+            proposalPayload.duration_unit = effectiveDurationUnit;
             if (input.barrier !== undefined && input.barrier !== null && input.barrier !== '') {
               proposalPayload.barrier = String(input.barrier);
             }
@@ -774,6 +835,7 @@ export async function bulkCloseOrders(
 }
 
 const mtmClosingLocks = new Set<number>();
+const lastOrderEmitAt = new Map<number, number>();
 
 export function startMtmPositionMonitor(): void {
   derivWs.onTick(async (tick) => {
@@ -797,6 +859,17 @@ export function startMtmPositionMonitor(): void {
           livePnl,
           order.id,
         ]);
+
+        const nowMs = Date.now();
+        const prevEmit = lastOrderEmitAt.get(order.id) || 0;
+        if (nowMs - prevEmit >= 450) {
+          lastOrderEmitAt.set(order.id, nowMs);
+          derivWs.emitUserEvent(order.user_id, 'order_updated', {
+            id: order.id,
+            current_price: tick.quote,
+            pnl: livePnl,
+          });
+        }
 
         const hitTpUsd = order.tp_usd && livePnl >= Number(order.tp_usd);
         const hitSlUsd = order.sl_usd && livePnl <= -Number(order.sl_usd);

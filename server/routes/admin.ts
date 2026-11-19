@@ -328,8 +328,8 @@ router.put('/admin/settings/global', requireDb, requireAdmin, async (req: AuthRe
   const payload = { ...(req.body || {}) };
   if (payload.derivAppId !== undefined) {
     const cleanId = String(payload.derivAppId).trim();
-    if (!/^\d+$/.test(cleanId)) {
-      res.status(400).json({ error: 'Deriv App ID must be numeric (digits only, e.g. 1089 or your numeric Deriv App ID).' });
+    if (!/^[A-Za-z0-9_-]{2,64}$/.test(cleanId)) {
+      res.status(400).json({ error: 'Deriv App ID must be 2-64 alphanumeric characters (e.g. 34ZNHHLmmHMEpuNcPbnzg or numeric ID).' });
       return;
     }
     payload.derivAppId = cleanId;
@@ -341,11 +341,15 @@ router.put('/admin/settings/global', requireDb, requireAdmin, async (req: AuthRe
   res.json({ global: updated });
 });
 
-// Deriv Commissions & App Markup
+// Deriv Commissions & App Markup — powered by real Deriv Partners REST GET /applications/v1/markup-statistics
 router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
   const dateFrom = String(req.query.date_from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
   const dateTo = String(req.query.date_to || new Date().toISOString().slice(0, 10));
   const commConfig = await getSetting<any>('commissions', {});
+  const activeAppIdStr = /^[A-Za-z0-9_-]{2,64}$/.test(String(commConfig.derivAppId || '').trim())
+    ? String(commConfig.derivAppId).trim()
+    : getActiveDerivAppId();
+
   const ownerAuth = await queryOne<any>(
     "SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE auth_type = 'owner_markup' AND revoked_at IS NULL ORDER BY id DESC LIMIT 1"
   );
@@ -354,61 +358,118 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
   let markupDetails: any[] = [];
   let appList: any[] = [];
   let liveError = '';
+  let restVerified = false;
+  let restAppMeta: any = null;
 
   if (ownerAuth) {
     try {
       const ownerToken = decryptToken(ownerAuth.encrypted_token, ownerAuth.token_iv, ownerAuth.token_auth_tag);
-      const [statsResp, detailsResp, appsResp] = await Promise.all([
-        derivWs.requestWithToken(ownerToken, { app_markup_statistics: 1, date_from: dateFrom, date_to: dateTo }, 6000),
-        derivWs.requestWithToken(ownerToken, { app_markup_details: 1, date_from: dateFrom, date_to: dateTo, limit: 50, sort: 'DESC' }, 6000),
-        derivWs.requestWithToken(ownerToken, { app_list: 1 }, 6000),
-      ]);
-      markupStatistics = statsResp?.app_markup_statistics || null;
-      markupDetails = detailsResp?.app_markup_details?.transactions || [];
-      appList = appsResp?.app_list || [];
-    } catch (err) {
-      liveError = err instanceof Error ? err.message : 'Unable to fetch live Deriv app markup';
+      const restResp = await derivRestRequest<{ data?: any }>(
+        `/applications/v1/markup-statistics?date_from=${encodeURIComponent(dateFrom)}&date_to=${encodeURIComponent(dateTo)}`,
+        ownerToken,
+        {
+          method: 'GET',
+          headers: {
+            'Deriv-App-ID': activeAppIdStr,
+          },
+        }
+      );
+
+      const data = restResp?.data || restResp || {};
+      restVerified = true;
+      markupStatistics = {
+        total_app_markup_usd: Number(data.total_app_markup_usd ?? data.total_markup_usd ?? data.app_markup_usd ?? 0),
+        total_volume_usd: Number(data.total_volume_usd ?? data.volume_usd ?? 0),
+        total_payout_usd: Number(data.total_payout_usd ?? 0),
+        total_transactions_count: Number(
+          data.total_contract_count ?? data.total_transactions_count ?? data.total_trades ?? 0
+        ),
+        total_client_count: Number(data.total_client_count ?? data.active_clients ?? 0),
+        breakdown: Array.isArray(data.breakdown)
+          ? data.breakdown
+          : Array.isArray(data.applications)
+            ? data.applications
+            : [],
+      };
+
+      if (Array.isArray(data.applications)) {
+        appList = data.applications;
+        restAppMeta =
+          data.applications.find((a: any) => String(a.app_id || a.id || '') === activeAppIdStr) ||
+          data.applications[0] ||
+          null;
+      }
+
+      if (Array.isArray(data.transactions)) {
+        markupDetails = data.transactions;
+      }
+    } catch (restErr) {
+      const restMsg = restErr instanceof Error ? restErr.message : 'Unable to fetch Deriv Partners REST markup statistics';
+      // Optional legacy WS fallback only when app_id is purely numeric
+      if (/^\d+$/.test(activeAppIdStr)) {
+        try {
+          const ownerToken = decryptToken(ownerAuth.encrypted_token, ownerAuth.token_iv, ownerAuth.token_auth_tag);
+          const [statsResp, detailsResp, appsResp] = await Promise.all([
+            derivWs.requestWithToken(ownerToken, { app_markup_statistics: 1, date_from: dateFrom, date_to: dateTo }, 6000),
+            derivWs.requestWithToken(ownerToken, { app_markup_details: 1, date_from: dateFrom, date_to: dateTo, limit: 50, sort: 'DESC' }, 6000),
+            derivWs.requestWithToken(ownerToken, { app_list: 1 }, 6000),
+          ]);
+          markupStatistics = statsResp?.app_markup_statistics || null;
+          markupDetails = detailsResp?.app_markup_details?.transactions || [];
+          appList = appsResp?.app_list || [];
+          restVerified = Boolean(markupStatistics);
+        } catch (wsErr) {
+          liveError = `${restMsg} | Legacy WS: ${wsErr instanceof Error ? wsErr.message : 'failed'}`;
+        }
+      } else {
+        liveError = restMsg;
+      }
     }
+  } else {
+    liveError = 'Owner Personal Access Token / OAuth token with application_read scope is not saved yet.';
   }
 
-  const activeAppId = Number(commConfig.derivAppId || getActiveDerivAppId());
-  const activeAppInfo = appList.find((a: any) => Number(a.app_id) === activeAppId) || null;
+  const activeAppInfo =
+    restAppMeta ||
+    appList.find((a: any) => String(a.app_id || a.id || '') === activeAppIdStr) ||
+    null;
 
   const localVol =
     (await queryOne<{ vol: number; cnt: number }>(
-      'SELECT COALESCE(SUM(stake), 0) as vol, COUNT(*)::int as cnt FROM virtual_orders'
+      "SELECT COALESCE(SUM(stake), 0) as vol, COUNT(*)::int as cnt FROM virtual_orders WHERE COALESCE(execution_mode, 'virtual') = 'deriv'"
     )) || { vol: 0, cnt: 0 };
-
-  const estimatedAffiliateUsd = Number(
-    ((Number(localVol.vol || 0) * Number(commConfig.markupPercentage || 2.0)) / 100).toFixed(2)
-  );
 
   res.json({
     config: {
-      derivAppId: /^\d+$/.test(String(commConfig.derivAppId || '').trim())
-        ? String(commConfig.derivAppId).trim()
-        : getActiveDerivAppId(),
-      markupPercentage: Number(commConfig.markupPercentage ?? 2.0),
+      derivAppId: activeAppIdStr,
+      markupPercentage: Number(commConfig.markupPercentage ?? 3.0),
       affiliateLink: commConfig.affiliateLink || 'https://track.deriv.com/_tradederiv_ib/',
       affiliateTierRate: Number(commConfig.affiliateTierRate ?? 30.0),
       hasOwnerToken: Boolean(ownerAuth),
     },
     diagnostics: {
-      domainVerified: Boolean(activeAppInfo?.redirect_uri),
-      markupConfigured: activeAppInfo ? Number(activeAppInfo.app_markup_percentage || 0) > 0 : Number(commConfig.markupPercentage || 0) > 0,
-      appMarkupPctOnDeriv: activeAppInfo ? Number(activeAppInfo.app_markup_percentage || 0) : null,
+      ownerTokenConfigured: Boolean(ownerAuth),
+      restVerified,
+      domainVerified: Boolean(restVerified || activeAppInfo?.redirect_uri),
+      markupConfigured: activeAppInfo
+        ? Number(activeAppInfo.app_markup_percentage ?? activeAppInfo.markup_percentage ?? 0) > 0
+        : Number(commConfig.markupPercentage || 0) > 0,
+      appMarkupPctOnDeriv: activeAppInfo
+        ? Number(activeAppInfo.app_markup_percentage ?? activeAppInfo.markup_percentage ?? 0)
+        : null,
       liveError,
     },
     markupStatistics: markupStatistics || {
       total_app_markup_usd: 0,
+      total_volume_usd: 0,
       total_transactions_count: 0,
+      total_client_count: 0,
       breakdown: [],
     },
     markupDetails,
     appList,
-    estimatedAffiliateUsd,
-    localVolumeUsd: Number(localVol.vol || 0),
-    localTradeCount: Number(localVol.cnt || 0),
+    localDerivVolumeUsd: Number(localVol.vol || 0),
+    localDerivTradeCount: Number(localVol.cnt || 0),
     dateFrom,
     dateTo,
   });
@@ -417,9 +478,9 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
 router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const { derivAppId, markupPercentage, affiliateLink, affiliateTierRate, ownerAdminToken } = req.body || {};
   if (derivAppId !== undefined && String(derivAppId).trim() !== '') {
-    if (!/^\d+$/.test(String(derivAppId).trim())) {
+    if (!/^[A-Za-z0-9_-]{2,64}$/.test(String(derivAppId).trim())) {
       res.status(400).json({
-        error: 'Deriv App ID must be a numeric ID (digits only, e.g. 1089 or your numeric Deriv App ID), never an OAuth secret or token.',
+        error: 'Deriv App ID must be 2-64 alphanumeric characters (e.g. 34ZNHHLmmHMEpuNcPbnzg or numeric ID), never a token with spaces.',
       });
       return;
     }
@@ -431,7 +492,7 @@ router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: Aut
     ...(markupPercentage !== undefined ? { markupPercentage: Number(markupPercentage) } : {}),
     ...(affiliateLink !== undefined ? { affiliateLink: String(affiliateLink).trim() } : {}),
     ...(affiliateTierRate !== undefined ? { affiliateTierRate: Number(affiliateTierRate) } : {}),
-    hasOwnerToken: Boolean(ownerAdminToken || current.hasOwnerToken),
+    hasOwnerToken: Boolean((ownerAdminToken && String(ownerAdminToken).trim().length > 5) || current.hasOwnerToken),
   };
   await setSetting('commissions', updated);
 
@@ -445,7 +506,7 @@ router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: Aut
     await execute("UPDATE account_authorizations SET revoked_at = NOW() WHERE auth_type = 'owner_markup'");
     await execute(
       `INSERT INTO account_authorizations (user_id, auth_type, encrypted_token, token_iv, token_auth_tag, scopes)
-       VALUES ($1, 'owner_markup', $2, $3, $4, 'read admin')`,
+       VALUES ($1, 'owner_markup', $2, $3, $4, 'application_read read admin')`,
       [req.user!.id, enc.encryptedToken, enc.iv, enc.authTag]
     );
   }
@@ -582,7 +643,14 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, async (re
     [rw.options, id]
   );
 
-  derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: rw });
+  const syncedAccounts = await query<any>(
+    "SELECT id FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv'",
+    [id]
+  );
+  for (const acc of syncedAccounts) {
+    derivWs.emitUserEvent(id, 'account_updated', { accountId: acc.id, balance: rw.options });
+  }
+  derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: rw, realWallets: rw });
   await logAdminAction(req.user!.id, 'update_real_balance', 'users', String(id), { balance: rw.options });
   res.json({ ok: true, real_wallets: rw });
 });
@@ -682,13 +750,38 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, a
     return;
   }
 
-  // Keep user's virtual_workspace_balance in sync if this is a virtual/demo account
+  // Keep user's virtual_workspace_balance OR real_wallets_json in sync when Admin edits a connected account
   if (account.is_virtual) {
     await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
       balance,
       account.user_id,
     ]);
     derivWs.emitUserEvent(account.user_id, 'balance_updated', { virtual_workspace_balance: balance });
+  } else {
+    const uRow = await queryOne<{ real_wallets_json: string }>(
+      'SELECT real_wallets_json FROM users WHERE id = $1',
+      [account.user_id]
+    );
+    const rw = (() => {
+      try {
+        return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(uRow?.real_wallets_json || '{}') };
+      } catch {
+        return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      }
+    })();
+    const accTypeLow = `${account.account_type || ''} ${account.platform || ''}`.toLowerCase();
+    if (accTypeLow.includes('gold')) {
+      rw.mt5_gold = Number(balance.toFixed(2));
+    } else if (accTypeLow.includes('mt5') || accTypeLow.includes('cfd') || accTypeLow.includes('standard')) {
+      rw.mt5_standard = Number(balance.toFixed(2));
+    } else {
+      rw.options = Number(balance.toFixed(2));
+    }
+    await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+      JSON.stringify(rw),
+      account.user_id,
+    ]);
+    derivWs.emitUserEvent(account.user_id, 'balance_updated', { real_wallets: rw, realWallets: rw });
   }
 
   derivWs.emitUserEvent(account.user_id, 'account_updated', { accountId: account.id, balance });

@@ -43,6 +43,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { apiFetch } from '../../lib/api';
+import { getCanonicalBalances } from '../../lib/balances';
 import { computeAllIndicators, STRATEGY_CATALOG } from '../../lib/quant-engine';
 import type { CandleData, MarketInstrument, WorkspacePreferences } from '../../types';
 
@@ -123,6 +124,7 @@ function toSeriesPoints(candles: CandleData[], arr: Array<number | null>) {
 export const MT5TradingView: React.FC = () => {
   const {
     user,
+    accounts,
     accountMode,
     activeConnectedAccount,
     selectedSymbol,
@@ -282,11 +284,22 @@ export const MT5TradingView: React.FC = () => {
   );
 
   const liveTick = ticks[selectedSymbol];
-  const currentPrice = liveTick?.quote ?? activeInst?.price ?? 1000;
-  const currentBid = liveTick?.bid ?? activeInst?.bid ?? currentPrice;
-  const currentAsk = liveTick?.ask ?? activeInst?.ask ?? currentPrice;
+  const hasLiveWsTick = liveTick?.source === 'deriv_ws';
+  const lastCandleClose = candles.length > 0 ? candles[candles.length - 1].close : undefined;
+  const currentPrice = hasLiveWsTick ? liveTick.quote : (lastCandleClose ?? liveTick?.quote ?? activeInst?.price ?? 1000);
+  const spreadVal = activeInst?.spread ?? 0.2;
   const pipSize = liveTick?.pipSize ?? activeInst?.pip_size ?? 0.01;
   const decimals = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : 2;
+  const currentBid = hasLiveWsTick
+    ? liveTick.bid
+    : lastCandleClose !== undefined
+      ? Number((lastCandleClose - spreadVal / 2).toFixed(decimals))
+      : (activeInst?.bid ?? currentPrice);
+  const currentAsk = hasLiveWsTick
+    ? liveTick.ask
+    : lastCandleClose !== undefined
+      ? Number((lastCandleClose + spreadVal / 2).toFixed(decimals))
+      : (activeInst?.ask ?? currentPrice);
   const chartMode: ChartMode = indPrefs.chartMode || 'candles';
 
   // Fetch candles
@@ -313,7 +326,10 @@ export const MT5TradingView: React.FC = () => {
 
   useEffect(() => {
     loadCandles();
-  }, [loadCandles]);
+    const intervalMs = timeframe <= 60 ? 4000 : 12000;
+    const timer = setInterval(loadCandles, intervalMs);
+    return () => clearInterval(timer);
+  }, [loadCandles, timeframe]);
 
   // Fetch SMC analysis when enabled
   useEffect(() => {
@@ -578,9 +594,9 @@ export const MT5TradingView: React.FC = () => {
     );
   }, [candles, chartMode, computedIndicators, indPrefs]);
 
-  // Live Last Candle Tick Update
+  // Live Last Candle Tick Update — only apply authentic deriv_ws ticks to prevent seed-price spikes
   useEffect(() => {
-    if (!liveTick || !mainSeriesRef.current || candles.length === 0) return;
+    if (!liveTick || liveTick.source !== 'deriv_ws' || !mainSeriesRef.current || candles.length === 0) return;
     const last = candles[candles.length - 1];
     const bucket = Math.floor(liveTick.epoch / Math.max(1, timeframe)) * Math.max(1, timeframe);
     try {
@@ -934,7 +950,9 @@ export const MT5TradingView: React.FC = () => {
           count: bulkCount,
           symbol: selectedSymbol,
           side: sideInput,
-          contractType: contractTypeOverride || (tradeMode === 'MT5 Market' ? 'MULTUP' : undefined),
+          contractType:
+            contractTypeOverride ||
+            (tradeMode === 'MT5 Market' ? (normalizedSide === 'BUY' ? 'MULTUP' : 'MULTDOWN') : undefined),
           lots,
           stake: stakeUsd,
           multiplier,
@@ -1078,11 +1096,28 @@ export const MT5TradingView: React.FC = () => {
     });
   }, [instruments, showWatchlistOnly, watchlist, catFilter, mwSearch]);
 
-  const openOrders = orders.filter(
-    (o) =>
-      o.status === 'OPEN' &&
-      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
-  );
+  const openOrders = useMemo(() => {
+    return orders
+      .filter(
+        (o) =>
+          o.status === 'OPEN' &&
+          (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+      )
+      .map((o) => {
+        const symTick = ticks[o.symbol];
+        const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
+        if (symTick && symTick.source === 'deriv_ws' && isMult && Number(o.entry_price) > 0) {
+          const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
+          const pctDiff = (symTick.quote - Number(o.entry_price)) / Number(o.entry_price);
+          const directional = isUp ? pctDiff : -pctDiff;
+          const livePnl = Number(
+            Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100)).toFixed(2)
+          );
+          return { ...o, current_price: symTick.quote, pnl: livePnl };
+        }
+        return o;
+      });
+  }, [orders, accountMode, ticks]);
   const closedOrders = orders.filter((o) => o.status === 'CLOSED');
   const filteredClosedOrders = useMemo(() => {
     return closedOrders.filter((o) => {
@@ -1104,10 +1139,11 @@ export const MT5TradingView: React.FC = () => {
 
   const floatingPnl = openOrders.reduce((acc, o) => acc + Number(o.pnl || 0), 0);
   const usedMargin = openOrders.reduce((acc, o) => acc + Number(o.stake || 0), 0);
-  const balance =
-    accountMode === 'real'
-      ? Number(activeConnectedAccount?.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? 10000);
+  const canonicalBalances = useMemo(
+    () => getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount),
+    [user, accounts, accountMode, activeConnectedAccount]
+  );
+  const balance = canonicalBalances.activeTradingBalance;
   const equity = balance + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);
 

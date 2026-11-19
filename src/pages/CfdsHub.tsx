@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { RefreshCw, CandlestickChart, X, Check } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
 
 export const CfdsHub: React.FC = () => {
   const {
@@ -24,18 +25,11 @@ export const CfdsHub: React.FC = () => {
       (a.platform?.includes('mt5') || a.platform === 'ctrader') &&
       (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
   );
-  const stdWalletBal =
-    accountMode === 'real'
-      ? Number(user?.real_wallets?.mt5_standard ?? 0)
-      : Number(user?.demo_wallets?.mt5_standard ?? 0);
-  const goldWalletBal =
-    accountMode === 'real'
-      ? Number(user?.real_wallets?.mt5_gold ?? 0)
-      : Number(user?.demo_wallets?.mt5_gold ?? 0);
-  const totalValue =
-    cfdAccounts.length > 0
-      ? cfdAccounts.reduce((acc, a) => acc + Number(a.balance || 0), 0)
-      : stdWalletBal + goldWalletBal;
+  const {
+    mt5StdBal: stdWalletBal,
+    mt5GoldBal: goldWalletBal,
+    cfdsTotalBal: totalValue,
+  } = getCanonicalBalances(user, accounts, accountMode, null);
 
   const handleRefresh = async () => {
     setRefreshing(true);

@@ -17,6 +17,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
 import type { CashierTransaction } from '../types';
 
 type SubTab = 'overview' | 'wallet' | 'partners' | 'trading' | 'p2p';
@@ -93,40 +94,13 @@ export const PortfolioHub: React.FC = () => {
     loadPortfolioData();
   }, [loadPortfolioData]);
 
-  const realAcc = accounts.find((a) => !a.is_virtual && a.status === 'active');
-  const demoAcc = accounts.find((a) => Boolean(a.is_virtual) && a.status === 'active');
-  const mt5StdAcc = accounts.find(
-    (a) =>
-      a.platform?.includes('mt5') &&
-      !String(a.account_type || '').toLowerCase().includes('gold') &&
-      (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
-  );
-  const mt5GoldAcc = accounts.find(
-    (a) =>
-      a.platform?.includes('mt5') &&
-      String(a.account_type || '').toLowerCase().includes('gold') &&
-      (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
-  );
-
-  const optionsBal =
-    accountMode === 'real'
-      ? Number(realAcc?.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? demoAcc?.balance ?? 10000);
-  const mt5StdBal =
-    accountMode === 'real'
-      ? Number(mt5StdAcc?.balance ?? user?.real_wallets?.mt5_standard ?? 0)
-      : Number(mt5StdAcc?.balance ?? user?.demo_wallets?.mt5_standard ?? 0);
-  const mt5GoldBal =
-    accountMode === 'real'
-      ? Number(mt5GoldAcc?.balance ?? user?.real_wallets?.mt5_gold ?? 0)
-      : Number(mt5GoldAcc?.balance ?? user?.demo_wallets?.mt5_gold ?? 0);
-  const exchangeUsdt =
-    accountMode === 'real'
-      ? Number(user?.real_exchange_balances?.USDT ?? user?.real_wallets?.exchange_usdt ?? 0)
-      : Number(user?.exchange_balances?.USDT ?? user?.demo_wallets?.exchange_usdt ?? 0);
-
-  // Strict Real vs Demo total (never combine Real + Demo)
-  const totalWalletUsd = optionsBal + mt5StdBal + mt5GoldBal + exchangeUsdt;
+  const {
+    optionsBal,
+    mt5StdBal,
+    mt5GoldBal,
+    exchangeUsdt,
+    totalPortfolioUsd: totalWalletUsd,
+  } = getCanonicalBalances(user, accounts, accountMode, null);
 
   const handleRefresh = async () => {
     setRefreshing(true);
@@ -328,22 +302,21 @@ export const PortfolioHub: React.FC = () => {
           </button>
         </div>
 
-        {/* 3 Circular Actions (+ Deposit, Transfer, - Withdraw) */}
+        {/* 3 Circular Actions (+ Deposit -> Deriv Cashier, Transfer -> Internal Wallets, - Withdraw -> Deriv Cashier) */}
         <div className="flex items-center justify-around sm:justify-start sm:gap-12 mt-7">
-          <button
-            type="button"
-            onClick={() => {
-              setCurrency('USD');
-              setMethod('M-Pesa / Mobile Money');
-              setModal('deposit');
-            }}
+          <a
+            href="https://app.deriv.com/cashier/deposit"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex flex-col items-center gap-2 cursor-pointer group"
           >
             <span className="w-12 h-12 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] text-white flex items-center justify-center transition-colors">
               <Plus className="w-5 h-5" />
             </span>
-            <span className="text-xs font-medium text-slate-200">Deposit</span>
-          </button>
+            <span className="text-xs font-medium text-slate-200 flex items-center gap-1">
+              Deposit <ExternalLink className="w-3 h-3 opacity-70" />
+            </span>
+          </a>
 
           <button
             type="button"
@@ -356,19 +329,19 @@ export const PortfolioHub: React.FC = () => {
             <span className="text-xs font-medium text-slate-200">Transfer</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setMethod('Bank / E-Wallet');
-              setModal('withdraw');
-            }}
+          <a
+            href="https://app.deriv.com/cashier/withdrawal"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex flex-col items-center gap-2 cursor-pointer group"
           >
             <span className="w-12 h-12 rounded-full border border-white/25 group-hover:bg-white/10 text-white flex items-center justify-center transition-colors">
               <Minus className="w-5 h-5" />
             </span>
-            <span className="text-xs font-medium text-slate-200">Withdraw</span>
-          </button>
+            <span className="text-xs font-medium text-slate-200 flex items-center gap-1">
+              Withdraw <ExternalLink className="w-3 h-3 opacity-70" />
+            </span>
+          </a>
         </div>
       </section>
 
@@ -379,26 +352,23 @@ export const PortfolioHub: React.FC = () => {
             <section>
               <h2 className="font-display text-lg font-bold mb-3.5">Other payment methods</h2>
               <div className="space-y-3">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCurrency('USD');
-                    setMethod('Bank, Card & E-Wallet');
-                    setModal('deposit');
-                  }}
+                <a
+                  href="https://app.deriv.com/cashier/deposit"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="w-full text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 flex items-center gap-4 transition-colors cursor-pointer"
                 >
                   <div className="w-10 h-10 rounded-full bg-white dark:bg-[#1A1D26] border border-slate-200 dark:border-[#2A2F3D] flex items-center justify-center shrink-0">
                     <DollarSign className="w-5 h-5 text-slate-700 dark:text-slate-200" />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-bold">USD</p>
+                    <p className="text-sm font-bold">USD (Deriv Cashier)</p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Fund via bank, card, e-wallet, and crypto.
+                      Fund via bank, card, e-wallet, and crypto directly on Deriv.
                     </p>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-slate-400" />
-                </button>
+                  <ExternalLink className="w-4 h-4 text-slate-400" />
+                </a>
 
                 <button
                   type="button"
@@ -434,26 +404,23 @@ export const PortfolioHub: React.FC = () => {
                   <ChevronRight className="w-4 h-4 text-slate-400" />
                 </button>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    setCurrency('USDT');
-                    setMethod('USDT TRC20 / USDC');
-                    setModal('deposit');
-                  }}
+                <a
+                  href="https://app.deriv.com/cashier/deposit"
+                  target="_blank"
+                  rel="noopener noreferrer"
                   className="w-full text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 flex items-center gap-4 transition-colors cursor-pointer"
                 >
                   <div className="w-10 h-10 rounded-full bg-white dark:bg-[#1A1D26] border border-slate-200 dark:border-[#2A2F3D] flex items-center justify-center shrink-0">
                     <Bitcoin className="w-5 h-5 text-slate-700 dark:text-slate-200" />
                   </div>
                   <div className="flex-1">
-                    <p className="text-sm font-bold">Crypto</p>
+                    <p className="text-sm font-bold">Crypto (Deriv Cashier)</p>
                     <p className="text-xs text-slate-500 dark:text-slate-400">
-                      Quickly fund your account with USDT, USDC, and more.
+                      Quickly fund your account with USDT, USDC, and more on Deriv.
                     </p>
                   </div>
-                  <ChevronRight className="w-4 h-4 text-slate-400" />
-                </button>
+                  <ExternalLink className="w-4 h-4 text-slate-400" />
+                </a>
               </div>
             </section>
           </>

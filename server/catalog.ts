@@ -77,7 +77,7 @@ export const CURATED_DERIV_INSTRUMENTS: SeedInstrument[] = [
   { symbol: 'cryTRXUSD', display_name: 'TRX/USD', category: 'Crypto', market: 'cryptocurrency', submarket: 'non_stable_coin', pip_size: 0.0001, base_price: 0.3095, spread: 0.0005 },
 
   // Metals & Commodities — Gold/Oil first
-  { symbol: 'frxXAUUSD', display_name: 'Gold / USD (XAU/USD)', category: 'Metals/Cmd', market: 'commodities', submarket: 'metals', pip_size: 0.01, base_price: 2684.50, spread: 0.28 },
+  { symbol: 'frxXAUUSD', display_name: 'Gold / USD (XAU/USD)', category: 'Metals/Cmd', market: 'commodities', submarket: 'metals', pip_size: 0.01, base_price: 3735.00, spread: 0.28 },
   { symbol: 'frxXAGUSD', display_name: 'Silver / USD (XAG/USD)', category: 'Metals/Cmd', market: 'commodities', submarket: 'metals', pip_size: 0.001, base_price: 31.420, spread: 0.024 },
   { symbol: 'USOUSD', display_name: 'WTI Crude Oil (US Oil)', category: 'Metals/Cmd', market: 'commodities', submarket: 'energy', pip_size: 0.01, base_price: 71.85, spread: 0.04 },
   { symbol: 'UKOUSD', display_name: 'Brent Crude Oil (UK Oil)', category: 'Metals/Cmd', market: 'commodities', submarket: 'energy', pip_size: 0.01, base_price: 75.40, spread: 0.04 },

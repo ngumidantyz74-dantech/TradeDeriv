@@ -35,9 +35,17 @@ type UserEventListener = (userId: number, event: string, payload: unknown) => vo
 export function getActiveDerivAppId(): string {
   const globalSettings = getCachedSetting<{ derivAppId?: string }>('global', {});
   const dbCandidate = String(globalSettings.derivAppId || '').trim();
-  if (/^\d+$/.test(dbCandidate)) return dbCandidate;
+  if (/^[A-Za-z0-9_-]{2,64}$/.test(dbCandidate)) return dbCandidate;
   const envCandidate = String(config.derivAppId || '').trim();
-  if (/^\d+$/.test(envCandidate)) return envCandidate;
+  if (/^[A-Za-z0-9_-]{2,64}$/.test(envCandidate)) return envCandidate;
+  return '1089';
+}
+
+export function getWsFeedAppId(): string {
+  const active = getActiveDerivAppId();
+  if (/^\d+$/.test(active)) return active;
+  const envWs = String(process.env.DERIV_WS_APP_ID || '').trim();
+  if (/^\d+$/.test(envWs)) return envWs;
   return '1089';
 }
 
@@ -228,7 +236,7 @@ export class DerivWebSocketClient {
       return this.connectingPromise;
     }
 
-    const appId = getActiveDerivAppId();
+    const appId = getWsFeedAppId();
     const endpoints = this.lastWorkingEndpoint
       ? [this.lastWorkingEndpoint, ...config.derivWsClusters.filter((e) => e !== this.lastWorkingEndpoint)]
       : config.derivWsClusters;
@@ -358,7 +366,7 @@ export class DerivWebSocketClient {
     payload: Record<string, unknown>,
     timeoutMs = 10000
   ): Promise<T> {
-    const appId = getActiveDerivAppId();
+    const appId = getWsFeedAppId();
     const base = this.lastWorkingEndpoint || config.derivWsUrl;
     const url = `${base}?app_id=${encodeURIComponent(appId)}&l=EN&brand=deriv`;
 
@@ -466,6 +474,23 @@ export class DerivWebSocketClient {
           low: Number(c.low),
           close: Number(c.close),
         }));
+        const lastCandle = candles[candles.length - 1];
+        const existingTick = this.latestTicks.get(symbol);
+        if (lastCandle && (!existingTick || existingTick.source === 'cached')) {
+          const instMeta = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+          const spread = instMeta?.spread ?? 0.2;
+          const pip = instMeta?.pip_size ?? existingTick?.pipSize ?? 0.01;
+          const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : 2;
+          this.latestTicks.set(symbol, {
+            symbol,
+            quote: lastCandle.close,
+            bid: Number((lastCandle.close - spread / 2).toFixed(dec)),
+            ask: Number((lastCandle.close + spread / 2).toFixed(dec)),
+            epoch: lastCandle.time,
+            pipSize: pip,
+            source: 'cached',
+          });
+        }
         return {
           candles,
           source: 'deriv_ws',
@@ -498,7 +523,6 @@ export class DerivWebSocketClient {
       {
         contracts_for: symbol,
         currency,
-        product_type: 'basic',
       },
       6000
     );
@@ -573,7 +597,7 @@ export class OtpDerivClient {
 export async function derivRestRequest<T = any>(
   path: string,
   token: string,
-  options: { method?: string; body?: Record<string, unknown> } = {}
+  options: { method?: string; body?: Record<string, unknown>; headers?: Record<string, string> } = {}
 ): Promise<T> {
   const url = `${config.derivApiBase}${path}`;
   const resp = await fetch(url, {
@@ -582,13 +606,21 @@ export async function derivRestRequest<T = any>(
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      ...(options.headers || {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
   if (!resp.ok) {
     const text = await resp.text();
-    throw new Error(`Deriv REST ${path} (${resp.status}): ${text.slice(0, 200)}`);
+    let detail = text.slice(0, 240);
+    try {
+      const parsed = JSON.parse(text);
+      detail = parsed?.errors?.[0]?.message || parsed?.error?.message || parsed?.message || detail;
+    } catch {
+      // keep raw snippet
+    }
+    throw new Error(`Deriv REST ${path} (${resp.status}): ${detail}`);
   }
   return (await resp.json()) as T;
 }

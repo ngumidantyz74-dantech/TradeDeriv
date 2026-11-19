@@ -21,15 +21,14 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
+import { LightweightEquityChart } from '../components/LightweightEquityChart';
 import type { JournalEntry, SmartAlert } from '../types';
 
 // 1. Risk Management Centre (Calculator + Server Guardrails)
 export const RiskCalculatorPage: React.FC = () => {
-  const { user, accountMode, activeConnectedAccount, kesRate, showToast } = useApp();
-  const modeCapital =
-    accountMode === 'real'
-      ? Number(activeConnectedAccount?.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? 1000);
+  const { user, accounts, accountMode, activeConnectedAccount, kesRate, showToast } = useApp();
+  const modeCapital = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount).activeTradingBalance;
   const [capital, setCapital] = useState(String(modeCapital));
   const [riskPct, setRiskPct] = useState('2');
   const [martingale, setMartingale] = useState('2');
@@ -479,7 +478,7 @@ export const CopyTradingPage: React.FC = () => {
 
 // 3. Reports, Performance Analytics Split, Trading Journal & Smart Alerts
 export const ReportsPage: React.FC = () => {
-  const { orders, accounts, instruments, selectedSymbol, showToast } = useApp();
+  const { orders, accounts, instruments, selectedSymbol, showToast, theme, accountMode } = useApp();
   const [subTab, setSubTab] = useState<'performance' | 'journal' | 'alerts' | 'ledger'>('performance');
   const [selectedAccId, setSelectedAccId] = useState<string>(accounts[0]?.id ? String(accounts[0].id) : '');
   const [statementRows, setStatementRows] = useState<any[]>([]);
@@ -749,6 +748,19 @@ export const ReportsPage: React.FC = () => {
                     </div>
                   </div>
                 ))}
+              </div>
+
+              {/* Lightweight Charts Cumulative Equity / P/L Progress */}
+              <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <h2 className="font-display text-sm font-bold">
+                    Cumulative Equity Progress ({accountMode === 'real' ? 'Real Account' : 'Demo Workspace'})
+                  </h2>
+                  <span className="text-[11px] font-mono tabular-nums text-slate-400">
+                    TradingView Lightweight Charts
+                  </span>
+                </div>
+                <LightweightEquityChart orders={orders} theme={theme} accountMode={accountMode} />
               </div>
 
               {/* Daily P/L SVG Bar Chart */}

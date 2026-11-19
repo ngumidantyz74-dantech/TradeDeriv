@@ -331,19 +331,38 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                     msg.data.virtual_workspace_balance !== undefined
                       ? Number(msg.data.virtual_workspace_balance)
                       : prev.virtual_workspace_balance,
-                  real_wallets: msg.data.real_wallets ?? prev.real_wallets,
-                  demo_wallets: msg.data.demo_wallets ?? prev.demo_wallets,
+                  real_wallets: msg.data.real_wallets ?? msg.data.realWallets ?? prev.real_wallets,
+                  demo_wallets: msg.data.demo_wallets ?? msg.data.demoWallets ?? prev.demo_wallets,
                   exchange_balances: msg.data.exchange_balances ?? prev.exchange_balances,
                   real_exchange_balances: msg.data.real_exchange_balances ?? prev.real_exchange_balances,
                 }
               : prev
           );
+          refreshAccounts(false);
         } else if (msg.type === 'order_opened' && msg.data) {
           setOrders((prev) => [msg.data, ...prev.filter((o) => o.id !== msg.data.id)]);
+        } else if (msg.type === 'order_updated' && msg.data) {
+          setOrders((prev) =>
+            prev.map((o) =>
+              o.id === msg.data.id
+                ? {
+                    ...o,
+                    current_price:
+                      msg.data.current_price !== undefined ? Number(msg.data.current_price) : o.current_price,
+                    pnl: msg.data.pnl !== undefined ? Number(msg.data.pnl) : o.pnl,
+                  }
+                : o
+            )
+          );
         } else if (msg.type === 'order_closed' && msg.data) {
           setOrders((prev) => prev.map((o) => (o.id === msg.data.id ? msg.data : o)));
         } else if (msg.type === 'account_updated') {
           refreshAccounts(false);
+          apiFetch<{ user: UserProfile }>('/api/auth/me')
+            .then((me) => {
+              if (me?.user) setUser(me.user);
+            })
+            .catch(() => {});
         } else if (msg.type === 'alert_triggered' && msg.data) {
           showToast(`Alert: ${msg.data.symbol} @ ${msg.data.triggerPrice}`, 'info');
           apiFetch<{ notifications: NotificationItem[] }>('/api/notifications')

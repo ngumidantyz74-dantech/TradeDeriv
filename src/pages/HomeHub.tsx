@@ -21,6 +21,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
 
 export const HomeHub: React.FC = () => {
   const {
@@ -29,6 +30,7 @@ export const HomeHub: React.FC = () => {
     accountMode,
     activeConnectedAccount,
     orders,
+    ticks,
     wsConnected,
     formatMoney,
     setActiveTab,
@@ -64,35 +66,30 @@ export const HomeHub: React.FC = () => {
     });
   };
 
-  const realAcc = accounts.find((a) => !a.is_virtual && a.status === 'active');
-  const demoAcc = accounts.find((a) => Boolean(a.is_virtual) && a.status === 'active');
-  const optionsBal =
-    accountMode === 'real'
-      ? Number(realAcc?.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? demoAcc?.balance ?? 10000);
-  const mt5Acc = accounts.find(
-    (a) => a.platform?.includes('mt5') && (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
-  );
-  const mt5Bal =
-    accountMode === 'real'
-      ? Number(mt5Acc?.balance ?? user?.real_wallets?.mt5_standard ?? 0)
-      : Number(mt5Acc?.balance ?? user?.demo_wallets?.mt5_standard ?? 0);
-  const exchangeUsdt =
-    accountMode === 'real'
-      ? Number(user?.real_exchange_balances?.USDT ?? user?.real_wallets?.exchange_usdt ?? 0)
-      : Number(user?.exchange_balances?.USDT ?? user?.demo_wallets?.exchange_usdt ?? 0);
+  const {
+    optionsBal,
+    cfdsTotalBal: mt5Bal,
+    exchangeUsdt,
+    activeTradingBalance: activeBalance,
+  } = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount);
 
   const openOrders = orders.filter(
     (o) =>
       o.status === 'OPEN' &&
       (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
   );
-  const floatingPnl = openOrders.reduce((s, o) => s + Number(o.pnl || 0), 0);
+  const floatingPnl = openOrders.reduce((s, o) => {
+    const symTick = ticks[o.symbol];
+    const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(o.contract_type || '').toUpperCase());
+    if (symTick && symTick.source === 'deriv_ws' && isMult && Number(o.entry_price) > 0) {
+      const isUp = o.contract_type === 'MULTUP' || o.side === 'BUY';
+      const pctDiff = (symTick.quote - Number(o.entry_price)) / Number(o.entry_price);
+      const directional = isUp ? pctDiff : -pctDiff;
+      return s + Math.max(-Number(o.stake), directional * Number(o.stake) * Number(o.multiplier || 100));
+    }
+    return s + Number(o.pnl || 0);
+  }, 0);
   const usedMargin = openOrders.reduce((s, o) => s + Number(o.stake || 0), 0);
-  const activeBalance =
-    accountMode === 'real'
-      ? Number(activeConnectedAccount?.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? 10000);
   const equity = activeBalance + floatingPnl;
   const freeMargin = Math.max(0, equity - usedMargin);
 
@@ -133,13 +130,14 @@ export const HomeHub: React.FC = () => {
               <span className="h-1.5 w-14 rounded-full bg-white/15" />
             </div>
             <div className="flex flex-wrap items-center gap-2.5">
-              <button
-                type="button"
-                onClick={() => setActiveTab('portfolio')}
+              <a
+                href="https://app.deriv.com/cashier/deposit"
+                target="_blank"
+                rel="noopener noreferrer"
                 className="px-7 py-3 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
               >
                 Deposit now
-              </button>
+              </a>
               <button
                 type="button"
                 onClick={() => setActiveTab('mt5-tv')}
@@ -251,17 +249,28 @@ export const HomeHub: React.FC = () => {
             Ways to deposit
           </span>
           {[
-            { label: 'Mobile Money', icon: Smartphone, color: 'text-amber-500' },
-            { label: 'Payment Agent', icon: Users, color: 'text-slate-700 dark:text-slate-200' },
-            { label: 'M-Pesa', icon: Wallet, color: 'text-[#00A878]' },
-            { label: 'Crypto', icon: ArrowLeftRight, color: 'text-blue-500' },
+            { label: 'Deriv Cashier', icon: Wallet, color: 'text-[#FF444F]', href: 'https://app.deriv.com/cashier/deposit' },
+            { label: 'Payment Agent', icon: Users, color: 'text-slate-700 dark:text-slate-200', tab: 'portfolio' as const },
+            { label: 'M-Pesa / P2P', icon: Smartphone, color: 'text-[#00A878]', tab: 'portfolio' as const },
+            { label: 'Crypto (Deriv)', icon: ArrowLeftRight, color: 'text-blue-500', href: 'https://app.deriv.com/cashier/deposit' },
           ].map((item) => {
             const Icon = item.icon;
-            return (
+            return item.href ? (
+              <a
+                key={item.label}
+                href={item.href}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white dark:bg-[#1A1D26] border border-slate-200/80 dark:border-[#2A2F3D] text-xs font-semibold whitespace-nowrap shrink-0 hover:border-[#FF444F]/50 transition-colors cursor-pointer"
+              >
+                <Icon className={`w-3.5 h-3.5 ${item.color}`} />
+                <span>{item.label}</span>
+              </a>
+            ) : (
               <button
                 key={item.label}
                 type="button"
-                onClick={() => setActiveTab('portfolio')}
+                onClick={() => setActiveTab(item.tab!)}
                 className="flex items-center gap-2 px-3.5 py-2 rounded-xl bg-white dark:bg-[#1A1D26] border border-slate-200/80 dark:border-[#2A2F3D] text-xs font-semibold whitespace-nowrap shrink-0 hover:border-[#FF444F]/50 transition-colors cursor-pointer"
               >
                 <Icon className={`w-3.5 h-3.5 ${item.color}`} />

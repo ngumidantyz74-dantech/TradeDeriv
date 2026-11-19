@@ -535,32 +535,120 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
                   <p className="text-xs text-slate-400">Live Deriv App Markup (USD)</p>
-                  <p className="font-mono-num text-2xl font-bold text-[#00A878] mt-1">
+                  <p className="font-mono-num tabular-nums text-2xl font-bold text-[#00A878] mt-1">
                     ${Number(commData.markupStatistics?.total_app_markup_usd || 0).toFixed(2)}
+                  </p>
+                  <p className="text-[11px] text-slate-400 mt-1.5 font-mono-num tabular-nums">
+                    {commData.dateFrom} → {commData.dateTo} · {commData.diagnostics?.restVerified ? 'Live Deriv REST' : 'Awaiting Token'}
                   </p>
                 </div>
                 <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                  <p className="text-xs text-slate-400">Estimated Platform Commission ({commData.config?.markupPercentage}%)</p>
-                  <p className="font-mono-num text-2xl font-bold mt-1">${commData.estimatedAffiliateUsd?.toFixed(2)}</p>
+                  <p className="text-xs text-slate-400">Deriv App Volume &amp; Activity</p>
+                  <p className="font-mono-num tabular-nums text-2xl font-bold mt-1">
+                    ${Number(commData.markupStatistics?.total_volume_usd || 0).toFixed(2)}
+                  </p>
+                  <p className="text-[11px] text-slate-400 mt-1.5 font-mono-num tabular-nums">
+                    {commData.markupStatistics?.total_transactions_count || 0} contracts · {commData.markupStatistics?.total_client_count || 0} clients
+                  </p>
+                  <p className="text-[10px] text-slate-500 mt-1 font-mono-num tabular-nums">
+                    Local terminal volume: ${Number(commData.localDerivVolumeUsd || 0).toFixed(2)} ({commData.localDerivTradeCount || 0} trades)
+                  </p>
                 </div>
                 <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                  <p className="text-xs text-slate-400">Diagnostics</p>
-                  <div className="mt-2 space-y-1 text-xs">
+                  <p className="text-xs text-slate-400">Diagnostics &amp; Payout Workflow</p>
+                  <div className="mt-2 space-y-1.5 text-xs">
                     <p className="flex items-center gap-1.5">
-                      {commData.diagnostics?.domainVerified ? (
-                        <CheckCircle2 className="w-3.5 h-3.5 text-[#00A878]" />
+                      {commData.diagnostics?.restVerified ? (
+                        <CheckCircle2 className="w-3.5 h-3.5 text-[#00A878] shrink-0" />
                       ) : (
-                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                        <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
                       )}
-                      Redirect URI {commData.diagnostics?.domainVerified ? 'Verified' : 'Pending Owner Token'}
+                      <span>
+                        {commData.diagnostics?.restVerified
+                          ? 'Verified via Deriv REST (/applications/v1/markup-statistics)'
+                          : commData.diagnostics?.ownerTokenConfigured
+                            ? 'Token Error — Needs application_read'
+                            : 'Pending Owner Token'}
+                      </span>
                     </p>
                     <p className="flex items-center gap-1.5">
-                      <CheckCircle2 className="w-3.5 h-3.5 text-[#00A878]" />
-                      Markup: {commData.config?.markupPercentage}%
+                      <CheckCircle2 className="w-3.5 h-3.5 text-[#00A878] shrink-0" />
+                      <span>
+                        Markup: {commData.config?.markupPercentage}%
+                        {commData.diagnostics?.appMarkupPctOnDeriv !== null &&
+                        commData.diagnostics?.appMarkupPctOnDeriv !== undefined
+                          ? ` (Deriv: ${commData.diagnostics.appMarkupPctOnDeriv}%)`
+                          : ''}
+                      </span>
+                    </p>
+                    {commData.diagnostics?.liveError && (
+                      <p className="text-[11px] text-amber-300 mt-1 break-words">{commData.diagnostics.liveError}</p>
+                    )}
+                    <p className="text-[10px] text-slate-400 pt-1 leading-relaxed">
+                      1) Create an Owner Token with <span className="font-mono text-slate-300">application_read</span> scope at{' '}
+                      <a
+                        href="https://developers.deriv.com/"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline text-slate-200 hover:text-white"
+                      >
+                        developers.deriv.com
+                      </a>{' '}
+                      to pull live markup. 2) App markup payouts settle directly into your real Deriv USD account — transfer/withdraw via{' '}
+                      <a
+                        href="https://app.deriv.com/cashier"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline text-slate-200 hover:text-white"
+                      >
+                        Deriv Cashier
+                      </a>
+                      .
                     </p>
                   </div>
                 </div>
               </div>
+
+              {Array.isArray(commData.markupStatistics?.breakdown) && commData.markupStatistics.breakdown.length > 0 && (
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                  <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between">
+                    <h3 className="font-display text-xs font-bold uppercase tracking-wider text-slate-300">
+                      Deriv Application Breakdown
+                    </h3>
+                    <span className="text-[11px] font-mono-num text-slate-400">
+                      {commData.markupStatistics.breakdown.length} entries
+                    </span>
+                  </div>
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-[#2A2F3D] text-slate-400">
+                        <th className="text-left px-4 py-2.5">App / Period</th>
+                        <th className="text-right px-4 py-2.5">Contracts</th>
+                        <th className="text-right px-4 py-2.5">Volume (USD)</th>
+                        <th className="text-right px-4 py-2.5">App Markup (USD)</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#2A2F3D]">
+                      {commData.markupStatistics.breakdown.map((row: any, idx: number) => (
+                        <tr key={idx}>
+                          <td className="px-4 py-2.5 font-mono-num">
+                            {row.app_name || row.name || row.date || row.app_id || row.id || `Entry #${idx + 1}`}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono-num tabular-nums">
+                            {Number(row.transactions_count ?? row.contract_count ?? row.trades ?? 0)}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono-num tabular-nums">
+                            ${Number(row.volume_usd ?? row.total_volume_usd ?? 0).toFixed(2)}
+                          </td>
+                          <td className="px-4 py-2.5 text-right font-mono-num tabular-nums font-bold text-[#00A878]">
+                            ${Number(row.app_markup_usd ?? row.markup_usd ?? row.total_app_markup_usd ?? 0).toFixed(2)}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
 
               <div className="flex flex-wrap items-center gap-3 bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4">
                 <input
@@ -588,8 +676,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 onSubmit={async (e) => {
                   e.preventDefault();
                   const cleanAppId = derivAppId.trim();
-                  if (cleanAppId && !/^\d+$/.test(cleanAppId)) {
-                    flash('Deriv App ID must contain digits only (e.g. 1089), never an OAuth secret.', 'err');
+                  if (cleanAppId && !/^[A-Za-z0-9_-]{2,64}$/.test(cleanAppId)) {
+                    flash('Deriv App ID must be 2-64 alphanumeric characters (e.g. 34ZNHHLmmHMEpuNcPbnzg), never an OAuth client secret.', 'err');
                     return;
                   }
                   try {
@@ -613,17 +701,16 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 grid grid-cols-1 md:grid-cols-2 gap-4"
               >
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Deriv App ID (Numeric)</label>
+                  <label className="block text-xs text-slate-400 mb-1">Deriv App ID</label>
                   <input
                     type="text"
-                    inputMode="numeric"
-                    placeholder="e.g. 1089"
+                    placeholder="e.g. 34ZNHHLmmHMEpuNcPbnzg"
                     value={derivAppId}
                     onChange={(e) => setDerivAppId(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
                   />
                   <p className="text-[10px] text-slate-500 mt-1">
-                    Must be numeric digits only from your Deriv API dashboard (never an OAuth client secret).
+                    Enter your App ID from developers.deriv.com (supports modern alphanumeric IDs or legacy numeric IDs; never paste an OAuth client secret).
                   </p>
                 </div>
                 <div>
@@ -646,10 +733,16 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Owner Read+Admin Token (Encrypted Vault)</label>
+                  <label className="block text-xs text-slate-400 mb-1">
+                    Owner Personal Access / OAuth Token (application_read)
+                  </label>
                   <input
                     type="password"
-                    placeholder={commData.config?.hasOwnerToken ? '•••••••• (Configured)' : 'Paste Deriv Read+Admin Token'}
+                    placeholder={
+                      commData.config?.hasOwnerToken
+                        ? '•••••••• (Configured)'
+                        : 'Paste Deriv Token with application_read scope'
+                    }
                     value={ownerAdminToken}
                     onChange={(e) => setOwnerAdminToken(e.target.value)}
                     className="w-full px-3.5 py-2.5 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
@@ -657,7 +750,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 </div>
                 <div className="md:col-span-2">
                   <button type="submit" className="px-6 py-2.5 rounded-full bg-[#00A878] text-xs font-bold cursor-pointer">
-                    Save Markup & Affiliate Config
+                    Save Markup &amp; Affiliate Config
                   </button>
                 </div>
               </form>

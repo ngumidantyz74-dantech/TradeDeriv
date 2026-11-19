@@ -15,7 +15,6 @@ import { AnalysisToolPage } from './pages/AnalysisToolPage';
 import { BulkTraderPage } from './pages/BulkTraderPage';
 import {
   RiskCalculatorPage,
-  CopyTradingPage,
   ReportsPage,
   NotificationsPage,
   LearningHubPage,
@@ -114,8 +113,6 @@ const MainRouter: React.FC = () => {
         return <BulkTraderPage />;
       case 'risk-calc':
         return <RiskCalculatorPage />;
-      case 'copy-trading':
-        return <CopyTradingPage />;
       case 'reports':
         return <ReportsPage />;
       case 'notifications':

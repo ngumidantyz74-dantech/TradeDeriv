@@ -15,7 +15,6 @@ import {
   Activity,
   Zap,
   Calculator,
-  Copy,
   FileText,
   BookOpen,
   Cpu,
@@ -82,7 +81,6 @@ const SIDEBAR_PRO_TOOLS: Array<{ id: NavTab; label: string; icon: React.Componen
   { id: 'bulk-trader', label: 'Bulk Trader', icon: Zap },
   { id: 'risk-calc', label: 'Risk Centre', icon: Calculator },
   { id: 'reports', label: 'Analytics & Journal', icon: FileText },
-  { id: 'copy-trading', label: 'Copy & Accounts', icon: Copy },
   { id: 'learning-hub', label: 'Learning Hub', icon: BookOpen },
 ];
 

@@ -85,6 +85,7 @@ export interface TickData {
   ask: number;
   epoch: number;
   pipSize: number;
+  source?: 'deriv_ws' | 'cached';
 }
 
 export interface CandleData {

@@ -16,7 +16,6 @@ import {
   Fingerprint,
   KeyRound,
   UserX,
-  Grid,
   ExternalLink,
   Globe,
   HelpCircle,
@@ -277,7 +276,7 @@ export const ProfileHub: React.FC = () => {
             >
               <div className="flex items-center gap-3.5">
                 <Lock className="w-4 h-4 text-slate-500" />
-                <span className="text-sm font-medium">Set password & Deriv OAuth2</span>
+                <span className="text-sm font-medium">Account Security & Password</span>
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
             </button>
@@ -343,39 +342,6 @@ export const ProfileHub: React.FC = () => {
               </div>
               <ChevronRight className="w-4 h-4 text-slate-400" />
             </button>
-          </div>
-        </section>
-
-        {/* Connected Apps & Deriv */}
-        <section>
-          <h2 className="font-display text-sm font-bold text-slate-500 dark:text-slate-400 mb-2.5 px-1">
-            Deriv OAuth2 Integration
-          </h2>
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-            <button
-              type="button"
-              onClick={() => setActiveTab('copy-trading')}
-              className="w-full px-4 py-3.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-white/5 text-left cursor-pointer rounded-t-2xl"
-            >
-              <div className="flex items-center gap-3.5">
-                <Grid className="w-4 h-4 text-slate-500" />
-                <span className="text-sm font-medium">My Connected Deriv Accounts</span>
-              </div>
-              <ChevronRight className="w-4 h-4 text-slate-400" />
-            </button>
-
-            <a
-              href="https://api.deriv.com/"
-              target="_blank"
-              rel="noreferrer"
-              className="w-full px-4 py-3.5 flex items-center justify-between hover:bg-slate-50 dark:hover:bg-white/5 text-left rounded-b-2xl"
-            >
-              <div className="flex items-center gap-3.5">
-                <ExternalLink className="w-4 h-4 text-slate-500" />
-                <span className="text-sm font-medium">Explore Deriv API</span>
-              </div>
-              <ExternalLink className="w-4 h-4 text-slate-400" />
-            </a>
           </div>
         </section>
 

@@ -2,11 +2,12 @@ import React, { useState, useEffect } from 'react';
 import { RefreshCw, Plus, Send, ArrowUpDown, ChevronRight, Search, X } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
 import type { ExchangePair } from '../types';
 import { SparklineSvg } from '../components/SparklineSvg';
 
 export const ExchangeHub: React.FC = () => {
-  const { user, accountMode, setAccountMode, refreshAll, showToast, setActiveTab, hideBalances } = useApp();
+  const { user, accounts, accountMode, setAccountMode, refreshAll, showToast, setActiveTab, hideBalances } = useApp();
   const [pairs, setPairs] = useState<ExchangePair[]>([]);
   const [filter, setFilter] = useState<'trending' | 'gainers' | 'losers'>('trending');
   const [search, setSearch] = useState('');
@@ -39,11 +40,7 @@ export const ExchangeHub: React.FC = () => {
     accountMode === 'real'
       ? user?.real_exchange_balances || { USDT: Number(user?.real_wallets?.exchange_usdt ?? 0), USDC: 0, BTC: 0, ETH: 0 }
       : user?.exchange_balances || { USDT: Number(user?.demo_wallets?.exchange_usdt ?? 0), USDC: 0, BTC: 0, ETH: 0 };
-  const totalUsdt =
-    Number(spotBalances.USDT || 0) +
-    Number(spotBalances.USDC || 0) +
-    Number(spotBalances.BTC || 0) * 91450 +
-    Number(spotBalances.ETH || 0) * 3180;
+  const { exchangeUsdt: totalUsdt } = getCanonicalBalances(user, accounts, accountMode, null);
 
   const activePairObj = pairs.find((p) => p.pair === selectedPair) || {
     pair: selectedPair,
@@ -144,16 +141,17 @@ export const ExchangeHub: React.FC = () => {
         </div>
 
         <div className="flex items-center justify-center lg:justify-start gap-12 mt-6">
-          <button
-            type="button"
-            onClick={() => setActiveTab('portfolio')}
+          <a
+            href="https://app.deriv.com/cashier/deposit"
+            target="_blank"
+            rel="noopener noreferrer"
             className="flex flex-col items-center gap-2 cursor-pointer"
           >
             <span className="w-12 h-12 rounded-full bg-[#FF444F] hover:bg-[#E63946] flex items-center justify-center">
               <Plus className="w-5 h-5 text-white" />
             </span>
             <span className="text-xs font-medium">Add funds</span>
-          </button>
+          </a>
 
           <button
             type="button"
