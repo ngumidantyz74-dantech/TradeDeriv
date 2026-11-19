@@ -112,13 +112,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [resetLogoTaps]
   );
 
-  // Hidden 20-tap gesture within 2.5s rolling timeout to open Owner MIS Portal (zero visible hints)
+  // Hidden 30-tap gesture within 2.5s rolling timeout to open Owner MIS Portal (zero visible hints)
   const registerLogoTap = useCallback(() => {
     if (tapTimerRef.current) {
       clearTimeout(tapTimerRef.current);
     }
     tapCountRef.current += 1;
-    if (tapCountRef.current >= 20) {
+    if (tapCountRef.current >= 30) {
       resetLogoTaps();
       setAdminGateOpen(true);
       return;

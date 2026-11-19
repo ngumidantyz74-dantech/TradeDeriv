@@ -277,6 +277,7 @@ export const MT5TradingView: React.FC = () => {
   const overlaySeriesRef = useRef<Record<string, ISeriesApi<'Line'>>>({});
   const trendSeriesRef = useRef<Array<ISeriesApi<'Line'>>>([]);
   const priceLinesRef = useRef<IPriceLine[]>([]);
+  const liveBarRef = useRef<CandleData | null>(null);
 
   const activeInst = useMemo(
     () => instruments.find((i) => i.symbol === selectedSymbol) || instruments[0],
@@ -596,32 +597,56 @@ export const MT5TradingView: React.FC = () => {
 
   // Live Last Candle Tick Update — only apply authentic deriv_ws ticks to prevent seed-price spikes
   useEffect(() => {
+    liveBarRef.current = null;
+  }, [selectedSymbol, timeframe]);
+
+  useEffect(() => {
+    if (candles.length > 0) {
+      const last = candles[candles.length - 1];
+      if (!liveBarRef.current || liveBarRef.current.time < last.time) {
+        liveBarRef.current = { ...last };
+      }
+    } else {
+      liveBarRef.current = null;
+    }
+  }, [candles]);
+
+  useEffect(() => {
     if (!liveTick || liveTick.source !== 'deriv_ws' || !mainSeriesRef.current || candles.length === 0) return;
-    const last = candles[candles.length - 1];
+    const baseLast = liveBarRef.current || candles[candles.length - 1];
     const bucket = Math.floor(liveTick.epoch / Math.max(1, timeframe)) * Math.max(1, timeframe);
     try {
       if (chartMode === 'candles') {
-        const updated =
-          bucket > last.time
+        const updated: CandleData =
+          bucket > baseLast.time
             ? {
-                time: bucket as UTCTimestamp,
-                open: last.close,
-                high: Math.max(last.close, liveTick.quote),
-                low: Math.min(last.close, liveTick.quote),
+                time: bucket,
+                open: baseLast.close,
+                high: Math.max(baseLast.close, liveTick.quote),
+                low: Math.min(baseLast.close, liveTick.quote),
                 close: liveTick.quote,
               }
             : {
-                time: last.time as UTCTimestamp,
-                open: last.open,
-                high: Math.max(last.high, liveTick.quote),
-                low: Math.min(last.low, liveTick.quote),
+                time: baseLast.time,
+                open: baseLast.open,
+                high: Math.max(baseLast.high, liveTick.quote),
+                low: Math.min(baseLast.low, liveTick.quote),
                 close: liveTick.quote,
               };
-        (mainSeriesRef.current as ISeriesApi<'Candlestick'>).update(updated);
+        liveBarRef.current = updated;
+        (mainSeriesRef.current as ISeriesApi<'Candlestick'>).update({
+          ...updated,
+          time: updated.time as UTCTimestamp,
+        });
       } else {
-        const t = (bucket > last.time ? bucket : last.time) as UTCTimestamp;
-        (mainSeriesRef.current as ISeriesApi<'Line' | 'Area'>).update({ time: t, value: liveTick.quote });
+        const t = Math.max(bucket, baseLast.time);
+        liveBarRef.current = { ...baseLast, time: t, close: liveTick.quote };
+        (mainSeriesRef.current as ISeriesApi<'Line' | 'Area'>).update({
+          time: t as UTCTimestamp,
+          value: liveTick.quote,
+        });
       }
+      setLastUpdated(new Date().toISOString());
     } catch {
       // ignore out-of-order updates
     }

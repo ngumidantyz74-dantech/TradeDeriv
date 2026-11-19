@@ -324,18 +324,16 @@ export const AnalysisToolPage: React.FC = () => {
     setExecuting(true);
     const targetSymbol = extra?.symbolOverride || selectedSymbol;
     const isReal = accountMode === 'real';
-    if (isReal && !activeConnectedAccount) {
-      showToast('Connect a Real Deriv account via OAuth2 before placing Real trades.', 'error');
-      setExecuting(false);
-      return;
-    }
+    const rawUpper = String(contractType || '').toUpperCase().trim();
+    const normalizedContractType =
+      rawUpper === 'BUY' ? 'MULTUP' : rawUpper === 'SELL' ? 'MULTDOWN' : rawUpper || 'MULTUP';
     try {
       await apiFetch('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
           symbol: targetSymbol,
           side: contractType,
-          contractType,
+          contractType: normalizedContractType,
           stake: Number(stake) || 5,
           barrier: customBarrier,
           duration: extra?.duration ?? 1,
