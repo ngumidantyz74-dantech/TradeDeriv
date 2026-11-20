@@ -987,18 +987,23 @@ export class OtpDerivClient {
 
 export async function derivRestRequest<T = any>(
   path: string,
-  token: string,
+  token?: string | null,
   options: { method?: string; body?: Record<string, unknown>; headers?: Record<string, string> } = {}
 ): Promise<T> {
   const url = `${config.derivApiBase}${path}`;
+  const reqHeaders: Record<string, string> = {
+    'Deriv-App-ID': getActiveDerivAppId(),
+    'Content-Type': 'application/json',
+    Accept: 'application/json',
+    ...(options.headers || {}),
+  };
+  if (token) {
+    reqHeaders.Authorization = `Bearer ${token}`;
+  }
+
   const resp = await fetch(url, {
     method: options.method || 'GET',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...(options.headers || {}),
-    },
+    headers: reqHeaders,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
 
@@ -1014,6 +1019,91 @@ export async function derivRestRequest<T = any>(
     throw new Error(`Deriv REST ${path} (${resp.status}): ${detail}`);
   }
   return (await resp.json()) as T;
+}
+
+export async function checkDerivRestHealth(): Promise<{ ok: boolean; status: number; latencyMs: number; payload?: any; error?: string }> {
+  const started = Date.now();
+  try {
+    const resp = await fetch(`${config.derivApiBase}/v1/health`, {
+      method: 'GET',
+      headers: { Accept: 'application/json', 'Deriv-App-ID': getActiveDerivAppId() },
+    });
+    const latencyMs = Date.now() - started;
+    let payload: any = null;
+    try {
+      payload = await resp.json();
+    } catch {
+      payload = null;
+    }
+    return { ok: resp.ok, status: resp.status, latencyMs, payload };
+  } catch (err) {
+    return {
+      ok: false,
+      status: 0,
+      latencyMs: Date.now() - started,
+      error: err instanceof Error ? err.message : 'Health check failed',
+    };
+  }
+}
+
+export async function fetchDerivWallets(token: string, conversionCurrency = 'USD'): Promise<any> {
+  const qs = conversionCurrency ? `?conversion_currency=${encodeURIComponent(conversionCurrency)}` : '';
+  return derivRestRequest<any>(`/wallet/v1/wallets${qs}`, token, { method: 'GET' });
+}
+
+export async function fetchDerivNickname(token: string): Promise<any> {
+  return derivRestRequest<any>('/account/v1/nickname', token, { method: 'GET' });
+}
+
+export async function fetchDerivOptionsAccounts(token: string): Promise<any> {
+  return derivRestRequest<any>('/trading/v1/options/accounts', token, { method: 'GET' });
+}
+
+export async function resetDerivDemoBalance(token: string, accountId: string): Promise<any> {
+  return derivRestRequest<any>(
+    `/trading/v1/options/accounts/${encodeURIComponent(accountId)}/reset-demo-balance`,
+    token,
+    { method: 'POST', body: {} }
+  );
+}
+
+export async function executeDerivBulkPurchase(
+  token: string,
+  accountType: 'demo' | 'real',
+  payload: {
+    accounts: Array<{ token: string; account_id: string }>;
+    amount: number;
+    basis?: string;
+    contract_type: string;
+    currency: string;
+    duration?: number;
+    duration_unit?: string;
+    symbol?: string;
+    underlying_symbol?: string;
+    barrier?: string;
+    multiplier?: number;
+    growth_rate?: number;
+    limit_order?: Record<string, number>;
+  }
+): Promise<any> {
+  return derivRestRequest<any>(`/trading/v1/options/contracts/bulk-purchase/${accountType}`, token, {
+    method: 'POST',
+    body: payload as unknown as Record<string, unknown>,
+  });
+}
+
+export async function fetchDerivPartnerOverview(token: string): Promise<any> {
+  return derivRestRequest<any>('/partners/analytics/v1/overview', token, { method: 'GET' });
+}
+
+export async function checkDerivPartnerClientTag(
+  token: string,
+  body: { email?: string; client_id?: string; loginid?: string }
+): Promise<any> {
+  return derivRestRequest<any>('/partners/client-tags/check', token, {
+    method: 'POST',
+    body: body as Record<string, unknown>,
+  });
 }
 
 export const derivWs = new DerivWebSocketClient();

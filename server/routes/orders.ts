@@ -1,9 +1,17 @@
 import { Router } from 'express';
 import { pool, query, queryOne, execute, ensureDatabaseSchema, requireDb, addNotification } from '../db.ts';
 import { SEEDED_BOT_STRATEGIES } from '../catalog.ts';
-import { derivWs } from '../deriv-client.ts';
+import { derivWs, executeDerivBulkPurchase, resetDerivDemoBalance } from '../deriv-client.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
-import { placeUnifiedOrder, closeOrderById, bulkCloseOrders, updateOrderLimits } from '../trade-execution.ts';
+import {
+  placeUnifiedOrder,
+  closeOrderById,
+  bulkCloseOrders,
+  updateOrderLimits,
+  getContractUpdateHistory,
+  cancelOrderById,
+  getDecryptedAccountToken,
+} from '../trade-execution.ts';
 import {
   startBotSession,
   pauseBotSession,
@@ -124,6 +132,101 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
       }
     }
 
+    // Optional Deriv REST V2 multi-account bulk purchase (/trading/v1/options/contracts/bulk-purchase/{account_type})
+    const targetAccountIds: number[] = Array.isArray(body.targetAccountIds)
+      ? body.targetAccountIds.map((x: any) => Number(x)).filter((n: number) => Number.isFinite(n) && n > 0).slice(0, 100)
+      : [];
+
+    if (targetAccountIds.length > 0 && body.executionMode === 'deriv') {
+      const credsList = (
+        await Promise.all(targetAccountIds.map((aid) => getDecryptedAccountToken(aid, req.user!.id)))
+      ).filter((c): c is NonNullable<typeof c> => Boolean(c));
+
+      if (credsList.length === 0) {
+        res.status(400).json({ error: 'No active connected Deriv accounts found for bulk purchase.' });
+        return;
+      }
+
+      const primaryCreds = credsList[0];
+      const upstreamAccountType = primaryCreds.account.is_virtual ? 'demo' : 'real';
+      const normalizedType = String(body.contractType || (body.side === 'SELL' ? 'MULTDOWN' : 'MULTUP')).toUpperCase();
+      const limitOrder: Record<string, number> = {};
+      if (body.tpUsd && Number(body.tpUsd) >= 0.5) limitOrder.take_profit = Number(Number(body.tpUsd).toFixed(2));
+      if (body.slUsd && Number(body.slUsd) >= 0.5 && Number(body.slUsd) < unitStake) {
+        limitOrder.stop_loss = Number(Number(body.slUsd).toFixed(2));
+      }
+
+      const bulkResp = await executeDerivBulkPurchase(primaryCreds.token, upstreamAccountType, {
+        accounts: credsList.map((c) => ({ token: c.token, account_id: c.account.deriv_login_id })),
+        amount: unitStake,
+        basis: 'stake',
+        contract_type: normalizedType,
+        currency: primaryCreds.account.currency || 'USD',
+        underlying_symbol: symbol,
+        symbol,
+        multiplier: normalizedType === 'MULTUP' || normalizedType === 'MULTDOWN' ? Number(body.multiplier || 100) : undefined,
+        duration: normalizedType !== 'MULTUP' && normalizedType !== 'MULTDOWN' ? Number(body.duration || 5) : undefined,
+        duration_unit: normalizedType !== 'MULTUP' && normalizedType !== 'MULTDOWN' ? String(body.durationUnit || 't') : undefined,
+        barrier: body.barrier !== undefined && body.barrier !== null ? String(body.barrier) : undefined,
+        limit_order: Object.keys(limitOrder).length > 0 ? limitOrder : undefined,
+      });
+
+      const entryTick = derivWs.getLatestTick(symbol);
+      const entrySpot = entryTick?.quote || 1000;
+      const results = Array.isArray(bulkResp?.data?.results)
+        ? bulkResp.data.results
+        : Array.isArray(bulkResp?.results)
+          ? bulkResp.results
+          : credsList.map((c) => ({ account_id: c.account.deriv_login_id, contract_id: null }));
+
+      const insertedOrders: any[] = [];
+      for (let idx = 0; idx < results.length; idx++) {
+        const r = results[idx];
+        const matchedCred = credsList.find((c) => c.account.deriv_login_id === r.account_id) || credsList[idx];
+        if (r.error) continue;
+        const created = await queryOne<any>(
+          `INSERT INTO virtual_orders (
+            user_id, connected_account_id, deriv_contract_id, execution_mode, source,
+            symbol, side, contract_type, lots, stake, multiplier,
+            entry_price, current_price, sl_usd, tp_usd, barrier, duration, duration_unit,
+            payout, pnl, status, strategy_key, timeframe, account_mode, notes
+          ) VALUES ($1,$2,$3,'deriv','bulk',$4,$5,$6,$7,$8,$9,$10,$10,$11,$12,$13,$14,$15,$16,0,'OPEN',$17,$18,$19,'Deriv V2 bulk-purchase')
+          RETURNING *`,
+          [
+            req.user!.id,
+            matchedCred?.account.id || null,
+            r.contract_id ? String(r.contract_id) : null,
+            symbol,
+            String(body.side || 'BUY').toUpperCase(),
+            normalizedType,
+            Number((unitStake / 100).toFixed(2)),
+            unitStake,
+            Number(body.multiplier || 100),
+            Number(r.spot || entrySpot),
+            body.slUsd ? Number(body.slUsd) : null,
+            body.tpUsd ? Number(body.tpUsd) : null,
+            body.barrier ?? null,
+            Number(body.duration || 5),
+            String(body.durationUnit || 't'),
+            Number(r.payout || 0),
+            String(body.strategyKey || ''),
+            String(body.timeframe || ''),
+            upstreamAccountType,
+          ]
+        );
+        if (created) insertedOrders.push(created);
+      }
+
+      await addNotification(
+        req.user!.id,
+        'Multi-Account Deriv Bulk Purchase',
+        `Executed ${insertedOrders.length} contract(s) across ${credsList.length} Deriv account(s) on ${symbol}.`,
+        'trading'
+      );
+      res.status(201).json({ count: insertedOrders.length, orders: insertedOrders, derivBulkResponse: bulkResp });
+      return;
+    }
+
     const orders: any[] = [];
     for (let i = 0; i < count; i++) {
       const o = await placeUnifiedOrder({
@@ -214,6 +317,24 @@ router.patch('/orders/:id/limits', requireDb, requireAuth, async (req: AuthReque
   }
 });
 
+router.get('/orders/:id/contract-history', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const result = await getContractUpdateHistory(Number(req.params.id), req.user!.id);
+    res.json(result);
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to fetch contract update history' });
+  }
+});
+
+router.post('/orders/:id/cancel', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  try {
+    const order = await cancelOrderById(Number(req.params.id), req.user!.id);
+    res.json({ order });
+  } catch (err) {
+    res.status(400).json({ error: err instanceof Error ? err.message : 'Unable to cancel contract' });
+  }
+});
+
 router.post('/trade/close', requireDb, requireAuth, async (req: AuthRequest, res) => {
   try {
     const orderId = Number(req.body?.orderId ?? req.body?.id);
@@ -233,6 +354,25 @@ router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthReq
     res.status(400).json({ error: 'Reset balance is only available for Demo accounts.' });
     return;
   }
+
+  // Best-effort upstream Deriv REST reset for connected demo accounts
+  let derivResetCount = 0;
+  try {
+    const demoAccounts = await query<{ id: number; deriv_login_id: string }>(
+      "SELECT id, deriv_login_id FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND platform = 'deriv' AND status = 'active'",
+      [req.user!.id]
+    );
+    for (const acc of demoAccounts) {
+      const creds = await getDecryptedAccountToken(acc.id, req.user!.id);
+      if (creds?.token) {
+        await resetDerivDemoBalance(creds.token, acc.deriv_login_id).catch(() => {});
+        derivResetCount++;
+      }
+    }
+  } catch {
+    // non-fatal upstream sync
+  }
+
   await execute(
     `UPDATE users
      SET virtual_workspace_balance = 10000.00,
@@ -255,7 +395,7 @@ router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthReq
     'Demo Options balance reset to $10,000.00 USD. Real balances remain untouched.',
     'account'
   );
-  res.json({ ok: true, virtual_workspace_balance: 10000.0 });
+  res.json({ ok: true, virtual_workspace_balance: 10000.0, derivResetCount });
 });
 
 // Bots (No password gate)

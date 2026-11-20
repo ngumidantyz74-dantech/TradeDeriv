@@ -56,7 +56,9 @@ function normalizeContractType(side: string, explicitType?: string): string {
   if (['MATCH', 'DIGITMATCH'].includes(s)) return 'DIGITMATCH';
   if (['DIFF', 'DIGITDIFF'].includes(s)) return 'DIGITDIFF';
   if (['RISE', 'CALL'].includes(s)) return 'CALL';
+  if (s === 'CALLE') return 'CALLE';
   if (['FALL', 'PUT'].includes(s)) return 'PUT';
+  if (s === 'PUTE') return 'PUTE';
   if (['ACCU', 'ACCUMULATOR'].includes(s)) return 'ACCU';
   return s || 'MULTUP';
 }
@@ -250,7 +252,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   let slPrice = contractType === 'MULTUP' || contractType === 'MULTDOWN' ? input.slPrice ?? null : null;
   let tpPrice = contractType === 'MULTUP' || contractType === 'MULTDOWN' ? input.tpPrice ?? null : null;
 
-  const isUp = ['MULTUP', 'CALL', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY', 'ACCU'].includes(contractType);
+  const isUp = ['MULTUP', 'CALL', 'CALLE', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY', 'ACCU'].includes(contractType);
   if (supportsLimits) {
     if (slUsd && !slPrice) {
       const pctMove = Math.min(0.45, slUsd / Math.max(1, stake * multiplier));
@@ -545,7 +547,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       tpPrice,
       slUsd,
       tpUsd,
-      input.barrier ?? null,
+      input.barrier ?? (contractType === 'ACCU' && input.growthRate !== undefined ? String(input.growthRate) : null),
       duration,
       durationUnit,
       actualPayout,
@@ -561,7 +563,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
   if (
     actualMode === 'virtual' &&
-    ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'PUT'].includes(contractType)
+    ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'CALLE', 'PUT', 'PUTE'].includes(contractType)
   ) {
     const settleDelay =
       durationUnit.toLowerCase() === 't'
@@ -615,12 +617,20 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
       payoutMult = 1.11;
       break;
     case 'CALL':
-      won = exitPrice >= order.entry_price;
+      won = exitPrice > order.entry_price;
       payoutMult = 1.95;
       break;
+    case 'CALLE':
+      won = exitPrice >= order.entry_price;
+      payoutMult = 1.92;
+      break;
     case 'PUT':
-      won = exitPrice <= order.entry_price;
+      won = exitPrice < order.entry_price;
       payoutMult = 1.95;
+      break;
+    case 'PUTE':
+      won = exitPrice <= order.entry_price;
+      payoutMult = 1.92;
       break;
     default:
       won = exitPrice >= order.entry_price;
@@ -746,7 +756,7 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
     if (String(order.contract_type || '').toUpperCase() === 'ACCU') {
       pnl = Number(Math.max(-order.stake, Number(order.pnl || 0)).toFixed(2));
     } else {
-      const isUp = ['MULTUP', 'CALL', 'BUY', 'DIGITOVER'].includes(order.contract_type);
+      const isUp = ['MULTUP', 'CALL', 'CALLE', 'BUY', 'DIGITOVER'].includes(order.contract_type);
       const pctDiff = (exitPrice - order.entry_price) / (order.entry_price || 1);
       const directional = isUp ? pctDiff : -pctDiff;
       pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
@@ -913,6 +923,44 @@ export async function updateOrderLimits(
     }
   }
 
+  let upstreamUpdate: any = null;
+  if (order.execution_mode === 'deriv' && order.deriv_contract_id && order.connected_account_id) {
+    const creds = await getDecryptedAccountToken(order.connected_account_id, userId);
+    if (creds) {
+      try {
+        const limitOrder: Record<string, number | null> = {};
+        if (nextSlUsd !== undefined) limitOrder.stop_loss = nextSlUsd ? Number(nextSlUsd.toFixed(2)) : null;
+        if (nextTpUsd !== undefined) limitOrder.take_profit = nextTpUsd ? Number(nextTpUsd.toFixed(2)) : null;
+        const payload = {
+          contract_update: 1,
+          contract_id: Number(order.deriv_contract_id),
+          limit_order: limitOrder,
+        };
+        const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
+        if (isOAuth2) {
+          const otpResp = await derivRestRequest<any>(
+            `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+            creds.token,
+            { method: 'POST' }
+          );
+          const otpUrl = extractDerivOtpWsUrl(otpResp);
+          if (otpUrl) {
+            upstreamUpdate = await OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
+          }
+        } else {
+          upstreamUpdate = await derivWs.requestWithToken(creds.token, payload, 5000);
+        }
+      } catch (err) {
+        await logSystemError(
+          'contract-update',
+          err instanceof Error ? err.message : 'Deriv contract_update failed',
+          'warn',
+          { orderId: order.id, derivContractId: order.deriv_contract_id }
+        );
+      }
+    }
+  }
+
   const updated = await queryOne<any>(
     `UPDATE virtual_orders
      SET sl_price = $1, tp_price = $2, sl_usd = $3, tp_usd = $4
@@ -922,7 +970,115 @@ export async function updateOrderLimits(
   );
 
   derivWs.emitUserEvent(userId, 'order_updated', updated);
-  return updated;
+  return { ...updated, derivContractUpdate: upstreamUpdate?.contract_update || null };
+}
+
+export async function getContractUpdateHistory(orderId: number, userId: number): Promise<any> {
+  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
+  if (!order) throw new Error('Order not found');
+
+  if (order.execution_mode === 'deriv' && order.deriv_contract_id && order.connected_account_id) {
+    const creds = await getDecryptedAccountToken(order.connected_account_id, userId);
+    if (creds) {
+      try {
+        const payload = { contract_update_history: 1, contract_id: Number(order.deriv_contract_id) };
+        const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
+        const resp = isOAuth2
+          ? await (async () => {
+              const otpResp = await derivRestRequest<any>(
+                `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+                creds.token,
+                { method: 'POST' }
+              );
+              const otpUrl = extractDerivOtpWsUrl(otpResp);
+              if (!otpUrl) throw new Error('Unable to mint OTP WebSocket');
+              return OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
+            })()
+          : await derivWs.requestWithToken(creds.token, payload, 5000);
+
+        return {
+          source: 'deriv_ws',
+          contractId: order.deriv_contract_id,
+          history: resp?.contract_update_history || [],
+        };
+      } catch (err) {
+        return {
+          source: 'local_fallback',
+          contractId: order.deriv_contract_id,
+          warning: err instanceof Error ? err.message : 'Unable to query contract_update_history',
+          history: [
+            {
+              display_name: 'Current Limits',
+              order_type: 'limit_order',
+              stop_loss: order.sl_usd,
+              take_profit: order.tp_usd,
+              order_date: order.opened_at,
+            },
+          ],
+        };
+      }
+    }
+  }
+
+  return {
+    source: 'local',
+    contractId: order.deriv_contract_id || null,
+    history: [
+      {
+        display_name: 'Order Parameters',
+        order_type: order.contract_type,
+        stop_loss: order.sl_usd,
+        take_profit: order.tp_usd,
+        order_date: order.opened_at,
+      },
+    ],
+  };
+}
+
+export async function cancelOrderById(orderId: number, userId: number): Promise<any> {
+  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
+  if (!order) throw new Error('Order not found');
+  if (order.status === 'CLOSED') return order;
+
+  if (order.execution_mode === 'deriv' && order.deriv_contract_id && order.connected_account_id) {
+    const creds = await getDecryptedAccountToken(order.connected_account_id, userId);
+    if (creds) {
+      const payload = { cancel: Number(order.deriv_contract_id) };
+      const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
+      const resp = isOAuth2
+        ? await (async () => {
+            const otpResp = await derivRestRequest<any>(
+              `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+              creds.token,
+              { method: 'POST' }
+            );
+            const otpUrl = extractDerivOtpWsUrl(otpResp);
+            if (!otpUrl) throw new Error('Unable to mint OTP WebSocket');
+            return OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
+          })()
+        : await derivWs.requestWithToken(creds.token, payload, 5000);
+
+      if (resp?.cancel?.sold_for !== undefined) {
+        const pnl = Number((Number(resp.cancel.sold_for) - Number(order.stake)).toFixed(2));
+        const closed = await queryOne<any>(
+          `UPDATE virtual_orders SET status = 'CLOSED', pnl = $1, closed_at = NOW(), notes = 'Cancelled within Deriv window'
+           WHERE id = $2 RETURNING *`,
+          [pnl, order.id]
+        );
+        if (!creds.account.balance_locked_by_admin && resp.cancel.balance_after !== undefined) {
+          const liveBal = Number(resp.cancel.balance_after);
+          await execute(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+            [liveBal, creds.account.id]
+          );
+        }
+        derivWs.emitUserEvent(userId, 'order_closed', closed);
+        return closed;
+      }
+    }
+  }
+
+  return closeOrderById(orderId, userId);
 }
 
 const mtmClosingLocks = new Set<number>();

@@ -23,8 +23,10 @@ import {
   Shield,
   ExternalLink,
   Compass,
+  Plus,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
+import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { TradeDerivLogo } from './TradeDerivLogo';
 import type { NavTab } from '../types';
 
@@ -86,9 +88,35 @@ const SIDEBAR_PRO_TOOLS: Array<{ id: NavTab; label: string; icon: React.Componen
   { id: 'learning-hub', label: 'Learning Hub', icon: BookOpen },
 ];
 
+const WORKSPACE_QUICK_BAR: Array<{ id: NavTab; label: string }> = [
+  { id: 'home', label: 'Dashboard' },
+  { id: 'mt5-tv', label: 'MT5 & Chart' },
+  { id: 'bot-builder', label: 'Bot Builder' },
+  { id: 'trading-bots', label: 'Trading Bots' },
+  { id: 'bulk-trader', label: 'Bulk Trader' },
+  { id: 'exchange', label: 'Exchange' },
+  { id: 'options', label: 'Options' },
+  { id: 'portfolio', label: 'Portfolio' },
+  { id: 'market-analyser', label: 'Market Radar' },
+];
+
+const TELEMETRY_TABS = new Set<NavTab>([
+  'mt5-tv',
+  'cfds',
+  'options',
+  'bulk-trader',
+  'bot-builder',
+  'trading-bots',
+  'market-analyser',
+]);
+
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const {
     user,
+    accounts,
+    activeConnectedAccount,
+    orders,
+    ticks,
     activeTab,
     setActiveTab,
     accountMode,
@@ -106,12 +134,33 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
     wsConnected,
     registerLogoTap,
     setAdminGateOpen,
+    formatMoney,
   } = useApp();
 
   const isOwnerSession = user?.role === 'owner' || user?.role === 'admin';
 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+
+  const { optionsBal: activeBalance } = getCanonicalBalances(
+    user,
+    accounts,
+    accountMode,
+    activeConnectedAccount
+  );
+  const scopedOpenOrders = orders.filter(
+    (o) =>
+      o.status === 'OPEN' &&
+      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+  );
+  const inTradesUsd = scopedOpenOrders.reduce((sum, o) => sum + Number(o.stake || 0), 0);
+  const liveFloatingPnl = scopedOpenOrders.reduce((sum, o) => {
+    const m = computeLiveOrderMetrics(o, ticks);
+    return sum + (m.currentPrice > 0 ? m.pnl : Number(o.pnl || 0));
+  }, 0);
+  const liveEquity = Number((activeBalance + liveFloatingPnl).toFixed(2));
+  const availableMargin = Math.max(0, Number((activeBalance - inTradesUsd).toFixed(2)));
+  const showTelemetryBar = TELEMETRY_TABS.has(activeTab);
 
   const initials = (user?.full_name || user?.email || 'TD')
     .split(/\s+/)
@@ -305,9 +354,33 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
             <button
               type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="px-3 py-1.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
+              title="Open Portfolio & Cashier"
+            >
+              <Plus className="w-3.5 h-3.5" />
+              <span>Deposit</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="px-3 py-1.5 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] border border-slate-200 dark:border-[#2A2F3D] text-xs font-mono-num font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
+              title="Active Trading Balance"
+            >
+              <span
+                className={`w-1.5 h-1.5 rounded-full ${
+                  accountMode === 'real' ? 'bg-[#FF444F]' : 'bg-[#00A878]'
+                }`}
+              />
+              <span>{formatMoney(activeBalance, { hideable: true })}</span>
+            </button>
+
+            <button
+              type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Search markets and tools"
-              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
+              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
             >
               <Search className="w-4 h-4" />
             </button>
@@ -316,7 +389,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               type="button"
               onClick={() => setHideBalances(!hideBalances)}
               aria-label="Toggle balance visibility"
-              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
+              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
             >
               {hideBalances ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
@@ -325,7 +398,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               type="button"
               onClick={toggleTheme}
               aria-label="Toggle color theme"
-              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
+              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
             >
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
@@ -334,7 +407,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               type="button"
               onClick={() => setActiveTab('notifications')}
               aria-label="Notifications"
-              className="relative w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
+              className="relative w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
             >
               <Bell className="w-4 h-4" />
               {unreadCount > 0 && (
@@ -348,24 +421,24 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
         {/* Mobile Dark Top Strip */}
         <div className="lg:hidden bg-[#151820] text-white px-4 pt-3 pb-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 shrink-0">
             <TradeDerivLogo variant="dark" size="sm" showWordmark={false} onClick={registerLogoTap} />
             <button
               type="button"
               onClick={() => setSearchOpen(true)}
-              className="w-9 h-9 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
+              className="w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
               aria-label="Search"
             >
-              <Search className="w-4 h-4 text-slate-200" />
+              <Search className="w-3.5 h-3.5 text-slate-200" />
             </button>
           </div>
 
-          <div className="flex items-center gap-1.5">
-            <div className="flex items-center bg-[#242936] p-0.5 rounded-full">
+          <div className="flex items-center gap-1.5 min-w-0">
+            <div className="flex items-center bg-[#242936] p-0.5 rounded-full shrink-0">
               <button
                 type="button"
                 onClick={() => setAccountMode('real')}
-                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                className={`px-2 py-1 rounded-full text-[10px] font-semibold cursor-pointer ${
                   accountMode === 'real' ? 'bg-[#FF444F] text-white' : 'text-slate-300'
                 }`}
               >
@@ -374,7 +447,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               <button
                 type="button"
                 onClick={() => setAccountMode('demo')}
-                className={`px-2.5 py-1 rounded-full text-[11px] font-semibold cursor-pointer ${
+                className={`px-2 py-1 rounded-full text-[10px] font-semibold cursor-pointer ${
                   accountMode === 'demo' ? 'bg-white text-[#151820]' : 'text-slate-300'
                 }`}
               >
@@ -384,38 +457,125 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             <button
               type="button"
               onClick={() => setCurrencyDisplay(currencyDisplay === 'USD' ? 'KSH' : 'USD')}
-              className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-[#242936] text-[11px] font-semibold text-slate-200 cursor-pointer"
+              className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-[#242936] text-[10px] font-semibold text-slate-200 cursor-pointer shrink-0"
               title="Switch USD / KSH"
             >
               {currencyDisplay === 'USD' ? <UsFlagIcon /> : <KeFlagIcon />}
               <span>{currencyDisplay}</span>
             </button>
+            <button
+              type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="px-2.5 py-1 rounded-full bg-[#242936] text-[11px] font-mono-num font-bold text-white truncate cursor-pointer"
+              title="Open Portfolio & Cashier"
+            >
+              {formatMoney(activeBalance, { hideable: true })}
+            </button>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-1.5 shrink-0">
+            <button
+              type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="px-2 py-1 rounded-full bg-[#FF444F] text-white text-[10px] font-bold cursor-pointer"
+              aria-label="Deposit"
+            >
+              +
+            </button>
             <button
               type="button"
               onClick={() => setHideBalances(!hideBalances)}
-              className="w-9 h-9 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
+              className="w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
               aria-label="Hide balances"
             >
-              {hideBalances ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              {hideBalances ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
             </button>
             <button
               type="button"
               onClick={() => setActiveTab('notifications')}
-              className="relative w-9 h-9 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
+              className="relative w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
               aria-label="Notifications"
             >
-              <Bell className="w-4 h-4" />
+              <Bell className="w-3.5 h-3.5" />
               {unreadCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[16px] h-4 px-1 rounded-full bg-[#FF444F] text-white text-[10px] font-bold flex items-center justify-center">
+                <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-3.5 px-1 rounded-full bg-[#FF444F] text-white text-[9px] font-bold flex items-center justify-center">
                   {unreadCount}
                 </span>
               )}
             </button>
           </div>
         </div>
+
+        {/* Clean Single-Row Horizontally Scrollable Workspace Navigation Strip */}
+        <div className="bg-white dark:bg-[#151820] border-b border-slate-200 dark:border-[#2A2F3D] px-4 lg:px-6 py-1.5 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
+          {WORKSPACE_QUICK_BAR.map((item) => {
+            const active = activeTab === item.id;
+            return (
+              <button
+                key={item.id}
+                type="button"
+                onClick={() => setActiveTab(item.id)}
+                className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
+                  active
+                    ? 'bg-[#FF444F] text-white'
+                    : 'text-slate-600 dark:text-slate-300 hover:bg-[#F4F5F7] dark:hover:bg-[#1A1D26]'
+                }`}
+              >
+                {item.label}
+              </button>
+            );
+          })}
+          <a
+            href="/analyser"
+            target="_blank"
+            rel="noopener noreferrer"
+            className="ml-auto px-3 py-1.5 rounded-xl text-xs font-semibold text-[#1958B7] dark:text-sky-400 bg-sky-500/5 hover:bg-sky-500/10 border border-sky-500/20 whitespace-nowrap shrink-0 inline-flex items-center gap-1"
+          >
+            <span>AI Analyser</span>
+            <ExternalLink className="w-3 h-3" />
+          </a>
+        </div>
+
+        {/* Compact Live Account Telemetry Strip on Trading Workspaces */}
+        {showTelemetryBar && (
+          <div className="bg-[#151820] text-white border-b border-[#2A2F3D] px-4 lg:px-6 py-2 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar text-[11px] font-mono-num">
+            <div className="flex items-center gap-4 shrink-0">
+              <span
+                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                  accountMode === 'real' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-[#00A878]/20 text-[#00A878]'
+                }`}
+              >
+                {accountMode === 'real'
+                  ? activeConnectedAccount?.deriv_account_id || 'REAL'
+                  : 'DEMO'}
+              </span>
+              <span>
+                <span className="text-slate-400">Balance: </span>
+                <strong>{formatMoney(activeBalance, { hideable: true })}</strong>
+              </span>
+              <span>
+                <span className="text-slate-400">Equity: </span>
+                <strong>{formatMoney(liveEquity, { hideable: true })}</strong>
+              </span>
+              <span>
+                <span className="text-slate-400">In Trades: </span>
+                <strong>{formatMoney(inTradesUsd, { hideable: true })}</strong>
+              </span>
+              <span>
+                <span className="text-slate-400">Available: </span>
+                <strong>{formatMoney(availableMargin, { hideable: true })}</strong>
+              </span>
+            </div>
+            <div className="shrink-0">
+              <span className="text-slate-400">Live P/L: </span>
+              <strong className={liveFloatingPnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}>
+                {hideBalances
+                  ? '••••'
+                  : `${liveFloatingPnl >= 0 ? '+' : '-'}${formatMoney(Math.abs(liveFloatingPnl))}`}
+              </strong>
+            </div>
+          </div>
+        )}
 
         {/* Viewport Page Content */}
         <main className="flex-1 pb-24 lg:pb-8">{children}</main>

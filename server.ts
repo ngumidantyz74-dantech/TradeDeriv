@@ -17,7 +17,7 @@ import {
   getSetting,
   getCachedSetting,
 } from './server/db.ts';
-import { derivWs } from './server/deriv-client.ts';
+import { derivWs, checkDerivRestHealth } from './server/deriv-client.ts';
 import { startMtmPositionMonitor } from './server/trade-execution.ts';
 import { independentFeed } from './server/independent-feed.ts';
 
@@ -60,13 +60,17 @@ async function bootstrapServer() {
 
   // Health & Public Settings
   app.get('/api/health', async (_req, res) => {
-    const database = await checkDatabaseHealth();
+    const [database, derivRest] = await Promise.all([
+      checkDatabaseHealth(),
+      checkDerivRestHealth().catch(() => ({ ok: false, status: 0, latencyMs: 0 })),
+    ]);
     res.json({
       ok: true,
       status: 'ok',
       service: 'TradeDeriv',
       database,
       deriv: derivWs.getDiagnostics(),
+      derivRest,
       timestamp: new Date().toISOString(),
     });
   });

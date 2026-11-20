@@ -679,13 +679,43 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
               {Array.isArray(commData.markupStatistics?.breakdown) && commData.markupStatistics.breakdown.length > 0 && (
                 <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
-                  <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between">
+                  <div className="px-4 py-3 border-b border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2">
                     <h3 className="font-display text-xs font-bold uppercase tracking-wider text-slate-300">
                       Deriv Application Breakdown
                     </h3>
-                    <span className="text-[11px] font-mono-num text-slate-400">
-                      {commData.markupStatistics.breakdown.length} entries
-                    </span>
+                    <div className="flex items-center gap-3">
+                      <span className="text-[11px] font-mono-num text-slate-400">
+                        {commData.markupStatistics.breakdown.length} entries
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          const header = 'App_Period,Contracts,Volume_USD,App_Markup_USD\n';
+                          const rows = (commData.markupStatistics.breakdown || [])
+                            .map((row: any, idx: number) => {
+                              const label = String(
+                                row.app_name || row.name || row.date || row.app_id || row.id || `Entry_${idx + 1}`
+                              ).replace(/,/g, ' ');
+                              const contracts = Number(row.transactions_count ?? row.contract_count ?? row.trades ?? 0);
+                              const vol = Number(row.volume_usd ?? row.total_volume_usd ?? 0).toFixed(2);
+                              const mk = Number(row.app_markup_usd ?? row.markup_usd ?? row.total_app_markup_usd ?? 0).toFixed(2);
+                              return `${label},${contracts},${vol},${mk}`;
+                            })
+                            .join('\n');
+                          const blob = new Blob([header + rows], { type: 'text/csv' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = `deriv_markup_${commData.dateFrom || 'from'}_${commData.dateTo || 'to'}.csv`;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                          flash('Deriv markup breakdown CSV exported');
+                        }}
+                        className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-[11px] font-semibold text-white cursor-pointer"
+                      >
+                        Export Markup CSV
+                      </button>
+                    </div>
                   </div>
                   <table className="w-full text-xs">
                     <thead>
@@ -1934,9 +1964,32 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       </p>
                     </div>
                     <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                      <p className="text-xs text-slate-400">Runtime Environment</p>
-                      <p className="font-mono text-sm font-bold mt-1">{diagnostics.environment?.nodeEnv || 'production'}</p>
+                      <p className="text-xs text-slate-400">Runtime &amp; Deriv REST Health</p>
+                      <p className="font-mono text-sm font-bold mt-1">
+                        {diagnostics.environment?.nodeEnv || 'production'} ·{' '}
+                        <span className={diagnostics.derivRest?.ok ? 'text-[#00A878]' : 'text-amber-400'}>
+                          REST {diagnostics.derivRest?.ok ? 'OK' : 'WARN'} ({diagnostics.derivRest?.latencyMs ?? 0}ms)
+                        </span>
+                      </p>
                       <p className="text-[11px] text-slate-400 font-mono">Deriv App ID: {diagnostics.environment?.derivAppId}</p>
+                      <div className="flex flex-wrap gap-2 mt-2 text-[10px]">
+                        <a
+                          href={diagnostics.derivDocs?.llmsTxt || 'https://developers.deriv.com/llms.txt'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sky-400 hover:underline inline-flex items-center gap-1"
+                        >
+                          llms.txt <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                        <a
+                          href={diagnostics.derivDocs?.mcp || 'https://mcp-api.deriv.com/mcp'}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          className="text-sky-400 hover:underline inline-flex items-center gap-1"
+                        >
+                          Deriv MCP <ExternalLink className="w-2.5 h-2.5" />
+                        </a>
+                      </div>
                     </div>
                   </div>
 

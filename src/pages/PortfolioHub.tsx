@@ -84,20 +84,38 @@ export const PortfolioHub: React.FC = () => {
     real: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
     demo: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
   } | null>(null);
+  const [derivWallets, setDerivWallets] = useState<any[]>([]);
+  const [derivWalletsStatus, setDerivWalletsStatus] = useState<string>('');
+  const [liveExchangeRate, setLiveExchangeRate] = useState<{ rate: number; source: string } | null>(null);
+  const [partnerOverview, setPartnerOverview] = useState<{ verified: boolean; overview: any; message?: string } | null>(null);
+  const [tagEmail, setTagEmail] = useState('');
+  const [tagClientId, setTagClientId] = useState('');
+  const [tagLoginId, setTagLoginId] = useState('');
+  const [checkingTag, setCheckingTag] = useState(false);
+  const [tagResult, setTagResult] = useState<any>(null);
 
   const loadPortfolioData = useCallback(async () => {
     try {
-      const [txRes, agRes, p2pRes, perfRes] = await Promise.all([
+      const [txRes, agRes, p2pRes, perfRes, walletsRes, fxRes] = await Promise.all([
         apiFetch<{ transactions: CashierTransaction[] }>(`/api/cashier/transactions?accountMode=${accountMode}`),
         apiFetch<{ agents: PaymentAgent[] }>('/api/cashier/payment-agents'),
         apiFetch<{ adverts: P2PAdvert[] }>('/api/cashier/p2p/adverts'),
         apiFetch<any>('/api/analytics/performance').catch(() => null),
+        apiFetch<{ derivWallets?: any[]; derivWalletsStatus?: string }>('/api/cashier/wallets?sync=1').catch(() => null),
+        apiFetch<{ rate: number; source: string }>('/api/cashier/exchange-rate?base=USD&target=KES').catch(() => null),
       ]);
       setTransactions(txRes.transactions || []);
       setAgents(agRes.agents || []);
       setAdverts(p2pRes.adverts || []);
       if (perfRes?.real && perfRes?.demo) {
         setPerfSplit({ real: perfRes.real, demo: perfRes.demo });
+      }
+      if (walletsRes) {
+        setDerivWallets(walletsRes.derivWallets || []);
+        setDerivWalletsStatus(walletsRes.derivWalletsStatus || '');
+      }
+      if (fxRes?.rate) {
+        setLiveExchangeRate({ rate: fxRes.rate, source: fxRes.source });
       }
     } catch {
       // ignore initial error
@@ -107,6 +125,39 @@ export const PortfolioHub: React.FC = () => {
   useEffect(() => {
     loadPortfolioData();
   }, [loadPortfolioData]);
+
+  useEffect(() => {
+    if (subTab !== 'partners') return;
+    apiFetch<{ verified: boolean; overview: any; message?: string }>('/api/partners/overview')
+      .then((res) => setPartnerOverview(res))
+      .catch(() => {});
+  }, [subTab]);
+
+  const handleCheckClientTag = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!tagEmail.trim() && !tagClientId.trim() && !tagLoginId.trim()) {
+      showToast('Enter an email, client_id, or loginid to check', 'error');
+      return;
+    }
+    setCheckingTag(true);
+    setTagResult(null);
+    try {
+      const res = await apiFetch<{ result: any }>('/api/partners/client-tags/check', {
+        method: 'POST',
+        body: JSON.stringify({
+          email: tagEmail.trim() || undefined,
+          client_id: tagClientId.trim() || undefined,
+          loginid: tagLoginId.trim() || undefined,
+        }),
+      });
+      setTagResult(res.result);
+      showToast('Partner client tag checked', 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Unable to check client tag', 'error');
+    } finally {
+      setCheckingTag(false);
+    }
+  };
 
   const {
     optionsBal,
@@ -399,6 +450,54 @@ export const PortfolioHub: React.FC = () => {
       <div className="px-5 sm:px-8 mt-6 space-y-8 pb-8">
         {(subTab === 'overview' || subTab === 'wallet') && (
           <>
+            {subTab === 'wallet' && (
+              <section className="space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-display text-lg font-bold">Synced Deriv Wallets &amp; FX Rate</h2>
+                    <p className="text-xs text-slate-500">
+                      Upstream Deriv REST wallets ({derivWalletsStatus || 'local'})
+                    </p>
+                  </div>
+                  {liveExchangeRate && (
+                    <span className="px-3 py-1.5 rounded-full bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] font-mono-num text-xs font-bold">
+                      1 USD = {liveExchangeRate.rate.toFixed(2)} KES
+                    </span>
+                  )}
+                </div>
+
+                {derivWallets.length === 0 ? (
+                  <div className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] text-xs text-slate-500">
+                    Connect a Deriv OAuth or PAT account to sync native multi-currency Deriv Wallets (`/wallet/v1/wallets`).
+                  </div>
+                ) : (
+                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                    {derivWallets.map((w: any, idx: number) => (
+                      <div
+                        key={w.wallet_id || w.account_id || w.currency || idx}
+                        className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] space-y-1"
+                      >
+                        <div className="flex items-center justify-between text-xs">
+                          <span className="font-bold font-mono">{w.currency || w.wallet_currency || 'USD'} Wallet</span>
+                          <span className="px-2 py-0.5 rounded-full bg-[#00A878]/15 text-[#00A878] text-[10px] font-bold uppercase">
+                            {w.account_type || w.type || 'Deriv'}
+                          </span>
+                        </div>
+                        <p className="font-mono-num text-lg font-bold">
+                          {Number(w.balance ?? w.amount ?? 0).toFixed(2)} {w.currency || 'USD'}
+                        </p>
+                        {w.converted_balance !== undefined && (
+                          <p className="text-[11px] text-slate-400 font-mono-num">
+                            ≈ ${Number(w.converted_balance).toFixed(2)} USD
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </section>
+            )}
+
             {/* Other payment methods matching screenshot */}
             <section>
               <h2 className="font-display text-lg font-bold mb-3.5">Other payment methods</h2>
@@ -622,6 +721,78 @@ export const PortfolioHub: React.FC = () => {
                   Open Deriv Partner Link <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>
+            </div>
+
+            {/* Live Deriv Partner Analytics & Client Tag Checker */}
+            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+              <div className="p-5 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="font-display text-sm font-bold flex items-center gap-2">
+                    <ShieldCheck className="w-4 h-4 text-[#00A878]" /> Deriv Partner Analytics Overview
+                  </h3>
+                  <span
+                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                      partnerOverview?.verified
+                        ? 'bg-[#00A878]/15 text-[#00A878]'
+                        : 'bg-amber-500/15 text-amber-500'
+                    }`}
+                  >
+                    {partnerOverview?.verified ? 'Verified REST' : 'Status Info'}
+                  </span>
+                </div>
+                {partnerOverview?.verified && partnerOverview?.overview ? (
+                  <pre className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] font-mono text-[11px] overflow-x-auto max-h-44">
+                    {JSON.stringify(partnerOverview.overview, null, 2)}
+                  </pre>
+                ) : (
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    {partnerOverview?.message ||
+                      'Queries /partners/analytics/v1/overview when a Deriv Partner token is connected.'}
+                  </p>
+                )}
+              </div>
+
+              <form
+                onSubmit={handleCheckClientTag}
+                className="p-5 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] space-y-3"
+              >
+                <h3 className="font-display text-sm font-bold">Partner Client Tag Checker</h3>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                  <input
+                    type="email"
+                    placeholder="Client email"
+                    value={tagEmail}
+                    onChange={(e) => setTagEmail(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Client ID"
+                    value={tagClientId}
+                    onChange={(e) => setTagClientId(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-mono outline-none"
+                  />
+                  <input
+                    type="text"
+                    placeholder="LoginID (CR...)"
+                    value={tagLoginId}
+                    onChange={(e) => setTagLoginId(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-mono outline-none"
+                  />
+                </div>
+                <button
+                  type="submit"
+                  disabled={checkingTag}
+                  className="px-4 py-2 rounded-full bg-[#1958B7] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
+                >
+                  {checkingTag ? 'Checking...' : 'Check Client Attribution'}
+                </button>
+                {tagResult && (
+                  <pre className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] font-mono text-[11px] overflow-x-auto max-h-36">
+                    {JSON.stringify(tagResult, null, 2)}
+                  </pre>
+                )}
+              </form>
             </div>
 
             <div>

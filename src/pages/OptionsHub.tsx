@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   CandlestickChart,
   RotateCcw,
@@ -8,14 +8,21 @@ import {
   Zap,
   TrendingUp,
   ArrowUpDown,
+  Hash,
+  Layers,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
 import { SparklineSvg } from '../components/SparklineSvg';
+import { RiseFallTemplateView } from '../components/deriv-templates/RiseFallTemplateView';
+import { DigitsNoChartTemplateView } from '../components/deriv-templates/DigitsNoChartTemplateView';
+import { AccumulatorsTemplateView } from '../components/deriv-templates/AccumulatorsTemplateView';
 import type { TradeWorkspaceMode } from '../types';
 
 const MOST_TRADED_CODES = ['1HZ100V', '1HZ75V', '1HZ10V', '1HZ25V', 'R_100'];
+
+type DerivTemplateTab = 'risefall' | 'digits' | 'accumulators';
 
 export const OptionsHub: React.FC = () => {
   const {
@@ -28,13 +35,24 @@ export const OptionsHub: React.FC = () => {
     ticks,
     refreshAll,
     setActiveTab,
+    desiredTradeMode,
     setDesiredTradeMode,
     setSelectedSymbol,
     showToast,
   } = useApp();
 
+  const [activeTemplate, setActiveTemplate] = useState<DerivTemplateTab>('risefall');
   const [tradeFilter, setTradeFilter] = useState<'Deriv Trader' | 'Deriv Bot' | 'SmartTrader'>('Deriv Trader');
   const [resetting, setResetting] = useState(false);
+  const workspaceRef = useRef<HTMLElement | null>(null);
+
+  useEffect(() => {
+    if (!desiredTradeMode) return;
+    if (desiredTradeMode === 'Rise/Fall') setActiveTemplate('risefall');
+    else if (desiredTradeMode === 'Digits') setActiveTemplate('digits');
+    else if (desiredTradeMode === 'Accumulators') setActiveTemplate('accumulators');
+    setDesiredTradeMode(null);
+  }, [desiredTradeMode, setDesiredTradeMode]);
 
   const { optionsBal: totalValue } = getCanonicalBalances(user, accounts, accountMode, null);
 
@@ -69,15 +87,25 @@ export const OptionsHub: React.FC = () => {
     };
   });
 
-  const tradeTypes: Array<{ name: string; tab: 'mt5-tv'; mode: TradeWorkspaceMode }> = [
-    { name: 'Rise/Fall', tab: 'mt5-tv', mode: 'Rise/Fall' },
-    { name: 'Higher/Lower', tab: 'mt5-tv', mode: 'Rise/Fall' },
-    { name: 'Matches/Differs', tab: 'mt5-tv', mode: 'Digits' },
-    { name: 'Even/Odd', tab: 'mt5-tv', mode: 'Digits' },
-    { name: 'Accumulators', tab: 'mt5-tv', mode: 'Accumulators' },
-    { name: 'Over/Under', tab: 'mt5-tv', mode: 'Digits' },
+  const openTemplate = (tpl: DerivTemplateTab) => {
+    setActiveTemplate(tpl);
+    workspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  const tradeTypes: Array<{
+    name: string;
+    template?: DerivTemplateTab;
+    tab?: 'mt5-tv';
+    mode: TradeWorkspaceMode;
+  }> = [
+    { name: 'Rise/Fall', template: 'risefall', mode: 'Rise/Fall' },
+    { name: 'Higher/Lower', template: 'risefall', mode: 'Rise/Fall' },
+    { name: 'Matches/Differs', template: 'digits', mode: 'Digits' },
+    { name: 'Even/Odd', template: 'digits', mode: 'Digits' },
+    { name: 'Accumulators', template: 'accumulators', mode: 'Accumulators' },
+    { name: 'Over/Under', template: 'digits', mode: 'Digits' },
     { name: 'Multipliers', tab: 'mt5-tv', mode: 'MT5 Market' },
-    { name: 'Touch/No Touch', tab: 'mt5-tv', mode: 'Rise/Fall' },
+    { name: 'Touch/No Touch', template: 'risefall', mode: 'Rise/Fall' },
     { name: 'Vanillas', tab: 'mt5-tv', mode: 'MT5 Market' },
     { name: 'Turbos', tab: 'mt5-tv', mode: 'MT5 Market' },
   ];
@@ -115,16 +143,27 @@ export const OptionsHub: React.FC = () => {
         </p>
         <p className="text-xs text-slate-400 mt-1">Updated just now</p>
 
-        <div className="flex items-center justify-center lg:justify-start gap-12 mt-6">
+        <div className="flex items-center justify-center lg:justify-start gap-10 mt-6">
           <button
             type="button"
-            onClick={() => setActiveTab('mt5-tv')}
+            onClick={() => workspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' })}
             className="flex flex-col items-center gap-2 cursor-pointer"
           >
             <span className="w-12 h-12 rounded-full bg-[#FF444F] hover:bg-[#E63946] flex items-center justify-center">
               <CandlestickChart className="w-5 h-5 text-white" />
             </span>
-            <span className="text-xs font-medium">Trade</span>
+            <span className="text-xs font-medium">Trade Options</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('mt5-tv')}
+            className="flex flex-col items-center gap-2 cursor-pointer"
+          >
+            <span className="w-12 h-12 rounded-full border border-white/30 hover:bg-white/10 flex items-center justify-center">
+              <Activity className="w-5 h-5 text-white" />
+            </span>
+            <span className="text-xs font-medium">MT5 Chart</span>
           </button>
 
           {accountMode === 'demo' && (
@@ -143,8 +182,63 @@ export const OptionsHub: React.FC = () => {
         </div>
       </section>
 
+      {/* Deriv Templates Interactive Trading Workspace */}
+      <section ref={workspaceRef} className="px-5 sm:px-8 mt-7">
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+          <div>
+            <h2 className="font-display text-lg font-bold">Deriv Options Workspace</h2>
+            <p className="text-xs text-slate-500 dark:text-slate-400">
+              Trade Rise/Fall, Digits (No Chart), and Accumulators with live Deriv proposals &amp; instant execution.
+            </p>
+          </div>
+
+          <div className="inline-flex items-center bg-[#F4F5F7] dark:bg-[#181C25] p-1 rounded-xl border border-slate-200 dark:border-[#2A2F3D] overflow-x-auto no-scrollbar">
+            <button
+              type="button"
+              onClick={() => setActiveTemplate('risefall')}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                activeTemplate === 'risefall'
+                  ? 'bg-[#FF444F] text-white'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/5'
+              }`}
+            >
+              <TrendingUp className="w-3.5 h-3.5" />
+              <span>Rise / Fall</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTemplate('digits')}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                activeTemplate === 'digits'
+                  ? 'bg-[#FF444F] text-white'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/5'
+              }`}
+            >
+              <Hash className="w-3.5 h-3.5" />
+              <span>Digits (No Chart)</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setActiveTemplate('accumulators')}
+              className={`inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold whitespace-nowrap cursor-pointer transition-colors ${
+                activeTemplate === 'accumulators'
+                  ? 'bg-[#FF444F] text-white'
+                  : 'text-slate-600 dark:text-slate-300 hover:bg-white/60 dark:hover:bg-white/5'
+              }`}
+            >
+              <Layers className="w-3.5 h-3.5" />
+              <span>Accumulators</span>
+            </button>
+          </div>
+        </div>
+
+        {activeTemplate === 'risefall' && <RiseFallTemplateView />}
+        {activeTemplate === 'digits' && <DigitsNoChartTemplateView />}
+        {activeTemplate === 'accumulators' && <AccumulatorsTemplateView />}
+      </section>
+
       {/* Most traded markets */}
-      <section className="px-5 sm:px-8 mt-7">
+      <section className="px-5 sm:px-8 mt-8">
         <h2 className="font-display text-lg font-bold mb-3.5">Most traded markets</h2>
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-3.5">
           {featuredMarkets.map((m) => {
@@ -155,7 +249,7 @@ export const OptionsHub: React.FC = () => {
                 type="button"
                 onClick={() => {
                   setSelectedSymbol(m.symbol);
-                  setActiveTab('mt5-tv');
+                  workspaceRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
                 }}
                 className="text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
               >
@@ -271,9 +365,11 @@ export const OptionsHub: React.FC = () => {
               onClick={() => {
                 if (tradeFilter === 'Deriv Bot') {
                   setActiveTab('bot-builder');
+                } else if (tt.template) {
+                  openTemplate(tt.template);
                 } else {
                   setDesiredTradeMode(tt.mode);
-                  setActiveTab(tt.tab);
+                  setActiveTab(tt.tab || 'mt5-tv');
                 }
               }}
               className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2.5 text-center cursor-pointer"

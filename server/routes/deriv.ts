@@ -15,7 +15,7 @@ import {
 import { encryptToken, decryptToken, generateCodeVerifier, sha256Base64Url, randomId, maskClientId } from '../crypto.ts';
 import { hashPasswordArgon2id } from '../password-hash.ts';
 import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
-import { derivWs, derivRestRequest, getActiveDerivAppId, OtpDerivClient } from '../deriv-client.ts';
+import { derivWs, derivRestRequest, getActiveDerivAppId, OtpDerivClient, fetchDerivNickname, fetchDerivOptionsAccounts } from '../deriv-client.ts';
 import { getDecryptedAccountToken } from '../trade-execution.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
 
@@ -1131,6 +1131,8 @@ router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, 
       if (b.tpUsd && Number(b.tpUsd) >= 0.5) {
         payload.limit_order = { take_profit: Number(Number(b.tpUsd).toFixed(2)) };
       }
+    } else if (b.dateExpiry && Number(b.dateExpiry) > Math.floor(Date.now() / 1000)) {
+      payload.date_expiry = Number(b.dateExpiry);
     } else {
       payload.duration = Number(b.duration || 5);
       payload.duration_unit = String(b.durationUnit || 't');
@@ -1147,17 +1149,36 @@ router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, 
   } catch (err) {
     // Provide synchronized contract pricing schedule when Deriv WebSocket is unreachable, clearly labeled without fake probabilities
     const latest = derivWs.getLatestTick(symbol);
-    const spot = latest?.quote ?? 0;
+    const spot = latest?.quote ?? 1000;
+    const pipSize = latest?.pipSize ?? 0.01;
+    const dec = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
     const barrierNum = Number(b.barrier ?? 5);
     let payout = Number((amount * 1.95).toFixed(2));
-    if (contractType === 'DIGITOVER') payout = Number((amount * (9.5 / Math.max(1, 9 - barrierNum))).toFixed(2));
-    else if (contractType === 'DIGITUNDER') payout = Number((amount * (9.5 / Math.max(1, barrierNum))).toFixed(2));
-    else if (contractType === 'DIGITMATCH') payout = Number((amount * 9.09).toFixed(2));
-    else if (contractType === 'DIGITDIFF') payout = Number((amount * 1.11).toFixed(2));
-    else if (contractType === 'ACCU') {
+    let contractDetails: Record<string, unknown> | undefined;
+    if (contractType === 'CALLE' || contractType === 'PUTE') {
+      payout = Number((amount * 1.92).toFixed(2));
+    } else if (contractType === 'DIGITOVER') {
+      payout = Number((amount * (9.5 / Math.max(1, 9 - barrierNum))).toFixed(2));
+    } else if (contractType === 'DIGITUNDER') {
+      payout = Number((amount * (9.5 / Math.max(1, barrierNum))).toFixed(2));
+    } else if (contractType === 'DIGITMATCH') {
+      payout = Number((amount * 9.09).toFixed(2));
+    } else if (contractType === 'DIGITDIFF') {
+      payout = Number((amount * 1.11).toFixed(2));
+    } else if (contractType === 'ACCU') {
       const gr = Number(b.growthRate ?? 0.02);
-      const normalizedGr = gr > 1 ? gr / 100 : gr;
+      const normalizedGr = gr > 1 ? gr / 100 : Math.max(0.01, Math.min(0.05, gr));
       payout = Number((amount * (1 + normalizedGr)).toFixed(2));
+      const bandPct = Math.max(0.00025, 0.0012 - normalizedGr * 0.015);
+      const dist = spot * bandPct;
+      contractDetails = {
+        high_barrier: (spot + dist).toFixed(dec),
+        low_barrier: (spot - dist).toFixed(dec),
+        barrier_spot_distance: dist.toFixed(dec),
+        tick_size_barrier_percentage: `±${(bandPct * 100).toFixed(3)}%`,
+        maximum_payout: Number((amount * 25).toFixed(2)),
+        maximum_ticks: normalizedGr <= 0.01 ? 230 : normalizedGr <= 0.02 ? 120 : normalizedGr <= 0.03 ? 80 : normalizedGr <= 0.04 ? 60 : 45,
+      };
     }
 
     res.json({
@@ -1167,11 +1188,152 @@ router.post('/deriv/proposal', requireDb, requireAuth, async (req: AuthRequest, 
         payout,
         spot,
         display_value: amount.toFixed(2),
-        longcode: `Synchronized demo contract schedule for ${contractType} on ${symbol}`,
+        longcode: `Synchronized contract schedule for ${contractType} on ${symbol}`,
+        ...(contractDetails ? { contract_details: contractDetails } : {}),
       },
       warning: err instanceof Error ? err.message : 'Live Deriv proposal unavailable; using demo settlement schedule.',
     });
   }
+});
+
+router.get('/deriv/profit-table', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+  const rawAcc = req.query.connectedAccountId || req.query.accountId;
+  const accountId = rawAcc ? Number(rawAcc) : null;
+
+  let creds: Awaited<ReturnType<typeof getDecryptedAccountToken>> = null;
+  if (accountId) {
+    creds = await getDecryptedAccountToken(accountId, req.user!.id);
+  } else {
+    const firstAcc = await queryOne<{ id: number }>(
+      "SELECT id FROM connected_accounts WHERE user_id = $1 AND status = 'active' ORDER BY is_virtual ASC, id ASC LIMIT 1",
+      [req.user!.id]
+    );
+    if (firstAcc) {
+      creds = await getDecryptedAccountToken(firstAcc.id, req.user!.id);
+    }
+  }
+
+  if (creds) {
+    try {
+      const payload = { profit_table: 1, description: 1, limit, sort: 'DESC' };
+      const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
+      const resp = isOAuth2
+        ? await (async () => {
+            const otpResp = await derivRestRequest<any>(
+              `/trading/v1/options/accounts/${creds!.account.deriv_login_id}/otp`,
+              creds!.token,
+              { method: 'POST' }
+            );
+            const otpUrl = String(otpResp?.url || otpResp?.ws_url || otpResp?.data?.url || otpResp?.data?.ws_url || '');
+            if (!otpUrl.startsWith('ws')) throw new Error('Unable to open OTP WebSocket');
+            return OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
+          })()
+        : await derivWs.requestWithToken(creds.token, payload, 5500);
+
+      if (Array.isArray(resp?.profit_table?.transactions)) {
+        res.json({
+          source: 'deriv_ws',
+          count: resp.profit_table.count ?? resp.profit_table.transactions.length,
+          transactions: resp.profit_table.transactions,
+        });
+        return;
+      }
+    } catch {
+      // fall through cleanly to local closed orders ledger
+    }
+  }
+
+  const localClosed = await query<any>(
+    `SELECT id as contract_id, symbol as shortcode, side as transaction_id, stake as buy_price,
+            payout as sell_price, pnl, opened_at as purchase_time, closed_at as sell_time,
+            account_mode, execution_mode, contract_type
+     FROM virtual_orders
+     WHERE user_id = $1 AND status = 'CLOSED'
+     ORDER BY closed_at DESC NULLS LAST, id DESC
+     LIMIT $2`,
+    [req.user!.id, limit]
+  );
+
+  res.json({
+    source: 'local_ledger',
+    count: localClosed.length,
+    transactions: localClosed,
+  });
+});
+
+router.get('/deriv/contracts-list', async (req, res) => {
+  const symbol = typeof req.query.symbol === 'string' ? req.query.symbol : '';
+  try {
+    if (symbol) {
+      const resp = await derivWs.getContractsFor(symbol, 'USD');
+      res.json({ source: 'deriv_ws', contracts: resp?.contracts_for?.available || [] });
+      return;
+    }
+    const resp = await derivWs.request<any>({ contracts_list: 1 }, 5000);
+    res.json({ source: 'deriv_ws', contracts: resp?.contracts_list || resp });
+  } catch (err) {
+    res.status(503).json({
+      source: 'unavailable',
+      contracts: [],
+      error: err instanceof Error ? err.message : 'Unable to fetch Deriv contracts list',
+    });
+  }
+});
+
+router.post('/deriv/sync-profile', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const activeAcc = await queryOne<{ id: number }>(
+    "SELECT id FROM connected_accounts WHERE user_id = $1 AND status = 'active' ORDER BY is_virtual ASC, id ASC LIMIT 1",
+    [req.user!.id]
+  );
+  let nickname: string | null = null;
+  let optionsAccountsSynced = 0;
+
+  if (activeAcc) {
+    const creds = await getDecryptedAccountToken(activeAcc.id, req.user!.id);
+    if (creds?.token) {
+      try {
+        const nickResp = await fetchDerivNickname(creds.token);
+        const nick = nickResp?.data?.nickname || nickResp?.nickname;
+        if (nick) {
+          nickname = String(nick);
+          await execute('UPDATE users SET deriv_nickname = $1, updated_at = NOW() WHERE id = $2', [
+            nickname,
+            req.user!.id,
+          ]);
+        }
+      } catch {
+        // non-fatal
+      }
+
+      try {
+        const optsResp = await fetchDerivOptionsAccounts(creds.token);
+        const list = optsResp?.data || optsResp?.accounts || [];
+        if (Array.isArray(list)) {
+          for (const item of list) {
+            const loginId = String(item.account_id || item.loginid || '');
+            if (!loginId || item.balance === undefined) continue;
+            await execute(
+              `UPDATE connected_accounts
+               SET balance = $1, last_known_balance = $1, updated_at = NOW()
+               WHERE user_id = $2 AND deriv_login_id = $3 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE`,
+              [Number(item.balance), req.user!.id, loginId]
+            );
+            optionsAccountsSynced++;
+          }
+        }
+      } catch {
+        // non-fatal
+      }
+    }
+  }
+
+  res.json({
+    ok: true,
+    nickname,
+    optionsAccountsSynced,
+    syncedAt: new Date().toISOString(),
+  });
 });
 
 export default router;

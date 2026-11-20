@@ -45,6 +45,9 @@ import {
   PanelRight,
   Bookmark,
   Save,
+  History,
+  Rows3,
+  Columns3,
 } from 'lucide-react';
 import { useApp } from '../../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../../lib/api';
@@ -150,6 +153,7 @@ export const MT5TradingView: React.FC = () => {
     saveWorkspacePreferences,
     desiredTradeMode,
     setDesiredTradeMode,
+    setActiveTab,
   } = useApp();
 
   // MarketWatch & Collapsible Workspace State
@@ -327,6 +331,16 @@ export const MT5TradingView: React.FC = () => {
   const [dockTab, setDockTab] = useState<DockTab>('open');
   const [historySearch, setHistorySearch] = useState('');
   const [historyModeFilter, setHistoryModeFilter] = useState<'all' | 'real' | 'demo'>('all');
+  const [stackedLayout, setStackedLayout] = useState(true);
+  const [contractHistoryModal, setContractHistoryModal] = useState<{
+    orderId: number;
+    symbol: string;
+    source: string;
+    history: any[];
+  } | null>(null);
+  const [historySubView, setHistorySubView] = useState<'local' | 'deriv_profit'>('local');
+  const [profitRows, setProfitRows] = useState<any[]>([]);
+  const [profitLoading, setProfitLoading] = useState(false);
 
   // Chart Refs
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
@@ -942,15 +956,18 @@ export const MT5TradingView: React.FC = () => {
       }
     }
 
-    // Open Order Lines (strictly matching active Real vs Demo mode)
+    // Open Order Lines (strictly matching active Real vs Demo mode, deduplicated for clean axis readability)
     const symOpenOrders = orders.filter(
       (o) =>
         o.status === 'OPEN' &&
         o.symbol === selectedSymbol &&
         (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
     );
+    const seenTpKeys = new Set<string>();
+    const seenSlKeys = new Set<string>();
     for (const o of symOpenOrders) {
       const livePnl = computeLiveOrderMetrics(o, ticks).pnl;
+      const sideShort = o.side === 'BUY' || o.side === 'CALL' || o.side === 'ACCU' ? 'B' : 'S';
 
       priceLinesRef.current.push(
         series.createPriceLine({
@@ -959,32 +976,40 @@ export const MT5TradingView: React.FC = () => {
           lineWidth: 1,
           lineStyle: LineStyle.Solid,
           axisLabelVisible: true,
-          title: `${o.side} ${o.lots}L (${livePnl >= 0 ? '+' : ''}$${livePnl.toFixed(2)})`,
+          title: `${sideShort} ${o.lots}L ${livePnl >= 0 ? '+' : ''}$${livePnl.toFixed(2)}`,
         })
       );
       if (o.tp_price) {
-        priceLinesRef.current.push(
-          series.createPriceLine({
-            price: o.tp_price,
-            color: '#10B981',
-            lineWidth: 1,
-            lineStyle: LineStyle.Dotted,
-            axisLabelVisible: true,
-            title: `TP $${(o.tp_usd || 0).toFixed(2)}`,
-          })
-        );
+        const tpKey = Number(o.tp_price).toFixed(decimals);
+        if (!seenTpKeys.has(tpKey)) {
+          seenTpKeys.add(tpKey);
+          priceLinesRef.current.push(
+            series.createPriceLine({
+              price: o.tp_price,
+              color: '#10B981',
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              axisLabelVisible: true,
+              title: `TP +$${(o.tp_usd || 0).toFixed(2)}`,
+            })
+          );
+        }
       }
       if (o.sl_price) {
-        priceLinesRef.current.push(
-          series.createPriceLine({
-            price: o.sl_price,
-            color: '#EF4444',
-            lineWidth: 1,
-            lineStyle: LineStyle.Dotted,
-            axisLabelVisible: true,
-            title: `SL -$${(o.sl_usd || 0).toFixed(2)}`,
-          })
-        );
+        const slKey = Number(o.sl_price).toFixed(decimals);
+        if (!seenSlKeys.has(slKey)) {
+          seenSlKeys.add(slKey);
+          priceLinesRef.current.push(
+            series.createPriceLine({
+              price: o.sl_price,
+              color: '#EF4444',
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              axisLabelVisible: true,
+              title: `SL -$${(o.sl_usd || 0).toFixed(2)}`,
+            })
+          );
+        }
       }
     }
   }, [hLines, trendLines, fibs, drawingsVisible, orders, selectedSymbol, decimals, indPrefs.smc, smcData, accountMode, candles.length, ticks]);
@@ -1268,6 +1293,47 @@ export const MT5TradingView: React.FC = () => {
       showToast(sanitizeUiError(err, 'Close failed'), 'error');
     }
   };
+
+  const handleCancelOrder = async (id: number) => {
+    try {
+      await apiFetch(`/api/orders/${id}/cancel`, { method: 'POST' });
+      await Promise.all([refreshOrders(), refreshAll()]);
+      showToast('Contract cancelled', 'info');
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Cancel failed'), 'error');
+    }
+  };
+
+  const handleOpenContractHistory = async (orderId: number, symbol: string) => {
+    try {
+      const res = await apiFetch<{ history: any[]; source?: string }>(
+        `/api/orders/${orderId}/contract-history`
+      );
+      setContractHistoryModal({
+        orderId,
+        symbol,
+        source: res.source || 'local',
+        history: res.history || [],
+      });
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Unable to load contract history'), 'error');
+    }
+  };
+
+  const loadDerivProfitTable = useCallback(async () => {
+    setProfitLoading(true);
+    try {
+      const accParam = activeConnectedAccount?.id
+        ? `&connectedAccountId=${encodeURIComponent(String(activeConnectedAccount.id))}`
+        : '';
+      const res = await apiFetch<{ transactions: any[] }>(`/api/deriv/profit-table?limit=25${accParam}`);
+      setProfitRows(res.transactions || []);
+    } catch (err) {
+      showToast(sanitizeUiError(err, 'Unable to load profit table'), 'error');
+    } finally {
+      setProfitLoading(false);
+    }
+  }, [activeConnectedAccount?.id, showToast]);
 
   const openEditLimitsModal = (o: (typeof openOrders)[number]) => {
     setEditingLimitsOrder({
@@ -1601,6 +1667,18 @@ export const MT5TradingView: React.FC = () => {
         <div className="flex items-center gap-2">
           <button
             type="button"
+            onClick={() => setStackedLayout((v) => !v)}
+            className={`px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              stackedLayout
+                ? 'bg-[#FF444F] text-white'
+                : 'bg-[#F4F5F7] dark:bg-[#111319] text-slate-600 dark:text-slate-300'
+            }`}
+          >
+            {stackedLayout ? <Rows3 className="w-3.5 h-3.5" /> : <Columns3 className="w-3.5 h-3.5" />}
+            {stackedLayout ? 'Stacked View' : 'Split 3-Col'}
+          </button>
+          <button
+            type="button"
             onClick={() => setShowMarketWatch((v) => !v)}
             className={`px-3 py-1.5 rounded-xl text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
               showMarketWatch
@@ -1690,11 +1768,11 @@ export const MT5TradingView: React.FC = () => {
         </div>
       </div>
 
-      {/* Top 3-Column Trading Workspace */}
-      <div className="grid grid-cols-1 xl:grid-cols-12 gap-4">
-        {/* Desktop Left MarketWatch Panel (3 cols, collapsible) */}
+      {/* Trading Workspace: Stacked Cards (default) or 3-Column Split */}
+      <div className={stackedLayout ? 'space-y-4' : 'grid grid-cols-1 xl:grid-cols-12 gap-4'}>
+        {/* Desktop Left MarketWatch Panel */}
         {showMarketWatch && (
-        <aside className="hidden xl:flex xl:col-span-3 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] flex-col max-h-[600px]">
+        <aside className={`hidden xl:flex ${stackedLayout ? 'max-h-[260px]' : 'xl:col-span-3 max-h-[600px]'} bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] flex-col`}>
           <div className="p-3 border-b border-slate-100 dark:border-[#2A2F3D] space-y-2.5">
             <div className="flex items-center justify-between">
               <h2 className="font-display text-sm font-bold">MarketWatch</h2>
@@ -1779,18 +1857,24 @@ export const MT5TradingView: React.FC = () => {
         </aside>
         )}
 
-        {/* Center Institutional Chart + Indicators + Drawing Toolbar (expands dynamically when side panels collapse) */}
+        {/* 1. MARKET & CHART */}
         <section
           className={`${
             isFullscreen
               ? 'fixed inset-3 z-50 shadow-2xl'
-              : showMarketWatch && showOrderTicket
-                ? 'xl:col-span-6'
-                : showMarketWatch || showOrderTicket
-                  ? 'xl:col-span-9'
-                  : 'xl:col-span-12'
+              : stackedLayout
+                ? ''
+                : showMarketWatch && showOrderTicket
+                  ? 'xl:col-span-6'
+                  : showMarketWatch || showOrderTicket
+                    ? 'xl:col-span-9'
+                    : 'xl:col-span-12'
           } bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden flex flex-col relative`}
         >
+          <div className="px-4 py-1.5 bg-[#F8F9FB] dark:bg-[#111319] border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-500">
+            <span>1. Market &amp; Chart</span>
+            <span className="font-mono-num text-[#1958B7]">{selectedSymbol}</span>
+          </div>
           {/* Chart Header */}
           <div className="px-3 py-2 sm:px-4 sm:py-3 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
             <div className="min-w-0">
@@ -1896,6 +1980,49 @@ export const MT5TradingView: React.FC = () => {
                 {isFullscreen ? <Minimize2 className="w-3.5 h-3.5" /> : <Maximize2 className="w-3.5 h-3.5" />}
               </button>
             </div>
+          </div>
+
+          {/* Quick Inline Indicator Pills Strip */}
+          <div className="px-3 py-1.5 border-b border-slate-100 dark:border-[#2A2F3D] bg-[#F8F9FB] dark:bg-[#111319] flex items-center gap-1.5 overflow-x-auto no-scrollbar text-[11px]">
+            {(
+              [
+                { key: 'ema20', label: 'EMA(20)' },
+                { key: 'sma20', label: 'SMA(20)' },
+                { key: 'ema50', label: 'EMA(50)' },
+                { key: 'bb', label: 'BB(20)' },
+                { key: 'smc', label: 'SMC' },
+              ] as Array<{ key: keyof IndicatorPrefs; label: string }>
+            ).map((q) => {
+              const on = Boolean(indPrefs[q.key]);
+              return (
+                <button
+                  key={q.key}
+                  type="button"
+                  onClick={() => updateIndPrefs({ [q.key]: !on })}
+                  className={`px-2.5 py-1 rounded-lg font-semibold whitespace-nowrap shrink-0 cursor-pointer border ${
+                    on
+                      ? 'bg-[#151820] text-white dark:bg-[#FF444F] dark:text-white border-transparent'
+                      : 'bg-white dark:bg-[#181C25] border-slate-200 dark:border-[#2A2F3D] text-slate-600 dark:text-slate-300'
+                  }`}
+                >
+                  {q.label}
+                </button>
+              );
+            })}
+            <button
+              type="button"
+              onClick={() => setIndPanelOpen((v) => !v)}
+              className="px-2.5 py-1 rounded-lg bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-slate-500 font-semibold whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              All...
+            </button>
+            <button
+              type="button"
+              onClick={() => setLayoutsOpen((v) => !v)}
+              className="ml-auto px-2.5 py-1 rounded-lg bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-[#1958B7] font-semibold whitespace-nowrap shrink-0 cursor-pointer"
+            >
+              Save Layout
+            </button>
           </div>
 
           {/* Indicators Manager Dropdown Strip */}
@@ -2273,11 +2400,13 @@ export const MT5TradingView: React.FC = () => {
           )}
         </section>
 
-        {/* Right Contract-Aware Order Ticket (3 cols, collapsible) */}
+        {/* 2. PLACE TRADE */}
         {showOrderTicket && (
-        <aside className="xl:col-span-3 bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-3.5">
-          <div className="flex items-center justify-between text-[11px]">
-            <span className="font-semibold text-slate-500">Execution Mode</span>
+        <aside className={`${stackedLayout ? '' : 'xl:col-span-3'} bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-3.5`}>
+          <div className="pb-2 border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between text-[11px]">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-500">
+              2. Place Trade
+            </span>
             <span
               className={`font-bold font-mono tabular-nums ${
                 accountMode === 'real' ? 'text-[#FF444F]' : 'text-[#00A878]'
@@ -2309,6 +2438,20 @@ export const MT5TradingView: React.FC = () => {
               </button>
             ))}
           </div>
+
+          {tradeMode !== 'MT5 Market' && (
+            <button
+              type="button"
+              onClick={() => {
+                setDesiredTradeMode(tradeMode);
+                setActiveTab('options');
+              }}
+              className="w-full py-1.5 px-3 rounded-lg bg-[#FF444F]/10 hover:bg-[#FF444F]/15 text-[#FF444F] text-[11px] font-semibold flex items-center justify-between cursor-pointer"
+            >
+              <span>Open Dedicated {tradeMode} Template</span>
+              <span>Options Hub →</span>
+            </button>
+          )}
 
           {/* Volume Lots (MT5 Market) */}
           {tradeMode === 'MT5 Market' && (
@@ -2837,8 +2980,12 @@ export const MT5TradingView: React.FC = () => {
         )}
       </div>
 
-      {/* Bottom MT5 Terminal Dock */}
+      {/* 3. OPEN POSITIONS & HISTORY */}
       <section className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden">
+        <div className="px-4 py-1.5 bg-[#F8F9FB] dark:bg-[#111319] border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between text-[10px] font-bold uppercase tracking-wider text-slate-500">
+          <span>3. Open Positions &amp; History</span>
+          <span className="font-mono-num">{openOrders.length} open · {closedOrders.length} closed</span>
+        </div>
         <div className="px-4 py-3 bg-[#151820] text-white flex flex-wrap items-center justify-between gap-4">
           <div className="flex flex-wrap items-center gap-6 text-xs">
             <div>
@@ -2916,7 +3063,30 @@ export const MT5TradingView: React.FC = () => {
         {/* History Filter Bar */}
         {dockTab === 'history' && (
           <div className="px-4 py-2.5 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2 bg-[#F8F9FB] dark:bg-[#151820]">
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="flex items-center bg-white dark:bg-[#1A1D26] border border-slate-200 dark:border-[#2A2F3D] p-0.5 rounded-lg">
+                <button
+                  type="button"
+                  onClick={() => setHistorySubView('local')}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold cursor-pointer ${
+                    historySubView === 'local' ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]' : 'text-slate-500'
+                  }`}
+                >
+                  Local Closed
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setHistorySubView('deriv_profit');
+                    loadDerivProfitTable();
+                  }}
+                  className={`px-2.5 py-1 rounded-md text-[11px] font-semibold cursor-pointer ${
+                    historySubView === 'deriv_profit' ? 'bg-[#1958B7] text-white' : 'text-slate-500'
+                  }`}
+                >
+                  Deriv Profit Table
+                </button>
+              </div>
               <input
                 type="text"
                 value={historySearch}
@@ -3030,6 +3200,24 @@ export const MT5TradingView: React.FC = () => {
                           )}
                           <button
                             type="button"
+                            onClick={() => handleOpenContractHistory(o.id, o.symbol)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-slate-200/70 dark:bg-white/10 text-slate-700 dark:text-slate-200 font-semibold hover:bg-slate-300 dark:hover:bg-white/20 cursor-pointer"
+                            title="Contract Update History"
+                          >
+                            <History className="w-3 h-3" /> History
+                          </button>
+                          {o.execution_mode === 'deriv' && (
+                            <button
+                              type="button"
+                              onClick={() => handleCancelOrder(o.id)}
+                              className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-amber-500/15 text-amber-600 dark:text-amber-300 font-semibold hover:bg-amber-500 hover:text-white cursor-pointer"
+                              title="Cancel Deriv contract"
+                            >
+                              Cancel
+                            </button>
+                          )}
+                          <button
+                            type="button"
                             onClick={() => handleCloseOrder(o.id)}
                             className="inline-flex items-center gap-1 px-2.5 py-1 rounded-full bg-[#FF444F]/10 text-[#FF444F] font-semibold hover:bg-[#FF444F] hover:text-white cursor-pointer"
                           >
@@ -3044,7 +3232,7 @@ export const MT5TradingView: React.FC = () => {
             </table>
           )}
 
-          {dockTab === 'history' && (
+          {dockTab === 'history' && historySubView === 'local' && (
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
@@ -3081,6 +3269,50 @@ export const MT5TradingView: React.FC = () => {
                 ))}
               </tbody>
             </table>
+          )}
+
+          {dockTab === 'history' && historySubView === 'deriv_profit' && (
+            <div className="p-4">
+              {profitLoading ? (
+                <p className="text-xs text-slate-500 text-center py-4">Loading Deriv Profit Table...</p>
+              ) : profitRows.length === 0 ? (
+                <p className="text-xs text-slate-500 text-center py-4">No settled Deriv profit table entries found.</p>
+              ) : (
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
+                      <th className="text-left px-3 py-2">Contract</th>
+                      <th className="text-right px-3 py-2">Buy</th>
+                      <th className="text-right px-3 py-2">Sell</th>
+                      <th className="text-right px-3 py-2">Profit</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
+                    {profitRows.slice(0, 25).map((p: any, idx: number) => {
+                      const buy = Number(p.buy_price ?? p.stake ?? 0);
+                      const sell = Number(p.sell_price ?? buy + Number(p.pnl ?? 0));
+                      const pnl = Number(p.profit_loss ?? p.pnl ?? sell - buy);
+                      return (
+                        <tr key={p.contract_id || p.transaction_id || idx}>
+                          <td className="px-3 py-2 font-mono-num font-semibold">
+                            {p.shortcode || p.symbol || `#${p.contract_id || p.id}`}
+                          </td>
+                          <td className="px-3 py-2 text-right font-mono-num">${buy.toFixed(2)}</td>
+                          <td className="px-3 py-2 text-right font-mono-num">${sell.toFixed(2)}</td>
+                          <td
+                            className={`px-3 py-2 text-right font-mono-num font-bold ${
+                              pnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'
+                            }`}
+                          >
+                            {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              )}
+            </div>
           )}
 
           {dockTab === 'exposure' && (
@@ -3448,6 +3680,60 @@ export const MT5TradingView: React.FC = () => {
               </button>
             </div>
           </form>
+        </div>
+      )}
+
+      {/* Contract Update History Modal */}
+      {contractHistoryModal && (
+        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-white dark:bg-[#181C25] rounded-3xl p-6 border border-slate-200 dark:border-[#2A2F3D] space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold flex items-center gap-2">
+                  <History className="w-4 h-4 text-[#1958B7]" /> Contract Update History
+                </h3>
+                <p className="text-[11px] text-slate-500 font-mono">
+                  Order #{contractHistoryModal.orderId} · {contractHistoryModal.symbol} ·{' '}
+                  {contractHistoryModal.source === 'deriv_ws' ? 'Deriv WS' : 'Local Ledger'}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setContractHistoryModal(null)}
+                className="p-1.5 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="max-h-72 overflow-y-auto divide-y divide-slate-100 dark:divide-[#2A2F3D] text-xs">
+              {contractHistoryModal.history.length === 0 ? (
+                <p className="py-4 text-center text-slate-500">No update events recorded yet.</p>
+              ) : (
+                contractHistoryModal.history.map((item: any, idx: number) => (
+                  <div key={idx} className="py-2.5 flex items-center justify-between gap-2">
+                    <div>
+                      <p className="font-semibold capitalize">
+                        {item.action || item.event || 'Limit Update'}
+                      </p>
+                      <p className="text-[11px] text-slate-400 font-mono">
+                        {item.order_type ? `${item.order_type}: ` : ''}
+                        {item.value !== undefined ? item.value : `SL ${item.sl_price ?? item.sl_usd ?? '—'} · TP ${item.tp_price ?? item.tp_usd ?? '—'}`}
+                      </p>
+                    </div>
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      {item.order_expiry_is_after_expiry
+                        ? 'After Expiry'
+                        : item.order_date
+                          ? new Date(Number(item.order_date) * 1000).toLocaleTimeString()
+                          : item.timestamp
+                            ? new Date(item.timestamp).toLocaleTimeString()
+                            : 'Active'}
+                    </span>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
         </div>
       )}
     </div>

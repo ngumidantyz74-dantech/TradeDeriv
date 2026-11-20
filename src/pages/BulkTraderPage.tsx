@@ -9,6 +9,7 @@ export const BulkTraderPage: React.FC = () => {
     instruments,
     ticks,
     orders,
+    accounts,
     accountMode,
     activeConnectedAccount,
     refreshOrders,
@@ -23,7 +24,18 @@ export const BulkTraderPage: React.FC = () => {
   const [contractType, setContractType] = useState('MULTUP');
   const [slUsd, setSlUsd] = useState('1');
   const [tpUsd, setTpUsd] = useState('3');
+  const [selectedAccountIds, setSelectedAccountIds] = useState<number[]>([]);
   const [executing, setExecuting] = useState(false);
+
+  const eligibleAccounts = accounts.filter(
+    (a) => a.status === 'active' && Boolean(a.is_virtual) === (accountMode === 'demo')
+  );
+
+  const toggleTargetAccount = (id: number) => {
+    setSelectedAccountIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : prev.length >= 100 ? prev : [...prev, id]
+    );
+  };
 
   const live = ticks[symbol];
   const inst = instruments.find((i) => i.symbol === symbol);
@@ -43,7 +55,8 @@ export const BulkTraderPage: React.FC = () => {
   const handleBulkFire = async (side: string, overrideType?: string) => {
     setExecuting(true);
     try {
-      const res = await apiFetch<{ count: number }>('/api/orders/bulk', {
+      const useMultiAccountDeriv = selectedAccountIds.length > 0;
+      const res = await apiFetch<{ count: number; mode?: string }>('/api/orders/bulk', {
         method: 'POST',
         body: JSON.stringify({
           count,
@@ -55,12 +68,21 @@ export const BulkTraderPage: React.FC = () => {
           slUsd: Number(slUsd) || null,
           tpUsd: Number(tpUsd) || null,
           accountMode,
-          executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
+          executionMode:
+            useMultiAccountDeriv || (accountMode === 'real' && activeConnectedAccount)
+              ? 'deriv'
+              : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
+          targetAccountIds: useMultiAccountDeriv ? selectedAccountIds : undefined,
         }),
       });
       await Promise.all([refreshOrders(), refreshAll()]);
-      showToast(`Executed ${res.count} concurrent ${side} orders on ${symbol} (${accountMode.toUpperCase()})`, 'success');
+      showToast(
+        useMultiAccountDeriv
+          ? `Deriv Multi-Account Bulk Purchase: ${res.count} ${side} contract(s) on ${symbol}`
+          : `Executed ${res.count} concurrent ${side} orders on ${symbol} (${accountMode.toUpperCase()})`,
+        'success'
+      );
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Bulk execution failed', 'error');
     } finally {
@@ -95,7 +117,7 @@ export const BulkTraderPage: React.FC = () => {
               {accountMode} Mode
             </span>
           </div>
-          <h1 className="font-display text-2xl font-bold">Bulk Trader (1–25 Concurrent Orders)</h1>
+          <h1 className="font-display text-2xl font-bold">Bulk Trader (1–25 Concurrent &amp; Multi-Account REST)</h1>
         </div>
         <div className="text-right font-mono-num">
           <p className="text-xs text-slate-400">{inst?.display_name || symbol}</p>
@@ -120,18 +142,68 @@ export const BulkTraderPage: React.FC = () => {
             </select>
           </div>
 
+          {eligibleAccounts.length > 0 && (
+            <div className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] space-y-2">
+              <div className="flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">
+                  Target Deriv Accounts (Optional · up to 100)
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    setSelectedAccountIds(
+                      selectedAccountIds.length === eligibleAccounts.length
+                        ? []
+                        : eligibleAccounts.map((a) => a.id)
+                    )
+                  }
+                  className="text-[11px] font-semibold text-[#1958B7] hover:underline cursor-pointer"
+                >
+                  {selectedAccountIds.length === eligibleAccounts.length ? 'Clear All' : 'Select All'}
+                </button>
+              </div>
+              <div className="flex flex-wrap gap-1.5">
+                {eligibleAccounts.map((acc) => {
+                  const checked = selectedAccountIds.includes(acc.id);
+                  return (
+                    <button
+                      key={acc.id}
+                      type="button"
+                      onClick={() => toggleTargetAccount(acc.id)}
+                      className={`px-2.5 py-1 rounded-lg text-[11px] font-mono-num font-semibold border cursor-pointer ${
+                        checked
+                          ? 'bg-[#1958B7] text-white border-[#1958B7]'
+                          : 'bg-white dark:bg-[#181C25] border-slate-200 dark:border-[#2A2F3D] text-slate-600 dark:text-slate-300'
+                      }`}
+                    >
+                      {acc.deriv_account_id} ({Number(acc.balance ?? acc.last_known_balance ?? 0).toFixed(2)})
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="text-[10px] text-slate-500">
+                {selectedAccountIds.length > 0
+                  ? `Deriv V2 Bulk Purchase active across ${selectedAccountIds.length} account(s).`
+                  : 'Leave unselected to fire 1–25 concurrent orders on your active account.'}
+              </p>
+            </div>
+          )}
+
           <div>
             <div className="flex items-center justify-between text-xs mb-1">
-              <span className="font-semibold text-slate-500">Concurrent Orders</span>
-              <strong className="font-mono-num text-[#FF444F]">{count}x</strong>
+              <span className="font-semibold text-slate-500">Concurrent Orders (Active Account)</span>
+              <strong className="font-mono-num text-[#FF444F]">
+                {selectedAccountIds.length > 0 ? `${selectedAccountIds.length} acct(s)` : `${count}x`}
+              </strong>
             </div>
             <input
               type="range"
               min="1"
               max="25"
+              disabled={selectedAccountIds.length > 0}
               value={count}
               onChange={(e) => setCount(Number(e.target.value))}
-              className="w-full accent-[#FF444F]"
+              className="w-full accent-[#FF444F] disabled:opacity-40"
             />
           </div>
 
@@ -191,7 +263,7 @@ export const BulkTraderPage: React.FC = () => {
               onClick={() => handleBulkFire('BUY', 'MULTUP')}
               className="py-3 rounded-full bg-[#00A878] hover:bg-[#00966B] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <TrendingUp className="w-4 h-4" /> Fire {count}x BUY
+              <TrendingUp className="w-4 h-4" /> Fire {selectedAccountIds.length > 0 ? `${selectedAccountIds.length}x Acct` : `${count}x`} BUY
             </button>
             <button
               type="button"
@@ -199,7 +271,7 @@ export const BulkTraderPage: React.FC = () => {
               onClick={() => handleBulkFire('SELL', 'MULTDOWN')}
               className="py-3 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-bold text-xs flex items-center justify-center gap-1.5 cursor-pointer"
             >
-              <TrendingDown className="w-4 h-4" /> Fire {count}x SELL
+              <TrendingDown className="w-4 h-4" /> Fire {selectedAccountIds.length > 0 ? `${selectedAccountIds.length}x Acct` : `${count}x`} SELL
             </button>
           </div>
 

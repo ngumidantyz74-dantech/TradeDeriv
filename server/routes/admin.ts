@@ -21,7 +21,7 @@ import {
   verifyAdminReauthToken,
   type AuthRequest,
 } from '../middleware/auth.ts';
-import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
+import { derivWs, derivRestRequest, getActiveDerivAppId, checkDerivRestHealth } from '../deriv-client.ts';
 import { isVirtualDerivAccount } from './deriv.ts';
 import { closeOrderById } from '../trade-execution.ts';
 import { emergencyKillAllBots, getAllActiveBotSessions } from '../bot-engine-service.ts';
@@ -178,8 +178,9 @@ router.post('/admin/reauth', requireDb, requireAdmin, async (req: AuthRequest, r
 });
 
 router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
-  const [database, loginAttempts, errorLogs, securityLogs] = await Promise.all([
+  const [database, derivRest, loginAttempts, errorLogs, securityLogs] = await Promise.all([
     checkDatabaseHealth(),
+    checkDerivRestHealth().catch(() => ({ ok: false, status: 0, latencyMs: 0 })),
     query('SELECT id, email, ip_address, success, reason, created_at FROM admin_login_attempts ORDER BY id DESC LIMIT 50'),
     query('SELECT id, source, severity, message, details_json, created_at FROM system_error_logs ORDER BY id DESC LIMIT 50'),
     query('SELECT id, user_id, event_type, ip_address, details_json, created_at FROM security_logs ORDER BY id DESC LIMIT 50'),
@@ -187,6 +188,11 @@ router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
   res.json({
     database,
     deriv: derivWs.getDiagnostics(),
+    derivRest,
+    derivDocs: {
+      llmsTxt: 'https://developers.deriv.com/llms.txt',
+      mcp: 'https://mcp-api.deriv.com/mcp',
+    },
     environment: {
       nodeEnv: config.nodeEnv,
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),

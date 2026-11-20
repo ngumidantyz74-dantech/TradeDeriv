@@ -71,9 +71,10 @@ export const ProfileHub: React.FC = () => {
   const handleSyncProfile = async () => {
     setSyncingAccounts(true);
     try {
-      await Promise.all([refreshAccounts(true), refreshAll()]);
+      await apiFetch('/api/deriv/sync-profile', { method: 'POST' }).catch(() => null);
+      await Promise.all([refreshAccounts(true), refreshAll(), loadDetails()]);
       setLastSyncedAt(new Date().toLocaleTimeString());
-      showToast('Deriv accounts & profile synchronized', 'success');
+      showToast('Deriv accounts, nickname & profile synchronized', 'success');
     } catch {
       showToast('Sync failed', 'error');
     } finally {
