@@ -22,6 +22,13 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../lib/api';
+import { TemplateChart } from '../components/deriv-templates/TemplateChart';
+import {
+  DERIV_QUICK_STRATEGIES,
+  quickStrategyToAst,
+  fetchQuickStrategyXml,
+  type DerivQuickStrategy,
+} from '../lib/deriv-quick-strategies';
 import type {
   BotAction,
   BotCondition,
@@ -148,6 +155,7 @@ function astToBlocklyXml(ast: BotStrategyAst): string {
 export const BotBuilderPage: React.FC = () => {
   const {
     instruments,
+    orders,
     selectedSymbol,
     accountMode,
     activeConnectedAccount,
@@ -159,6 +167,9 @@ export const BotBuilderPage: React.FC = () => {
   } = useApp();
 
   const [ast, setAst] = useState<BotStrategyAst>(() => createDefaultAst(selectedSymbol || '1HZ100V'));
+  const [quickStratOpen, setQuickStratOpen] = useState(false);
+  const [quickStratCat, setQuickStratCat] = useState<'All' | 'Classic' | 'Accumulators'>('All');
+  const [showLiveChart, setShowLiveChart] = useState(true);
   const [definitionId, setDefinitionId] = useState<number | null>(null);
   const [demoTested, setDemoTested] = useState(false);
   const [definitions, setDefinitions] = useState<BotDefinitionRecord[]>([]);
@@ -647,17 +658,171 @@ export const BotBuilderPage: React.FC = () => {
           </button>
           <button
             type="button"
+            onClick={() => setQuickStratOpen((v) => !v)}
+            className={`px-3 py-2 rounded-xl border text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              quickStratOpen
+                ? 'bg-[#FF444F] text-white border-[#FF444F]'
+                : 'bg-[#F4F5F7] dark:bg-[#181C25] border-slate-200 dark:border-[#2A2F3D]'
+            }`}
+          >
+            <Layers className="w-3.5 h-3.5" /> Quick Strategies (17 XML)
+          </button>
+          <button
+            type="button"
+            onClick={() => setShowLiveChart((v) => !v)}
+            className={`px-3 py-2 rounded-xl border text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap ${
+              showLiveChart
+                ? 'bg-[#00A878]/10 text-[#00A878] border-[#00A878]/40'
+                : 'bg-[#F4F5F7] dark:bg-[#181C25] border-slate-200 dark:border-[#2A2F3D]'
+            }`}
+          >
+            <CandlestickChart className="w-3.5 h-3.5" /> Live Candles
+          </button>
+          <button
+            type="button"
             onClick={() => {
               setSelectedSymbol(ast.market.instrument);
               setActiveTab('mt5-tv');
             }}
             className="p-2 rounded-xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-slate-600 dark:text-slate-300 hover:text-[#FF444F] cursor-pointer"
-            title="Inspect Chart"
+            title="Open Full MT5 TradingView"
           >
-            <CandlestickChart className="w-4 h-4" />
+            <Activity className="w-4 h-4" />
           </button>
         </div>
       </div>
+
+      {/* 17 Official Deriv Bot Quick Strategies Panel (Unpacked from bot-app.zip) */}
+      {quickStratOpen && (
+        <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-3">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div>
+              <h2 className="font-display text-sm font-bold">Official Deriv Bot Quick Strategies (17 XML Templates)</h2>
+              <p className="text-[11px] text-slate-500">
+                Martingale, D&apos;Alembert, Oscar&apos;s Grind, 1-3-2-6, Reverse &amp; Accumulators strategies from Deriv Bot.
+              </p>
+            </div>
+            <div className="inline-flex items-center gap-1 bg-[#F4F5F7] dark:bg-[#111319] p-1 rounded-lg text-xs">
+              {(['All', 'Classic', 'Accumulators'] as const).map((c) => (
+                <button
+                  key={c}
+                  type="button"
+                  onClick={() => setQuickStratCat(c)}
+                  className={`px-3 py-1 rounded-md font-semibold cursor-pointer ${
+                    quickStratCat === c
+                      ? 'bg-[#FF444F] text-white'
+                      : 'text-slate-500 hover:text-[#0E1117] dark:hover:text-white'
+                  }`}
+                >
+                  {c}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 max-h-80 overflow-y-auto pr-1">
+            {DERIV_QUICK_STRATEGIES.filter((s) => quickStratCat === 'All' || s.category === quickStratCat).map(
+              (strat: DerivQuickStrategy) => (
+                <div
+                  key={strat.id}
+                  className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] flex flex-col justify-between gap-2.5"
+                >
+                  <div>
+                    <div className="flex items-center justify-between gap-1 text-[10px] text-slate-400 font-mono-num">
+                      <span>{strat.category}</span>
+                      <span>{strat.defaultContractType}</span>
+                    </div>
+                    <h3 className="font-display text-xs font-bold mt-0.5">{strat.name}</h3>
+                    <p className="text-[11px] text-slate-500 mt-1 line-clamp-2">{strat.description}</p>
+                  </div>
+                  <div className="flex items-center gap-1.5 text-[11px]">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const nextAst = quickStrategyToAst(strat);
+                        setAst(nextAst);
+                        setDefinitionId(null);
+                        setDemoTested(false);
+                        if (strat.defaultGrowthRate) setGrowthRate(String(strat.defaultGrowthRate));
+                        setQuickStratOpen(false);
+                        showToast(`Loaded "${strat.name}" into Visual Bot Builder`, 'success');
+                      }}
+                      className="flex-1 py-1.5 rounded-lg bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
+                    >
+                      Load Bot
+                    </button>
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          const xml = await fetchQuickStrategyXml(strat.xmlFile);
+                          const blob = new Blob([xml], { type: 'application/xml' });
+                          const url = URL.createObjectURL(blob);
+                          const a = document.createElement('a');
+                          a.href = url;
+                          a.download = strat.xmlFile;
+                          a.click();
+                          URL.revokeObjectURL(url);
+                          showToast(`Downloaded ${strat.xmlFile}`, 'success');
+                        } catch {
+                          showToast(`Failed to download ${strat.xmlFile}`, 'error');
+                        }
+                      }}
+                      className="px-2.5 py-1.5 rounded-lg bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] font-semibold cursor-pointer"
+                      title={`Download ${strat.xmlFile}`}
+                    >
+                      XML
+                    </button>
+                  </div>
+                </div>
+              )
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* Live Lightweight Charts Candlestick & Bot Execution Monitor */}
+      {showLiveChart && (
+        <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-2">
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2 text-xs">
+              <span className="font-display font-bold text-sm">
+                Live Bot Candlestick Chart · {ast.market.instrument}
+              </span>
+              {telemetry?.running && (
+                <span className="px-2 py-0.5 rounded-full bg-[#00A878]/15 text-[#00A878] text-[10px] font-bold">
+                  AUTO BOT ACTIVE · {telemetry.tradesPlaced} TRADES · P/L{' '}
+                  {telemetry.realizedPnl >= 0 ? '+' : ''}${Number(telemetry.realizedPnl || 0).toFixed(2)}
+                </span>
+              )}
+            </div>
+            <span className="text-[11px] text-slate-500">
+              Live entries, SL/TP &amp; bot markers plotted directly on candles
+            </span>
+          </div>
+          <TemplateChart
+            symbol={ast.market.instrument}
+            granularity={ast.market.granularity || 60}
+            showControls
+            onGranularityChange={(g) => {
+              const tfLabel =
+                Object.entries(TIMEFRAME_GRANULARITY).find(([, val]) => val === g)?.[0] || '1m';
+              setAst((prev) => ({
+                ...prev,
+                market: { ...prev.market, granularity: g, timeframe: tfLabel },
+              }));
+            }}
+            openOrders={orders.filter(
+              (o) =>
+                o.status === 'OPEN' &&
+                o.symbol === ast.market.instrument &&
+                (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
+            )}
+            recentOrders={orders.filter((o) => o.symbol === ast.market.instrument).slice(0, 15)}
+            heightClass="h-[260px] sm:h-[310px]"
+          />
+        </div>
+      )}
 
       {/* AST JSON / XML Preview Strip */}
       {showCodeModal && (

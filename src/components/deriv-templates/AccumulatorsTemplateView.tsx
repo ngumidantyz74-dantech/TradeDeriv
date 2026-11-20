@@ -74,6 +74,7 @@ export const AccumulatorsTemplateView: React.FC = () => {
   }, [accuSymbols, selectedSymbol]);
 
   const [growthRate, setGrowthRate] = useState<number>(0.02);
+  const [accuGranularity, setAccuGranularity] = useState<number>(1);
   const [stakeStr, setStakeStr] = useState<string>('10');
   const [takeProfitStr, setTakeProfitStr] = useState<string>('');
   const [proposal, setProposal] = useState<AccuProposal | null>(null);
@@ -310,13 +311,16 @@ export const AccumulatorsTemplateView: React.FC = () => {
 
           <TemplateChart
             symbol={activeSymbol.symbol}
-            granularity={1}
+            granularity={accuGranularity}
+            showControls
+            onGranularityChange={setAccuGranularity}
             barriers={{
               high: Number.isFinite(highNum) ? highNum : null,
               low: Number.isFinite(lowNum) ? lowNum : null,
               crossed: barrierCrossed,
             }}
             openOrders={activeAccuPosition ? [activeAccuPosition] : []}
+            recentOrders={orders.filter((o) => o.symbol === activeSymbol.symbol && o.contract_type === 'ACCU').slice(0, 12)}
             heightClass="h-[320px] sm:h-[400px]"
           />
         </div>

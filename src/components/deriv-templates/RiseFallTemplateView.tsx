@@ -231,27 +231,6 @@ export const RiseFallTemplateView: React.FC = () => {
             </div>
 
             <div className="flex items-center gap-3">
-              <div className="inline-flex items-center bg-[#F4F5F7] dark:bg-[#111319] p-0.5 rounded-lg text-[11px]">
-                {[
-                  { label: '1t', g: 1 },
-                  { label: '1m', g: 60 },
-                  { label: '5m', g: 300 },
-                ].map((tf) => (
-                  <button
-                    key={tf.g}
-                    type="button"
-                    onClick={() => setChartGranularity(tf.g)}
-                    className={`px-2.5 py-1 rounded-md font-mono-num font-semibold cursor-pointer ${
-                      chartGranularity === tf.g
-                        ? 'bg-white dark:bg-[#232734] text-[#0E1117] dark:text-white shadow-xs'
-                        : 'text-slate-500'
-                    }`}
-                  >
-                    {tf.label}
-                  </button>
-                ))}
-              </div>
-
               <div className="text-right">
                 <p className="text-[11px] text-slate-500">Spot Price</p>
                 <p className="font-mono-num text-lg font-bold">{currentQuote.toFixed(decimals)}</p>
@@ -262,7 +241,10 @@ export const RiseFallTemplateView: React.FC = () => {
           <TemplateChart
             symbol={activeSymbol.symbol}
             granularity={chartGranularity}
+            showControls
+            onGranularityChange={setChartGranularity}
             openOrders={openRfOrders}
+            recentOrders={orders.filter((o) => o.symbol === activeSymbol.symbol).slice(0, 12)}
             heightClass="h-[320px] sm:h-[400px]"
           />
         </div>
