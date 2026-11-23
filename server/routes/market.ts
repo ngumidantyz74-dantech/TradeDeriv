@@ -81,12 +81,16 @@ router.get('/market/instruments', async (_req, res) => {
           const live = ticks[r.symbol];
           const price = live?.quote ?? r.price ?? 1000;
           const spread = r.spread || 0.15;
-          let sparkline: number[] = [];
-          try {
-            sparkline = JSON.parse(r.sparkline_json || '[]');
-          } catch {
-            sparkline = [];
+          const liveSpark = derivWs.getSparkline(r.symbol, 24);
+          let sparkline: number[] = liveSpark.length >= 2 ? liveSpark : [];
+          if (sparkline.length < 2) {
+            try {
+              sparkline = JSON.parse(r.sparkline_json || '[]');
+            } catch {
+              sparkline = [price];
+            }
           }
+          const changePct = liveSpark.length >= 2 ? derivWs.getChangePct(r.symbol) : r.change_pct ?? 0;
           return {
             symbol: r.symbol,
             display_name: r.display_name,
@@ -98,7 +102,7 @@ router.get('/market/instruments', async (_req, res) => {
             bid: live?.bid ?? Number((price - spread / 2).toFixed(r.pip_size < 0.001 ? 5 : 2)),
             ask: live?.ask ?? Number((price + spread / 2).toFixed(r.pip_size < 0.001 ? 5 : 2)),
             spread,
-            change_pct: r.change_pct ?? 0,
+            change_pct: changePct,
             sparkline,
           };
         })
@@ -119,6 +123,7 @@ router.get('/market/instruments', async (_req, res) => {
   const instruments = CURATED_DERIV_INSTRUMENTS.map((inst) => {
     const live = ticks[inst.symbol];
     const price = live?.quote ?? inst.base_price;
+    const sparkline = derivWs.getSparkline(inst.symbol, 24);
     return {
       symbol: inst.symbol,
       display_name: inst.display_name,
@@ -130,8 +135,8 @@ router.get('/market/instruments', async (_req, res) => {
       bid: live?.bid ?? Number((price - inst.spread / 2).toFixed(inst.pip_size < 0.001 ? 5 : 2)),
       ask: live?.ask ?? Number((price + inst.spread / 2).toFixed(inst.pip_size < 0.001 ? 5 : 2)),
       spread: inst.spread,
-      change_pct: 0,
-      sparkline: [price],
+      change_pct: derivWs.getChangePct(inst.symbol),
+      sparkline: sparkline.length ? sparkline : [price],
     };
   });
   res.json({ instruments });
@@ -217,127 +222,12 @@ router.get('/market/digit-analysis', async (req, res) => {
   });
 });
 
-// Most Active Markets ranked strictly by measurable volatility %, live tick frequency, and platform trade counts
-router.get('/market/most-active', async (_req, res) => {
-  const ticks = derivWs.getAllLatestTicks();
-  let orderCountsBySymbol = new Map<string, number>();
-
-  if (pool) {
-    try {
-      const orders = await query<{ symbol: string }>('SELECT symbol FROM virtual_orders LIMIT 500');
-      for (const o of orders) {
-        orderCountsBySymbol.set(o.symbol, (orderCountsBySymbol.get(o.symbol) || 0) + 1);
-      }
-    } catch {
-      orderCountsBySymbol = new Map();
-    }
-  }
-
-  const ranked = CURATED_DERIV_INSTRUMENTS.map((inst) => {
-    const tick = ticks[inst.symbol];
-    const stats = derivWs.getMarketActivityStats(inst.symbol);
-    const platformTrades = orderCountsBySymbol.get(inst.symbol) || 0;
-    const price = tick?.quote ?? inst.base_price;
-    const activityScore = Number(
-      (stats.volatilityPct * 120 + stats.ticksPerMinute * 0.85 + platformTrades * 4).toFixed(2)
-    );
-    return {
-      symbol: inst.symbol,
-      display_name: inst.display_name,
-      category: inst.category,
-      price,
-      bid: tick?.bid ?? price,
-      ask: tick?.ask ?? price,
-      spread: inst.spread,
-      ticksPerMinute: stats.ticksPerMinute,
-      volatilityPct: stats.volatilityPct,
-      platformTrades,
-      activityScore,
-      tickSource: tick?.source || 'cached',
-    };
-  })
-    .sort((a, b) => b.activityScore - a.activityScore)
-    .slice(0, 20);
-
-  res.json({
-    instruments: ranked,
-    metricBasis:
-      'Ranked strictly by measured recent range volatility %, ticks observed per minute on the live stream, and platform order count. No external market-volume figures are invented.',
-    generatedAt: new Date().toISOString(),
-  });
-});
-
-// Savable MT5 Chart Workspace Layouts
-router.get('/workspace/layouts', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const rows = await query<any>('SELECT * FROM chart_layouts WHERE user_id = $1 ORDER BY id DESC', [req.user!.id]);
-  const layouts = rows.map((r) => ({
-    ...r,
-    layout: (() => {
-      try {
-        return JSON.parse(r.layout_json || '{}');
-      } catch {
-        return {};
-      }
-    })(),
-  }));
-  res.json({ layouts });
-});
-
-router.post('/workspace/layouts', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const b = req.body || {};
-  const name = String(b.name || 'Default MT5 Layout').trim().slice(0, 60);
-  const symbol = String(b.symbol || '1HZ100V');
-  const timeframe = Number(b.timeframe || 60);
-  const layoutJson = JSON.stringify(b.layout || {});
-  const isDefault = Boolean(b.isDefault);
-
-  const row = await queryOne<any>(
-    `INSERT INTO chart_layouts (user_id, name, symbol, timeframe, layout_json, is_default, updated_at)
-     VALUES ($1, $2, $3, $4, $5, $6, NOW())
-     ON CONFLICT (user_id, name) DO UPDATE SET
-       symbol = EXCLUDED.symbol,
-       timeframe = EXCLUDED.timeframe,
-       layout_json = EXCLUDED.layout_json,
-       is_default = EXCLUDED.is_default,
-       updated_at = NOW()
-     RETURNING *`,
-    [req.user!.id, name, symbol, timeframe, layoutJson, isDefault]
-  );
-
-  res.status(201).json({
-    layout: {
-      ...row,
-      layout: b.layout || {},
-    },
-  });
-});
-
-router.delete('/workspace/layouts/:id', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  await execute('DELETE FROM chart_layouts WHERE id = $1 AND user_id = $2', [Number(req.params.id), req.user!.id]);
-  res.json({ ok: true });
-});
-
 // Crypto Exchange pairs & orders
 router.get('/exchange/pairs', (req, res) => {
   const filter = String(req.query.filter || 'trending').toLowerCase();
   const q = String(req.query.q || '').trim().toLowerCase();
 
-  const ticks = derivWs.getAllLatestTicks();
-  let items = EXCHANGE_PAIRS_CATALOG.map((p, idx) => {
-    const liveSym = `cry${p.base}USD`;
-    const live = ticks[liveSym];
-    const price = p.quote === 'USDT' && live ? live.quote : p.price;
-    const sparkline: number[] = [];
-    for (let i = 0; i < 20; i++) {
-      const wave = Math.sin(i * 0.6 + idx) * 0.012 + (p.change24h >= 0 ? i * 0.0008 : -i * 0.0008);
-      sparkline.push(Number((price * (0.99 + wave)).toFixed(price < 0.01 ? 8 : 4)));
-    }
-    return {
-      ...p,
-      price,
-      sparkline,
-    };
-  });
+  let items = derivWs.getAllExchangeTickRates();
 
   if (q) {
     items = items.filter((i) => i.pair.toLowerCase().includes(q) || i.base.toLowerCase().includes(q));

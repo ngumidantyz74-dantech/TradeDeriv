@@ -18,7 +18,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
-import { getCanonicalBalances } from '../lib/balances';
+import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import type { CashierTransaction } from '../types';
 
 type SubTab = 'overview' | 'wallet' | 'partners' | 'trading' | 'p2p';
@@ -46,11 +46,12 @@ interface P2PAdvert {
 }
 
 export const PortfolioHub: React.FC = () => {
-  const { user, accounts, accountMode, setAccountMode, formatMoney, refreshAll, refreshAccounts, setActiveTab, showToast, publicSettings } = useApp();
+  const { user, accounts, orders, ticks, accountMode, setAccountMode, formatMoney, refreshAll, refreshAccounts, setActiveTab, showToast, publicSettings } = useApp();
   const partnerLink = publicSettings.partner?.referralLink || 'https://t.deriv.link?t=FSDRTFVTSKPA';
   const partnerCode = publicSettings.partner?.referralCode || 'VNMH2VHBRTFN';
   const partnerTier = Number(publicSettings.partner?.affiliateTierRate ?? 30);
   const [subTab, setSubTab] = useState<SubTab>('overview');
+  const [hideZeroAssets, setHideZeroAssets] = useState<boolean>(false);
   const [transactions, setTransactions] = useState<CashierTransaction[]>([]);
   const [agents, setAgents] = useState<PaymentAgent[]>([]);
   const [adverts, setAdverts] = useState<P2PAdvert[]>([]);
@@ -70,52 +71,24 @@ export const PortfolioHub: React.FC = () => {
   const [verifyCode, setVerifyCode] = useState('');
   const [hintCode, setHintCode] = useState('');
   const [submitting, setSubmitting] = useState(false);
-  const [transferPreview, setTransferPreview] = useState<{
-    fromLabel: string;
-    toLabel: string;
-    amount: number;
-    fee: number;
-    exchangeRate: number;
-    netReceived: number;
-    honestBridgeNote: string;
-    idempotencyKey: string;
-  } | null>(null);
   const [perfSplit, setPerfSplit] = useState<{
     real: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
     demo: { totalTrades: number; winRatePct: number; netPnlUsd: number; profitFactor: number };
   } | null>(null);
-  const [derivWallets, setDerivWallets] = useState<any[]>([]);
-  const [derivWalletsStatus, setDerivWalletsStatus] = useState<string>('');
-  const [liveExchangeRate, setLiveExchangeRate] = useState<{ rate: number; source: string } | null>(null);
-  const [partnerOverview, setPartnerOverview] = useState<{ verified: boolean; overview: any; message?: string } | null>(null);
-  const [tagEmail, setTagEmail] = useState('');
-  const [tagClientId, setTagClientId] = useState('');
-  const [tagLoginId, setTagLoginId] = useState('');
-  const [checkingTag, setCheckingTag] = useState(false);
-  const [tagResult, setTagResult] = useState<any>(null);
 
   const loadPortfolioData = useCallback(async () => {
     try {
-      const [txRes, agRes, p2pRes, perfRes, walletsRes, fxRes] = await Promise.all([
+      const [txRes, agRes, p2pRes, perfRes] = await Promise.all([
         apiFetch<{ transactions: CashierTransaction[] }>(`/api/cashier/transactions?accountMode=${accountMode}`),
         apiFetch<{ agents: PaymentAgent[] }>('/api/cashier/payment-agents'),
         apiFetch<{ adverts: P2PAdvert[] }>('/api/cashier/p2p/adverts'),
         apiFetch<any>('/api/analytics/performance').catch(() => null),
-        apiFetch<{ derivWallets?: any[]; derivWalletsStatus?: string }>('/api/cashier/wallets?sync=1').catch(() => null),
-        apiFetch<{ rate: number; source: string }>('/api/cashier/exchange-rate?base=USD&target=KES').catch(() => null),
       ]);
       setTransactions(txRes.transactions || []);
       setAgents(agRes.agents || []);
       setAdverts(p2pRes.adverts || []);
       if (perfRes?.real && perfRes?.demo) {
         setPerfSplit({ real: perfRes.real, demo: perfRes.demo });
-      }
-      if (walletsRes) {
-        setDerivWallets(walletsRes.derivWallets || []);
-        setDerivWalletsStatus(walletsRes.derivWalletsStatus || '');
-      }
-      if (fxRes?.rate) {
-        setLiveExchangeRate({ rate: fxRes.rate, source: fxRes.source });
       }
     } catch {
       // ignore initial error
@@ -125,39 +98,6 @@ export const PortfolioHub: React.FC = () => {
   useEffect(() => {
     loadPortfolioData();
   }, [loadPortfolioData]);
-
-  useEffect(() => {
-    if (subTab !== 'partners') return;
-    apiFetch<{ verified: boolean; overview: any; message?: string }>('/api/partners/overview')
-      .then((res) => setPartnerOverview(res))
-      .catch(() => {});
-  }, [subTab]);
-
-  const handleCheckClientTag = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!tagEmail.trim() && !tagClientId.trim() && !tagLoginId.trim()) {
-      showToast('Enter an email, client_id, or loginid to check', 'error');
-      return;
-    }
-    setCheckingTag(true);
-    setTagResult(null);
-    try {
-      const res = await apiFetch<{ result: any }>('/api/partners/client-tags/check', {
-        method: 'POST',
-        body: JSON.stringify({
-          email: tagEmail.trim() || undefined,
-          client_id: tagClientId.trim() || undefined,
-          loginid: tagLoginId.trim() || undefined,
-        }),
-      });
-      setTagResult(res.result);
-      showToast('Partner client tag checked', 'success');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Unable to check client tag', 'error');
-    } finally {
-      setCheckingTag(false);
-    }
-  };
 
   const {
     optionsBal,
@@ -195,7 +135,7 @@ export const PortfolioHub: React.FC = () => {
     }
   };
 
-  const handlePreviewTransfer = async (e: React.FormEvent) => {
+  const handleTransfer = async (e: React.FormEvent) => {
     e.preventDefault();
     if (fromAcc === toAcc) {
       showToast('Select two different wallets to transfer', 'error');
@@ -203,7 +143,7 @@ export const PortfolioHub: React.FC = () => {
     }
     setSubmitting(true);
     try {
-      const preview = await apiFetch<any>('/api/cashier/transfer/preview', {
+      await apiFetch('/api/cashier/transfer', {
         method: 'POST',
         body: JSON.stringify({
           account_from: fromAcc,
@@ -213,46 +153,9 @@ export const PortfolioHub: React.FC = () => {
           accountMode,
         }),
       });
-      const idem =
-        typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-          ? crypto.randomUUID()
-          : `trf_${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
-      setTransferPreview({
-        fromLabel: preview.fromLabel || fromAcc,
-        toLabel: preview.toLabel || toAcc,
-        amount: Number(preview.amount || amount),
-        fee: Number(preview.fee || 0),
-        exchangeRate: Number(preview.exchangeRate || 1),
-        netReceived: Number(preview.netReceived || amount),
-        honestBridgeNote: preview.honestBridgeNote || '',
-        idempotencyKey: idem,
-      });
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Unable to preview transfer', 'error');
-    } finally {
-      setSubmitting(false);
-    }
-  };
-
-  const handleConfirmTransfer = async () => {
-    if (!transferPreview) return;
-    setSubmitting(true);
-    try {
-      await apiFetch('/api/cashier/transfer', {
-        method: 'POST',
-        body: JSON.stringify({
-          account_from: fromAcc,
-          account_to: toAcc,
-          amount: transferPreview.amount,
-          currency: 'USD',
-          accountMode,
-          idempotencyKey: transferPreview.idempotencyKey,
-        }),
-      });
       await Promise.all([refreshAll(), loadPortfolioData()]);
-      setTransferPreview(null);
       setModal(null);
-      showToast(`Transferred $${transferPreview.amount.toFixed(2)} from ${fromAcc} to ${toAcc}`, 'success');
+      showToast(`Transferred $${Number(amount).toFixed(2)} from ${fromAcc} to ${toAcc}`, 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Transfer failed', 'error');
     } finally {
@@ -450,54 +353,6 @@ export const PortfolioHub: React.FC = () => {
       <div className="px-5 sm:px-8 mt-6 space-y-8 pb-8">
         {(subTab === 'overview' || subTab === 'wallet') && (
           <>
-            {subTab === 'wallet' && (
-              <section className="space-y-3">
-                <div className="flex flex-wrap items-center justify-between gap-2">
-                  <div>
-                    <h2 className="font-display text-lg font-bold">Synced Deriv Wallets &amp; FX Rate</h2>
-                    <p className="text-xs text-slate-500">
-                      Upstream Deriv REST wallets ({derivWalletsStatus || 'local'})
-                    </p>
-                  </div>
-                  {liveExchangeRate && (
-                    <span className="px-3 py-1.5 rounded-full bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] font-mono-num text-xs font-bold">
-                      1 USD = {liveExchangeRate.rate.toFixed(2)} KES
-                    </span>
-                  )}
-                </div>
-
-                {derivWallets.length === 0 ? (
-                  <div className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] text-xs text-slate-500">
-                    Connect a Deriv OAuth or PAT account to sync native multi-currency Deriv Wallets (`/wallet/v1/wallets`).
-                  </div>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {derivWallets.map((w: any, idx: number) => (
-                      <div
-                        key={w.wallet_id || w.account_id || w.currency || idx}
-                        className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] space-y-1"
-                      >
-                        <div className="flex items-center justify-between text-xs">
-                          <span className="font-bold font-mono">{w.currency || w.wallet_currency || 'USD'} Wallet</span>
-                          <span className="px-2 py-0.5 rounded-full bg-[#00A878]/15 text-[#00A878] text-[10px] font-bold uppercase">
-                            {w.account_type || w.type || 'Deriv'}
-                          </span>
-                        </div>
-                        <p className="font-mono-num text-lg font-bold">
-                          {Number(w.balance ?? w.amount ?? 0).toFixed(2)} {w.currency || 'USD'}
-                        </p>
-                        {w.converted_balance !== undefined && (
-                          <p className="text-[11px] text-slate-400 font-mono-num">
-                            ≈ ${Number(w.converted_balance).toFixed(2)} USD
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </section>
-            )}
-
             {/* Other payment methods matching screenshot */}
             <section>
               <h2 className="font-display text-lg font-bold mb-3.5">Other payment methods</h2>
@@ -576,69 +431,105 @@ export const PortfolioHub: React.FC = () => {
           </>
         )}
 
-        {(subTab === 'overview' || subTab === 'trading') && (
-          <section>
-            <h2 className="font-display text-lg font-bold mb-3.5">Trading</h2>
-            <div className="bg-[#F4F5F7] dark:bg-[#181C25] rounded-2xl border border-slate-200/70 dark:border-[#2A2F3D] divide-y divide-slate-200/70 dark:divide-[#2A2F3D]">
-              <button
-                type="button"
-                onClick={() => setActiveTab('options')}
-                className="w-full px-4 py-4 flex items-center justify-between hover:bg-white/60 dark:hover:bg-white/5 transition-colors cursor-pointer first:rounded-t-2xl"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="w-9 h-9 rounded-xl bg-[#FF444F] text-white flex items-center justify-center">
-                    <ArrowLeftRight className="w-4 h-4" />
-                  </span>
-                  <span className="text-sm font-semibold">Options</span>
-                </div>
-                <span className="font-mono-num text-sm font-bold">{formatMoney(optionsBal, { hideable: true })}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('cfds')}
-                className="w-full px-4 py-4 flex items-center justify-between hover:bg-white/60 dark:hover:bg-white/5 transition-colors cursor-pointer"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="w-9 h-9 rounded-xl bg-[#1958B7] text-white flex flex-col items-center justify-center text-[9px] font-bold leading-none">
-                    <span>MT5</span>
-                    <span className="text-[7px] opacity-80">STD</span>
-                  </span>
-                  <span className="text-sm font-semibold">MT5 Standard</span>
-                </div>
-                <span className="font-mono-num text-sm font-bold">{formatMoney(mt5StdBal, { hideable: true })}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('cfds')}
-                className="w-full px-4 py-4 flex items-center justify-between hover:bg-white/60 dark:hover:bg-white/5 transition-colors cursor-pointer"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="w-9 h-9 rounded-xl bg-[#1958B7] text-white flex flex-col items-center justify-center text-[9px] font-bold leading-none">
-                    <span>MT5</span>
-                    <span className="text-[7px] opacity-80">GLD</span>
-                  </span>
-                  <span className="text-sm font-semibold">MT5 Gold</span>
-                </div>
-                <span className="font-mono-num text-sm font-bold">{formatMoney(mt5GoldBal, { hideable: true })}</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveTab('exchange')}
-                className="w-full px-4 py-4 flex items-center justify-between hover:bg-white/60 dark:hover:bg-white/5 transition-colors cursor-pointer last:rounded-b-2xl"
-              >
-                <div className="flex items-center gap-3">
-                  <span className="w-9 h-9 rounded-xl bg-[#FF444F] text-white flex items-center justify-center text-[10px] font-bold">
-                    DXN
-                  </span>
-                  <span className="text-sm font-semibold">TradeDeriv Exchange</span>
-                </div>
-                <span className="font-mono-num text-sm font-bold">
-                  {formatMoney(exchangeUsdt, { hideable: true, currencyOverride: 'USDT' })}
+        {(subTab === 'overview' || subTab === 'trading') && (() => {
+          const openOrders = orders.filter((o) => o.status === 'OPEN');
+          const floatingPnl = openOrders.reduce((acc, o) => acc + computeLiveOrderMetrics(o, ticks).pnl, 0);
+          const tradingRows = [
+            {
+              key: 'options',
+              label: 'Options',
+              tab: 'options' as const,
+              bal: optionsBal,
+              iconBg: 'bg-[#FF444F]',
+              badge: <ArrowLeftRight className="w-4 h-4" />,
+              formatted: formatMoney(optionsBal, { hideable: true }),
+            },
+            {
+              key: 'mt5std',
+              label: 'CFDs | MT5 Standard',
+              tab: 'cfds' as const,
+              bal: mt5StdBal,
+              iconBg: 'bg-[#1958B7]',
+              badge: (
+                <span className="flex flex-col items-center justify-center text-[9px] font-bold leading-none">
+                  <span>MT5</span>
+                  <span className="text-[7px] opacity-80">STD</span>
                 </span>
-              </button>
+              ),
+              formatted: formatMoney(mt5StdBal, { hideable: true }),
+            },
+            {
+              key: 'mt5gld',
+              label: 'CFDs | MT5 Gold',
+              tab: 'cfds' as const,
+              bal: mt5GoldBal,
+              iconBg: 'bg-[#1958B7]',
+              badge: (
+                <span className="flex flex-col items-center justify-center text-[9px] font-bold leading-none">
+                  <span>MT5</span>
+                  <span className="text-[7px] opacity-80">GLD</span>
+                </span>
+              ),
+              formatted: formatMoney(mt5GoldBal, { hideable: true }),
+            },
+            {
+              key: 'exchange',
+              label: 'Deriv Exchange',
+              tab: 'exchange' as const,
+              bal: exchangeUsdt,
+              iconBg: 'bg-[#FF444F]',
+              badge: <span className="text-[10px] font-bold">DXN</span>,
+              formatted: formatMoney(exchangeUsdt, { hideable: true, currencyOverride: 'USDT' }),
+            },
+          ].filter((r) => !hideZeroAssets || r.bal > 0);
+
+          return (
+          <section>
+            <div className="flex flex-wrap items-center justify-between gap-2 mb-3.5">
+              <h2 className="font-display text-lg font-bold">Trading</h2>
+              <label className="inline-flex items-center gap-2 text-xs font-medium text-slate-600 dark:text-slate-300 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={hideZeroAssets}
+                  onChange={(e) => setHideZeroAssets(e.target.checked)}
+                  className="w-4 h-4 rounded accent-[#FF444F]"
+                />
+                Hide assets with zero balance
+              </label>
+            </div>
+
+            {openOrders.length > 0 && (
+              <div className="mb-3 px-4 py-3 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] flex items-center justify-between text-xs">
+                <span className="font-semibold text-slate-600 dark:text-slate-300">
+                  Live Open Positions: <strong className="font-mono text-slate-900 dark:text-white">{openOrders.length}</strong>
+                </span>
+                <span className={`font-mono tabular-nums font-bold ${floatingPnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                  Floating P/L: {floatingPnl >= 0 ? '+' : ''}${floatingPnl.toFixed(2)}
+                </span>
+              </div>
+            )}
+
+            <div className="bg-[#F4F5F7] dark:bg-[#181C25] rounded-2xl border border-slate-200/70 dark:border-[#2A2F3D] divide-y divide-slate-200/70 dark:divide-[#2A2F3D]">
+              {tradingRows.length === 0 ? (
+                <p className="p-5 text-center text-xs text-slate-500">All zero-balance assets are hidden.</p>
+              ) : (
+                tradingRows.map((row) => (
+                  <button
+                    key={row.key}
+                    type="button"
+                    onClick={() => setActiveTab(row.tab)}
+                    className="w-full px-4 py-4 flex items-center justify-between hover:bg-white/60 dark:hover:bg-white/5 transition-colors cursor-pointer first:rounded-t-2xl last:rounded-b-2xl"
+                  >
+                    <div className="flex items-center gap-3">
+                      <span className={`w-9 h-9 rounded-xl ${row.iconBg} text-white flex items-center justify-center`}>
+                        {row.badge}
+                      </span>
+                      <span className="text-sm font-semibold">{row.label}</span>
+                    </div>
+                    <span className="font-mono-num text-sm font-bold">{row.formatted}</span>
+                  </button>
+                ))
+              )}
             </div>
 
             {perfSplit && (
@@ -682,7 +573,8 @@ export const PortfolioHub: React.FC = () => {
               </div>
             )}
           </section>
-        )}
+          );
+        })()}
 
         {subTab === 'partners' && (
           <section className="space-y-6">
@@ -721,78 +613,6 @@ export const PortfolioHub: React.FC = () => {
                   Open Deriv Partner Link <ExternalLink className="w-3.5 h-3.5" />
                 </a>
               </div>
-            </div>
-
-            {/* Live Deriv Partner Analytics & Client Tag Checker */}
-            <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-              <div className="p-5 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] space-y-3">
-                <div className="flex items-center justify-between gap-2">
-                  <h3 className="font-display text-sm font-bold flex items-center gap-2">
-                    <ShieldCheck className="w-4 h-4 text-[#00A878]" /> Deriv Partner Analytics Overview
-                  </h3>
-                  <span
-                    className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                      partnerOverview?.verified
-                        ? 'bg-[#00A878]/15 text-[#00A878]'
-                        : 'bg-amber-500/15 text-amber-500'
-                    }`}
-                  >
-                    {partnerOverview?.verified ? 'Verified REST' : 'Status Info'}
-                  </span>
-                </div>
-                {partnerOverview?.verified && partnerOverview?.overview ? (
-                  <pre className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] font-mono text-[11px] overflow-x-auto max-h-44">
-                    {JSON.stringify(partnerOverview.overview, null, 2)}
-                  </pre>
-                ) : (
-                  <p className="text-xs text-slate-500 dark:text-slate-400">
-                    {partnerOverview?.message ||
-                      'Queries /partners/analytics/v1/overview when a Deriv Partner token is connected.'}
-                  </p>
-                )}
-              </div>
-
-              <form
-                onSubmit={handleCheckClientTag}
-                className="p-5 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] space-y-3"
-              >
-                <h3 className="font-display text-sm font-bold">Partner Client Tag Checker</h3>
-                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                  <input
-                    type="email"
-                    placeholder="Client email"
-                    value={tagEmail}
-                    onChange={(e) => setTagEmail(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs outline-none"
-                  />
-                  <input
-                    type="text"
-                    placeholder="Client ID"
-                    value={tagClientId}
-                    onChange={(e) => setTagClientId(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-mono outline-none"
-                  />
-                  <input
-                    type="text"
-                    placeholder="LoginID (CR...)"
-                    value={tagLoginId}
-                    onChange={(e) => setTagLoginId(e.target.value)}
-                    className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-mono outline-none"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={checkingTag}
-                  className="px-4 py-2 rounded-full bg-[#1958B7] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
-                >
-                  {checkingTag ? 'Checking...' : 'Check Client Attribution'}
-                </button>
-                {tagResult && (
-                  <pre className="p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] font-mono text-[11px] overflow-x-auto max-h-36">
-                    {JSON.stringify(tagResult, null, 2)}
-                  </pre>
-                )}
-              </form>
             </div>
 
             <div>
@@ -1002,8 +822,8 @@ export const PortfolioHub: React.FC = () => {
               </form>
             )}
 
-            {modal === 'transfer' && !transferPreview && (
-              <form onSubmit={handlePreviewTransfer} className="space-y-4">
+            {modal === 'transfer' && (
+              <form onSubmit={handleTransfer} className="space-y-4">
                 <div className="px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs flex items-center justify-between">
                   <span className="text-slate-500">Active Transfer Scope</span>
                   <span className={`font-bold uppercase ${accountMode === 'real' ? 'text-[#FF444F]' : 'text-[#00A878]'}`}>
@@ -1020,7 +840,7 @@ export const PortfolioHub: React.FC = () => {
                     <option value="USD Wallet">USD Wallet / Options ({optionsBal.toFixed(2)} USD)</option>
                     <option value="MT5 Standard">MT5 Standard ({mt5StdBal.toFixed(2)} USD)</option>
                     <option value="MT5 Gold">MT5 Gold ({mt5GoldBal.toFixed(2)} USD)</option>
-                    <option value="TradeDeriv Exchange">TradeDeriv Exchange ({exchangeUsdt.toFixed(2)} USDT)</option>
+                    <option value="Deriv Exchange">Deriv Exchange ({exchangeUsdt.toFixed(2)} USDT)</option>
                   </select>
                 </div>
                 <div>
@@ -1032,7 +852,7 @@ export const PortfolioHub: React.FC = () => {
                   >
                     <option value="MT5 Standard">MT5 Standard ({mt5StdBal.toFixed(2)} USD)</option>
                     <option value="MT5 Gold">MT5 Gold ({mt5GoldBal.toFixed(2)} USD)</option>
-                    <option value="TradeDeriv Exchange">TradeDeriv Exchange ({exchangeUsdt.toFixed(2)} USDT)</option>
+                    <option value="Deriv Exchange">Deriv Exchange ({exchangeUsdt.toFixed(2)} USDT)</option>
                     <option value="USD Wallet">USD Wallet / Options ({optionsBal.toFixed(2)} USD)</option>
                   </select>
                 </div>
@@ -1050,54 +870,11 @@ export const PortfolioHub: React.FC = () => {
                 <button
                   type="submit"
                   disabled={submitting}
-                  className="w-full py-3 rounded-full bg-[#151820] dark:bg-[#FF444F] hover:opacity-95 text-white font-semibold text-sm cursor-pointer disabled:opacity-60"
+                  className="w-full py-3 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-sm cursor-pointer disabled:opacity-60"
                 >
-                  {submitting ? 'Validating Quote...' : 'Preview Transfer'}
+                  {submitting ? 'Transferring...' : 'Execute Transfer'}
                 </button>
               </form>
-            )}
-
-            {modal === 'transfer' && transferPreview && (
-              <div className="space-y-4">
-                <div className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] space-y-2 text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Route</span>
-                    <span className="font-semibold">{transferPreview.fromLabel} → {transferPreview.toLabel}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Amount</span>
-                    <span className="font-mono tabular-nums font-bold">${transferPreview.amount.toFixed(2)} USD</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-slate-500">Fee · Rate</span>
-                    <span className="font-mono tabular-nums">${transferPreview.fee.toFixed(2)} · {transferPreview.exchangeRate.toFixed(4)}</span>
-                  </div>
-                  <div className="flex justify-between pt-2 border-t border-slate-200 dark:border-[#2A2F3D]">
-                    <span className="font-semibold">Net Received</span>
-                    <span className="font-mono tabular-nums font-bold text-[#00A878]">${transferPreview.netReceived.toFixed(2)} USD</span>
-                  </div>
-                </div>
-                {transferPreview.honestBridgeNote && (
-                  <p className="text-[11px] text-slate-500 leading-relaxed">{transferPreview.honestBridgeNote}</p>
-                )}
-                <div className="flex gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setTransferPreview(null)}
-                    className="flex-1 py-2.5 rounded-full border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold cursor-pointer"
-                  >
-                    Edit
-                  </button>
-                  <button
-                    type="button"
-                    disabled={submitting}
-                    onClick={handleConfirmTransfer}
-                    className="flex-[2] py-2.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
-                  >
-                    {submitting ? 'Executing...' : 'Confirm & Execute Transfer'}
-                  </button>
-                </div>
-              </div>
             )}
 
             {(modal === 'withdraw' || modal === 'agent-withdraw') && (

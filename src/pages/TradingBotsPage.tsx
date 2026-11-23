@@ -12,7 +12,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../lib/api';
-import type { BotDefinitionRecord, BotStrategy, BotStrategyAst } from '../types';
+import type { BotStrategy } from '../types';
 import type { StrategyDefinition, BacktestReport, StrategyKey } from '../lib/quant-engine';
 
 interface UserStrategyRow {
@@ -50,12 +50,8 @@ export const TradingBotsPage: React.FC = () => {
 
   const [viewMode, setViewMode] = useState<'lab' | 'marketplace'>('lab');
 
-  // Prebuilt Bot Marketplace & AST Templates state
+  // Prebuilt Bot Marketplace state (preserved)
   const [strategies, setStrategies] = useState<BotStrategy[]>([]);
-  const [astTemplates, setAstTemplates] = useState<BotDefinitionRecord[]>([]);
-  const [astDefinitions, setAstDefinitions] = useState<BotDefinitionRecord[]>([]);
-  const [editingTemplate, setEditingTemplate] = useState<{ record: BotDefinitionRecord; ast: BotStrategyAst } | null>(null);
-  const [templateBusyId, setTemplateBusyId] = useState<number | null>(null);
   const [cat, setCat] = useState('All');
   const [runningSlug, setRunningSlug] = useState<string | null>(null);
 
@@ -87,7 +83,7 @@ export const TradingBotsPage: React.FC = () => {
   const loadStrategyLab = useCallback(async () => {
     try {
       const ts = Date.now();
-      const [catRes, userRes, runsRes, astRes] = await Promise.all([
+      const [catRes, userRes, runsRes] = await Promise.all([
         apiFetch<{ strategies: StrategyDefinition[] }>(`/api/strategies/catalog?_t=${ts}`, {
           skipAuth: true,
           cache: 'no-store',
@@ -98,14 +94,10 @@ export const TradingBotsPage: React.FC = () => {
         apiFetch<{ runs: any[] }>(`/api/strategies/backtests?_t=${ts}`, { cache: 'no-store' }).catch(() => ({
           runs: [],
         })),
-        apiFetch<{ definitions: BotDefinitionRecord[]; templates: BotDefinitionRecord[] }>('/api/bots/ast/definitions')
-          .catch(() => ({ definitions: [], templates: [] })),
       ]);
       setCatalog(catRes.strategies || []);
       setUserStrategies(userRes.strategies || []);
       setRecentRuns(runsRes.runs || []);
-      setAstDefinitions(astRes.definitions || []);
-      setAstTemplates(astRes.templates || []);
     } catch {
       // ignore
     }
@@ -249,87 +241,6 @@ export const TradingBotsPage: React.FC = () => {
   const handleLoadInBuilder = (s: BotStrategy) => {
     sessionStorage.setItem('td_loaded_bot', JSON.stringify(s));
     setActiveTab('bot-builder');
-  };
-
-  const handleOpenTemplateInBuilder = (record: BotDefinitionRecord, parsedAst: BotStrategyAst) => {
-    sessionStorage.setItem('td_loaded_ast', JSON.stringify({ id: record.id, demo_tested: record.demo_tested, ast: parsedAst }));
-    setActiveTab('bot-builder');
-  };
-
-  const handleSavePersonalTemplate = async () => {
-    if (!editingTemplate) return;
-    setTemplateBusyId(editingTemplate.record.id);
-    try {
-      await apiFetch('/api/bots/ast/definitions', {
-        method: 'POST',
-        body: JSON.stringify({
-          ast: editingTemplate.ast,
-          description: editingTemplate.record.description,
-          category: editingTemplate.record.category,
-          demoTested: false,
-        }),
-      });
-      await loadStrategyLab();
-      setEditingTemplate(null);
-      showToast(`Saved personal version "${editingTemplate.ast.name}"`, 'success');
-    } catch (err) {
-      showToast(sanitizeUiError(err, 'Failed to save personal template'), 'error');
-    } finally {
-      setTemplateBusyId(null);
-    }
-  };
-
-  const handleBacktestAstRecord = async (record: BotDefinitionRecord, parsedAst: BotStrategyAst) => {
-    setTemplateBusyId(record.id);
-    try {
-      const res = await apiFetch<{ ok: boolean; demoTested: boolean; report: any }>(
-        `/api/bots/ast/definitions/${record.id}/backtest`,
-        {
-          method: 'POST',
-          body: JSON.stringify({
-            symbol: parsedAst.market.instrument,
-            granularity: parsedAst.market.granularity || 60,
-          }),
-        }
-      );
-      await loadStrategyLab();
-      showToast(
-        `${record.name} backtest: ${res.report?.trades ?? 0} trades, Win ${res.report?.winRatePct ?? 0}%`,
-        'success'
-      );
-    } catch (err) {
-      showToast(sanitizeUiError(err, 'Template backtest failed'), 'error');
-    } finally {
-      setTemplateBusyId(null);
-    }
-  };
-
-  const handleLaunchAstRecord = async (record: BotDefinitionRecord, parsedAst: BotStrategyAst, mode: 'demo' | 'real') => {
-    if (mode === 'real' && !record.demo_tested) {
-      showToast('Run Historical Demo Backtest first to unlock authorized Live execution.', 'error');
-      return;
-    }
-    setTemplateBusyId(record.id);
-    try {
-      await apiFetch('/api/bots/ast/run', {
-        method: 'POST',
-        body: JSON.stringify({
-          definitionId: record.id,
-          ast: parsedAst,
-          accountMode: mode,
-          executionMode: mode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
-          connectedAccountId: mode === 'real' ? activeConnectedAccount?.id || null : null,
-          executionSpeed: 'fast',
-        }),
-      });
-      await Promise.all([refreshOrders(), refreshAll()]);
-      showToast(`${record.name} launched in ${mode.toUpperCase()} mode`, 'success');
-      setActiveTab('bot-builder');
-    } catch (err) {
-      showToast(sanitizeUiError(err, 'Failed to run template'), 'error');
-    } finally {
-      setTemplateBusyId(null);
-    }
   };
 
   const selectedDef = catalog.find((s) => s.key === selectedKey);
@@ -538,7 +449,7 @@ export const TradingBotsPage: React.FC = () => {
                       onChange={(e) => setExecMode(e.target.value as 'paper' | 'live')}
                       className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-xs font-semibold"
                     >
-                      <option value="paper">Paper / Simulation</option>
+                      <option value="paper">Practice / Virtual</option>
                       <option value="live">Live Deriv Guarded</option>
                     </select>
                   </div>
@@ -727,7 +638,7 @@ export const TradingBotsPage: React.FC = () => {
 
                 {/* Equity Curve */}
                 <div className="p-4 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] border border-slate-200/70 dark:border-[#2A2F3D]">
-                  <p className="text-xs font-semibold text-slate-500 mb-2">Simulated Equity Curve ($1,000 Reference Base)</p>
+                  <p className="text-xs font-semibold text-slate-500 mb-2">Historical Backtest Equity Curve ($1,000 Reference Base)</p>
                   {renderEquitySvg(backtestReport.equityCurve)}
                 </div>
 
@@ -811,208 +722,9 @@ export const TradingBotsPage: React.FC = () => {
         </div>
       )}
 
-      {/* VIEW 2: STRATEGY TEMPLATES LIBRARY & PREBUILT BOTS */}
+      {/* VIEW 2: PREBUILT BOT MARKETPLACE (PRESERVED) */}
       {viewMode === 'marketplace' && (
-        <div className="space-y-6">
-          {/* Structured AST Templates & Saved Personal Versions */}
-          {(astTemplates.length > 0 || astDefinitions.length > 0) && (
-            <div className="space-y-3">
-              <div>
-                <h2 className="font-display text-base font-bold">Executable Strategy Templates & Personal Versions</h2>
-                <p className="text-xs text-slate-500">
-                  Preview rules, customize parameters, run historical backtests, test in Demo, or enable guarded Real execution.
-                </p>
-              </div>
-              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                {[...astDefinitions, ...astTemplates].map((rec) => {
-                  let parsed: BotStrategyAst | null = null;
-                  try {
-                    parsed = JSON.parse(rec.ast_json) as BotStrategyAst;
-                  } catch {
-                    parsed = null;
-                  }
-                  if (!parsed) return null;
-                  const busy = templateBusyId === rec.id;
-                  return (
-                    <div
-                      key={rec.id}
-                      className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 flex flex-col justify-between space-y-4"
-                    >
-                      <div className="space-y-2">
-                        <div className="text-[11px] text-slate-500 flex items-center justify-between">
-                          <span>{rec.is_template ? 'Template' : 'Personal'} · {rec.category}</span>
-                          <span className={rec.demo_tested ? 'text-[#00A878] font-bold' : 'text-amber-500 font-semibold'}>
-                            {rec.demo_tested ? 'Demo Verified' : 'Untested'}
-                          </span>
-                        </div>
-                        <h3 className="font-display text-base font-bold">{rec.name}</h3>
-                        <p className="text-xs text-slate-500 dark:text-slate-400">{rec.description}</p>
-                        <div className="text-[11px] font-mono tabular-nums text-slate-600 dark:text-slate-300 space-y-1 pt-2 border-t border-slate-100 dark:border-[#2A2F3D]">
-                          <p>Market: {parsed.market.instrument} · {parsed.market.timeframe} · {parsed.market.contractType}</p>
-                          <p>Rules ({parsed.conditionLogic}): {parsed.conditions.map((c) => c.type).join(', ') || 'Every tick'}</p>
-                          <p>Risk: TP ${parsed.risk.takeProfit} / SL ${parsed.risk.stopLoss} / MaxStake ${parsed.risk.maxStake}</p>
-                        </div>
-                      </div>
-
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <button
-                          type="button"
-                          onClick={() => setEditingTemplate({ record: rec, ast: JSON.parse(JSON.stringify(parsed)) })}
-                          className="py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-semibold cursor-pointer"
-                        >
-                          Customize
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => handleBacktestAstRecord(rec, parsed!)}
-                          className="py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-semibold cursor-pointer"
-                        >
-                          {busy ? 'Running...' : 'Backtest'}
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => handleLaunchAstRecord(rec, parsed!, 'demo')}
-                          className="py-2 rounded-xl bg-[#00A878] text-white font-bold cursor-pointer"
-                        >
-                          Run Demo
-                        </button>
-                        <button
-                          type="button"
-                          disabled={busy}
-                          onClick={() => handleLaunchAstRecord(rec, parsed!, 'real')}
-                          className={`py-2 rounded-xl font-bold cursor-pointer ${
-                            rec.demo_tested
-                              ? 'bg-[#FF444F] text-white'
-                              : 'bg-slate-200 dark:bg-[#2A2F3D] text-slate-500'
-                          }`}
-                        >
-                          Run Real
-                        </button>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => handleOpenTemplateInBuilder(rec, parsed!)}
-                        className="w-full py-1.5 text-[11px] font-semibold text-[#1958B7] hover:underline cursor-pointer"
-                      >
-                        Open in Visual Blockly Builder
-                      </button>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Inline Template Customization Drawer */}
-          {editingTemplate && (
-            <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-[#1958B7]/40 p-5 space-y-4">
-              <div className="flex items-center justify-between">
-                <h3 className="font-display text-base font-bold">Customize & Save Personal Version</h3>
-                <button
-                  type="button"
-                  onClick={() => setEditingTemplate(null)}
-                  className="text-xs text-slate-500 hover:text-[#FF444F] cursor-pointer"
-                >
-                  Close
-                </button>
-              </div>
-              <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
-                <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">Personal Name</label>
-                  <input
-                    type="text"
-                    value={editingTemplate.ast.name}
-                    onChange={(e) =>
-                      setEditingTemplate((prev) =>
-                        prev ? { ...prev, ast: { ...prev.ast, name: e.target.value } } : null
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-semibold"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">Instrument</label>
-                  <select
-                    value={editingTemplate.ast.market.instrument}
-                    onChange={(e) =>
-                      setEditingTemplate((prev) =>
-                        prev
-                          ? { ...prev, ast: { ...prev.ast, market: { ...prev.ast.market, instrument: e.target.value } } }
-                          : null
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-semibold"
-                  >
-                    {instruments.map((inst) => (
-                      <option key={inst.symbol} value={inst.symbol}>
-                        {inst.symbol}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">Max Stake ($)</label>
-                  <input
-                    type="number"
-                    step="0.5"
-                    value={editingTemplate.ast.risk.maxStake}
-                    onChange={(e) =>
-                      setEditingTemplate((prev) =>
-                        prev
-                          ? { ...prev, ast: { ...prev.ast, risk: { ...prev.ast.risk, maxStake: Number(e.target.value) } } }
-                          : null
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono tabular-nums font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">Take Profit ($)</label>
-                  <input
-                    type="number"
-                    value={editingTemplate.ast.risk.takeProfit}
-                    onChange={(e) =>
-                      setEditingTemplate((prev) =>
-                        prev
-                          ? { ...prev, ast: { ...prev.ast, risk: { ...prev.ast.risk, takeProfit: Number(e.target.value) } } }
-                          : null
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono tabular-nums font-bold"
-                  />
-                </div>
-                <div>
-                  <label className="block text-[11px] text-slate-500 mb-1">Stop Loss ($)</label>
-                  <input
-                    type="number"
-                    value={editingTemplate.ast.risk.stopLoss}
-                    onChange={(e) =>
-                      setEditingTemplate((prev) =>
-                        prev
-                          ? { ...prev, ast: { ...prev.ast, risk: { ...prev.ast.risk, stopLoss: Number(e.target.value) } } }
-                          : null
-                      )
-                    }
-                    className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono tabular-nums font-bold"
-                  />
-                </div>
-              </div>
-              <div className="flex items-center justify-end gap-2">
-                <button
-                  type="button"
-                  onClick={handleSavePersonalTemplate}
-                  disabled={templateBusyId === editingTemplate.record.id}
-                  className="px-4 py-2 rounded-xl bg-[#1958B7] text-white text-xs font-bold cursor-pointer"
-                >
-                  Save Personal Version
-                </button>
-              </div>
-            </div>
-          )}
-
-          {/* Preserved Marketplace Quick Bots */}
+        <div className="space-y-5">
           <div className="flex items-center gap-2 overflow-x-auto no-scrollbar">
             {categories.map((c) => (
               <button
@@ -1062,7 +774,7 @@ export const TradingBotsPage: React.FC = () => {
                       <p className="font-mono tabular-nums font-bold truncate">{s.contract_type}</p>
                     </div>
                     <div>
-                      <p className="text-[10px] text-slate-400">Hist. Bench</p>
+                      <p className="text-[10px] text-slate-400">Est. Win</p>
                       <p className="font-mono tabular-nums font-bold text-[#00A878]">{s.win_rate_est}%</p>
                     </div>
                   </div>

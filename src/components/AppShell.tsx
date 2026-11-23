@@ -21,13 +21,13 @@ import {
   User,
   X,
   Shield,
-  ExternalLink,
-  Compass,
-  Plus,
+  ChevronDown,
+  Menu,
+  Sliders,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { TradeDerivLogo } from './TradeDerivLogo';
+import { getCanonicalBalances } from '../lib/balances';
 import type { NavTab } from '../types';
 
 const UsFlagIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-3 rounded-[2px] shrink-0' }) => (
@@ -62,61 +62,37 @@ const KeFlagIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-3 rou
 );
 
 const CORE_HUB_TABS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
-  { id: 'home', label: 'Dashboard', icon: Home },
+  { id: 'home', label: 'Home', icon: Home },
   { id: 'cfds', label: 'CFDs', icon: CandlestickChart },
   { id: 'exchange', label: 'Exchange', icon: ArrowLeftRight },
   { id: 'options', label: 'Options', icon: Layers },
-  { id: 'portfolio', label: 'Portfolio & Cashier', icon: Wallet },
+  { id: 'portfolio', label: 'Portfolio', icon: Wallet },
 ];
 
 const MOBILE_BOTTOM_TABS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
-  { id: 'home', label: 'Dashboard', icon: Home },
-  { id: 'market-analyser', label: 'Markets', icon: Activity },
-  { id: 'mt5-tv', label: 'Trade', icon: CandlestickChart },
-  { id: 'trading-bots', label: 'Strategies', icon: Bot },
-  { id: 'profile', label: 'Profile', icon: User },
+  { id: 'home', label: 'Home', icon: Home },
+  { id: 'cfds', label: 'CFDs', icon: CandlestickChart },
+  { id: 'options', label: 'Options', icon: Layers },
+  { id: 'portfolio', label: 'Portfolio', icon: Wallet },
 ];
 
 const SIDEBAR_PRO_TOOLS: Array<{ id: NavTab; label: string; icon: React.ComponentType<any> }> = [
-  { id: 'mt5-tv', label: 'MT5 Terminal', icon: CandlestickChart },
-  { id: 'market-analyser', label: 'Market Radar & SMC', icon: Activity },
-  { id: 'trading-bots', label: 'Strategy Lab & Bots', icon: Bot },
-  { id: 'bot-builder', label: 'Bot Builder', icon: Cpu },
+  { id: 'mt5-tv', label: 'Deriv Trader', icon: CandlestickChart },
+  { id: 'bot-builder', label: 'Deriv Bot', icon: Cpu },
+  { id: 'smart-trader', label: 'SmartTrader', icon: Sliders },
+  { id: 'market-analyser', label: 'Market Analyser', icon: Activity },
+  { id: 'trading-bots', label: 'Trading Bots', icon: Bot },
   { id: 'bulk-trader', label: 'Bulk Trader', icon: Zap },
   { id: 'risk-calc', label: 'Risk Centre', icon: Calculator },
   { id: 'reports', label: 'Analytics & Journal', icon: FileText },
   { id: 'learning-hub', label: 'Learning Hub', icon: BookOpen },
 ];
 
-const WORKSPACE_QUICK_BAR: Array<{ id: NavTab; label: string }> = [
-  { id: 'home', label: 'Dashboard' },
-  { id: 'mt5-tv', label: 'MT5 & Chart' },
-  { id: 'bot-builder', label: 'Bot Builder' },
-  { id: 'trading-bots', label: 'Trading Bots' },
-  { id: 'bulk-trader', label: 'Bulk Trader' },
-  { id: 'exchange', label: 'Exchange' },
-  { id: 'options', label: 'Options' },
-  { id: 'portfolio', label: 'Portfolio' },
-  { id: 'market-analyser', label: 'Market Radar' },
-];
-
-const TELEMETRY_TABS = new Set<NavTab>([
-  'mt5-tv',
-  'cfds',
-  'options',
-  'bulk-trader',
-  'bot-builder',
-  'trading-bots',
-  'market-analyser',
-]);
-
 export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const {
     user,
     accounts,
     activeConnectedAccount,
-    orders,
-    ticks,
     activeTab,
     setActiveTab,
     accountMode,
@@ -133,36 +109,18 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
     setSelectedSymbol,
     wsConnected,
     registerLogoTap,
-    setAdminGateOpen,
+    openAdminPortal,
     formatMoney,
   } = useApp();
 
-  const isOwnerSession = user?.role === 'owner' || user?.role === 'admin';
-
+  const appName = publicSettings.branding?.appName || 'DERIV';
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
 
-  const { optionsBal: activeBalance } = getCanonicalBalances(
-    user,
-    accounts,
-    accountMode,
-    activeConnectedAccount
-  );
-  const scopedOpenOrders = orders.filter(
-    (o) =>
-      o.status === 'OPEN' &&
-      (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
-  );
-  const inTradesUsd = scopedOpenOrders.reduce((sum, o) => sum + Number(o.stake || 0), 0);
-  const liveFloatingPnl = scopedOpenOrders.reduce((sum, o) => {
-    const m = computeLiveOrderMetrics(o, ticks);
-    return sum + (m.currentPrice > 0 ? m.pnl : Number(o.pnl || 0));
-  }, 0);
-  const liveEquity = Number((activeBalance + liveFloatingPnl).toFixed(2));
-  const availableMargin = Math.max(0, Number((activeBalance - inTradesUsd).toFixed(2)));
-  const showTelemetryBar = TELEMETRY_TABS.has(activeTab);
+  const canonical = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount);
 
-  const initials = (user?.full_name || user?.email || 'TD')
+  const initials = (user?.full_name || user?.email || 'DR')
     .split(/\s+/)
     .map((p) => p[0])
     .join('')
@@ -171,7 +129,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
   const tickerText =
     publicSettings.global?.tickerText ||
-    'Volatility 100 (1s) Live · MT5 Gold · Crypto Exchange · Zero-Delay Deriv Bot Engine Active';
+    'DERIV Live Markets · Volatility 100 (1s) · Gold · Crypto Exchange · Deriv Bot & SmartTrader';
 
   const filteredSearch = instruments
     .filter(
@@ -179,25 +137,23 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         i.display_name.toLowerCase().includes(searchQuery.toLowerCase()) ||
         i.symbol.toLowerCase().includes(searchQuery.toLowerCase())
     )
-    .slice(0, 12);
+    .slice(0, 14);
 
   return (
-    <div className="min-h-screen bg-[#F8F9FB] dark:bg-[#111319] text-[#0E1117] dark:text-white flex flex-col lg:flex-row">
+    <div className="min-h-screen bg-[#EEF1F5] dark:bg-[#111319] text-[#0E1117] dark:text-white flex flex-col lg:flex-row">
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white dark:bg-[#151820] border-r border-slate-200 dark:border-[#2A2F3D] z-30">
-        <div className="px-5 py-5 border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between">
-          <TradeDerivLogo variant={theme} size="sm" onClick={registerLogoTap} />
+        <div className="px-5 py-4 border-b border-slate-100 dark:border-[#2A2F3D] flex items-center justify-between">
+          <TradeDerivLogo variant={theme} size="sm" appName={appName} onClick={registerLogoTap} />
           <span
-            title={wsConnected ? 'Deriv WS Relay Connected' : 'Connecting to Deriv WS'}
+            title={wsConnected ? 'Live Price Feed Connected' : 'Connecting Price Feed'}
             className={`w-2 h-2 rounded-full ${wsConnected ? 'bg-[#00A878]' : 'bg-amber-400'}`}
           />
         </div>
 
-        <div className="flex-1 overflow-y-auto px-3 py-4 space-y-6">
+        <div className="flex-1 overflow-y-auto px-3 py-4 space-y-5">
           <div>
-            <p className="px-3 text-[11px] font-semibold text-slate-400 tracking-wide mb-2">
-              Core Hubs
-            </p>
+            <p className="px-3 text-[11px] font-semibold text-slate-400 tracking-wide mb-1.5">Hubs</p>
             <nav className="space-y-1">
               {CORE_HUB_TABS.map((item) => {
                 const Icon = item.icon;
@@ -222,8 +178,8 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </div>
 
           <div>
-            <p className="px-3 text-[11px] font-semibold text-slate-400 tracking-wide mb-2">
-              Terminal & Intelligence
+            <p className="px-3 text-[11px] font-semibold text-slate-400 tracking-wide mb-1.5">
+              Platforms & Tools
             </p>
             <nav className="space-y-1">
               {SIDEBAR_PRO_TOOLS.map((item) => {
@@ -245,33 +201,23 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                   </button>
                 );
               })}
-              <a
-                href="/analyser"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="w-full flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-sm font-medium text-[#1958B7] dark:text-sky-400 bg-sky-500/5 hover:bg-sky-500/10 border border-sky-500/15 transition-colors cursor-pointer whitespace-nowrap mt-2"
-              >
-                <span className="flex items-center gap-3">
-                  <Compass className="w-4 h-4 shrink-0" />
-                  <span>AI Analyser App</span>
-                </span>
-                <ExternalLink className="w-3.5 h-3.5 shrink-0 opacity-75" />
-              </a>
             </nav>
           </div>
         </div>
 
         <div className="p-3 border-t border-slate-100 dark:border-[#2A2F3D] space-y-2">
-          {isOwnerSession && (
-            <button
-              type="button"
-              onClick={() => setAdminGateOpen(true)}
-              className="w-full flex items-center gap-2.5 px-3 py-2 rounded-xl bg-[#151820] text-white text-xs font-bold hover:bg-[#242936] cursor-pointer"
-            >
+          <button
+            type="button"
+            onClick={openAdminPortal}
+            className="w-full flex items-center justify-between px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#1E222E] hover:bg-slate-200 dark:hover:bg-[#272C3A] text-xs font-semibold cursor-pointer"
+          >
+            <span className="flex items-center gap-2">
               <Shield className="w-3.5 h-3.5 text-[#FF444F]" />
-              <span>Admin MIS Console</span>
-            </button>
-          )}
+              <span>Admin Panel</span>
+            </span>
+            <span className="text-[10px] text-slate-400">MIS</span>
+          </button>
+
           <button
             type="button"
             onClick={() => setActiveTab('profile')}
@@ -304,6 +250,13 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
+            <div className="px-3 py-1 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] text-xs font-semibold flex items-center gap-2">
+              <span className={accountMode === 'real' ? 'text-[#00A878]' : 'text-amber-500'}>
+                {accountMode === 'real' ? 'Real' : 'Demo'}
+              </span>
+              <span className="font-mono-num">{formatMoney(canonical.activeTradingBalance, { hideable: true })}</span>
+            </div>
+
             <div className="flex items-center bg-[#F4F5F7] dark:bg-[#1A1D26] p-1 rounded-full">
               <button
                 type="button"
@@ -354,33 +307,9 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
 
             <button
               type="button"
-              onClick={() => setActiveTab('portfolio')}
-              className="px-3 py-1.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap shrink-0"
-              title="Open Portfolio & Cashier"
-            >
-              <Plus className="w-3.5 h-3.5" />
-              <span>Deposit</span>
-            </button>
-
-            <button
-              type="button"
-              onClick={() => setActiveTab('portfolio')}
-              className="px-3 py-1.5 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] border border-slate-200 dark:border-[#2A2F3D] text-xs font-mono-num font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap shrink-0"
-              title="Active Trading Balance"
-            >
-              <span
-                className={`w-1.5 h-1.5 rounded-full ${
-                  accountMode === 'real' ? 'bg-[#FF444F]' : 'bg-[#00A878]'
-                }`}
-              />
-              <span>{formatMoney(activeBalance, { hideable: true })}</span>
-            </button>
-
-            <button
-              type="button"
               onClick={() => setSearchOpen(true)}
               aria-label="Search markets and tools"
-              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
+              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
             >
               <Search className="w-4 h-4" />
             </button>
@@ -389,7 +318,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               type="button"
               onClick={() => setHideBalances(!hideBalances)}
               aria-label="Toggle balance visibility"
-              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
+              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
             >
               {hideBalances ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
@@ -398,7 +327,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               type="button"
               onClick={toggleTheme}
               aria-label="Toggle color theme"
-              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
+              className="w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
             >
               {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
@@ -407,7 +336,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               type="button"
               onClick={() => setActiveTab('notifications')}
               aria-label="Notifications"
-              className="relative w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer shrink-0"
+              className="relative w-9 h-9 rounded-full bg-[#F4F5F7] dark:bg-[#1A1D26] flex items-center justify-center hover:bg-slate-200 dark:hover:bg-[#2A2F3D] cursor-pointer"
             >
               <Bell className="w-4 h-4" />
               {unreadCount > 0 && (
@@ -419,68 +348,35 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </div>
         </div>
 
-        {/* Mobile Dark Top Strip */}
-        <div className="lg:hidden bg-[#151820] text-white px-4 pt-3 pb-2 flex items-center justify-between gap-2">
-          <div className="flex items-center gap-2 shrink-0">
-            <TradeDerivLogo variant="dark" size="sm" showWordmark={false} onClick={registerLogoTap} />
+        {/* Mobile Dark Top Strip matching Deriv screenshots */}
+        <div className="lg:hidden bg-[#151820] text-white px-3.5 pt-2.5 pb-2.5 flex items-center justify-between gap-2 sticky top-0 z-30 border-b border-white/5">
+          <div className="flex items-center gap-2 min-w-0">
+            <TradeDerivLogo variant="dark" size="sm" showWordmark={false} appName={appName} onClick={registerLogoTap} />
             <button
               type="button"
-              onClick={() => setSearchOpen(true)}
-              className="w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
-              aria-label="Search"
+              onClick={() => setAccountMode(accountMode === 'demo' ? 'real' : 'demo')}
+              className="flex flex-col items-start text-left cursor-pointer min-w-0"
             >
-              <Search className="w-3.5 h-3.5 text-slate-200" />
-            </button>
-          </div>
-
-          <div className="flex items-center gap-1.5 min-w-0">
-            <div className="flex items-center bg-[#242936] p-0.5 rounded-full shrink-0">
-              <button
-                type="button"
-                onClick={() => setAccountMode('real')}
-                className={`px-2 py-1 rounded-full text-[10px] font-semibold cursor-pointer ${
-                  accountMode === 'real' ? 'bg-[#FF444F] text-white' : 'text-slate-300'
-                }`}
-              >
-                Real
-              </button>
-              <button
-                type="button"
-                onClick={() => setAccountMode('demo')}
-                className={`px-2 py-1 rounded-full text-[10px] font-semibold cursor-pointer ${
-                  accountMode === 'demo' ? 'bg-white text-[#151820]' : 'text-slate-300'
-                }`}
-              >
-                Demo
-              </button>
-            </div>
-            <button
-              type="button"
-              onClick={() => setCurrencyDisplay(currencyDisplay === 'USD' ? 'KSH' : 'USD')}
-              className="inline-flex items-center gap-1 px-2 py-1 rounded-full bg-[#242936] text-[10px] font-semibold text-slate-200 cursor-pointer shrink-0"
-              title="Switch USD / KSH"
-            >
-              {currencyDisplay === 'USD' ? <UsFlagIcon /> : <KeFlagIcon />}
-              <span>{currencyDisplay}</span>
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('portfolio')}
-              className="px-2.5 py-1 rounded-full bg-[#242936] text-[11px] font-mono-num font-bold text-white truncate cursor-pointer"
-              title="Open Portfolio & Cashier"
-            >
-              {formatMoney(activeBalance, { hideable: true })}
+              <span className="inline-flex items-center gap-1 text-[11px] font-semibold">
+                <span className={accountMode === 'demo' ? 'text-amber-400' : 'text-[#00A878]'}>
+                  {accountMode === 'demo' ? 'Demo account' : 'Real account'}
+                </span>
+                <ChevronDown className="w-3 h-3 text-slate-400" />
+              </span>
+              <span className="font-mono-num text-xs font-bold text-white truncate">
+                {formatMoney(canonical.activeTradingBalance, { hideable: true })}
+              </span>
             </button>
           </div>
 
           <div className="flex items-center gap-1.5 shrink-0">
             <button
               type="button"
-              onClick={() => setActiveTab('portfolio')}
-              className="px-2 py-1 rounded-full bg-[#FF444F] text-white text-[10px] font-bold cursor-pointer"
-              aria-label="Deposit"
+              onClick={() => setSearchOpen(true)}
+              className="w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
+              aria-label="Search"
             >
-              +
+              <Search className="w-4 h-4 text-slate-200" />
             </button>
             <button
               type="button"
@@ -488,7 +384,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               className="w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
               aria-label="Hide balances"
             >
-              {hideBalances ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+              {hideBalances ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
             <button
               type="button"
@@ -496,86 +392,23 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               className="relative w-8 h-8 rounded-full bg-[#242936] flex items-center justify-center cursor-pointer"
               aria-label="Notifications"
             >
-              <Bell className="w-3.5 h-3.5" />
+              <Bell className="w-4 h-4" />
               {unreadCount > 0 && (
-                <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-3.5 px-1 rounded-full bg-[#FF444F] text-white text-[9px] font-bold flex items-center justify-center">
+                <span className="absolute -top-0.5 -right-0.5 min-w-[15px] h-3.5 px-1 rounded-full bg-[#FF444F] text-white text-[9px] font-bold flex items-center justify-center">
                   {unreadCount}
                 </span>
               )}
             </button>
+            <a
+              href="https://app.deriv.com/cashier/deposit"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="px-3 py-1.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-[11px] font-semibold"
+            >
+              Deposit
+            </a>
           </div>
         </div>
-
-        {/* Clean Single-Row Horizontally Scrollable Workspace Navigation Strip */}
-        <div className="bg-white dark:bg-[#151820] border-b border-slate-200 dark:border-[#2A2F3D] px-4 lg:px-6 py-1.5 flex items-center gap-1.5 overflow-x-auto no-scrollbar">
-          {WORKSPACE_QUICK_BAR.map((item) => {
-            const active = activeTab === item.id;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                onClick={() => setActiveTab(item.id)}
-                className={`px-3 py-1.5 rounded-xl text-xs font-semibold whitespace-nowrap shrink-0 transition-colors cursor-pointer ${
-                  active
-                    ? 'bg-[#FF444F] text-white'
-                    : 'text-slate-600 dark:text-slate-300 hover:bg-[#F4F5F7] dark:hover:bg-[#1A1D26]'
-                }`}
-              >
-                {item.label}
-              </button>
-            );
-          })}
-          <a
-            href="/analyser"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="ml-auto px-3 py-1.5 rounded-xl text-xs font-semibold text-[#1958B7] dark:text-sky-400 bg-sky-500/5 hover:bg-sky-500/10 border border-sky-500/20 whitespace-nowrap shrink-0 inline-flex items-center gap-1"
-          >
-            <span>AI Analyser</span>
-            <ExternalLink className="w-3 h-3" />
-          </a>
-        </div>
-
-        {/* Compact Live Account Telemetry Strip on Trading Workspaces */}
-        {showTelemetryBar && (
-          <div className="bg-[#151820] text-white border-b border-[#2A2F3D] px-4 lg:px-6 py-2 flex items-center justify-between gap-4 overflow-x-auto no-scrollbar text-[11px] font-mono-num">
-            <div className="flex items-center gap-4 shrink-0">
-              <span
-                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
-                  accountMode === 'real' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-[#00A878]/20 text-[#00A878]'
-                }`}
-              >
-                {accountMode === 'real'
-                  ? activeConnectedAccount?.deriv_account_id || 'REAL'
-                  : 'DEMO'}
-              </span>
-              <span>
-                <span className="text-slate-400">Balance: </span>
-                <strong>{formatMoney(activeBalance, { hideable: true })}</strong>
-              </span>
-              <span>
-                <span className="text-slate-400">Equity: </span>
-                <strong>{formatMoney(liveEquity, { hideable: true })}</strong>
-              </span>
-              <span>
-                <span className="text-slate-400">In Trades: </span>
-                <strong>{formatMoney(inTradesUsd, { hideable: true })}</strong>
-              </span>
-              <span>
-                <span className="text-slate-400">Available: </span>
-                <strong>{formatMoney(availableMargin, { hideable: true })}</strong>
-              </span>
-            </div>
-            <div className="shrink-0">
-              <span className="text-slate-400">Live P/L: </span>
-              <strong className={liveFloatingPnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}>
-                {hideBalances
-                  ? '••••'
-                  : `${liveFloatingPnl >= 0 ? '+' : '-'}${formatMoney(Math.abs(liveFloatingPnl))}`}
-              </strong>
-            </div>
-          </div>
-        )}
 
         {/* Viewport Page Content */}
         <main className="flex-1 pb-24 lg:pb-8">{children}</main>
@@ -591,7 +424,10 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               <button
                 key={item.id}
                 type="button"
-                onClick={() => setActiveTab(item.id)}
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  setActiveTab(item.id);
+                }}
                 className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer ${
                   active ? 'text-[#FF444F]' : 'text-slate-500 dark:text-slate-400'
                 }`}
@@ -601,8 +437,101 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               </button>
             );
           })}
+          <button
+            type="button"
+            onClick={() => setMobileMenuOpen(true)}
+            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer ${
+              mobileMenuOpen ? 'text-[#FF444F]' : 'text-slate-500 dark:text-slate-400'
+            }`}
+          >
+            <Menu className="w-5 h-5" />
+            <span>Menu</span>
+          </button>
         </div>
       </nav>
+
+      {/* Mobile Full Platform Menu Drawer */}
+      {mobileMenuOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex justify-end">
+          <div className="w-full max-w-xs bg-white dark:bg-[#151820] h-full p-5 flex flex-col justify-between overflow-y-auto">
+            <div>
+              <div className="flex items-center justify-between mb-5 pb-4 border-b border-slate-100 dark:border-[#2A2F3D]">
+                <TradeDerivLogo variant={theme} size="sm" appName={appName} onClick={registerLogoTap} />
+                <button
+                  type="button"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="p-2 rounded-full hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+
+              <div className="flex items-center justify-between gap-2 mb-4">
+                <button
+                  type="button"
+                  onClick={() => setCurrencyDisplay(currencyDisplay === 'USD' ? 'KSH' : 'USD')}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#1E222E] text-xs font-semibold cursor-pointer"
+                >
+                  {currencyDisplay === 'USD' ? <UsFlagIcon /> : <KeFlagIcon />}
+                  <span>{currencyDisplay}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleTheme}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-xl bg-slate-100 dark:bg-[#1E222E] text-xs font-semibold cursor-pointer"
+                >
+                  {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
+                  <span>{theme === 'dark' ? 'Light' : 'Dark'}</span>
+                </button>
+              </div>
+
+              <div className="space-y-1">
+                <p className="px-2 text-[11px] font-semibold text-slate-400 uppercase tracking-wider mb-1">
+                  All Platforms & Tools
+                </p>
+                {[...CORE_HUB_TABS, ...SIDEBAR_PRO_TOOLS, { id: 'profile' as NavTab, label: 'Profile & Security', icon: User }].map(
+                  (item) => {
+                    const Icon = item.icon;
+                    const active = activeTab === item.id;
+                    return (
+                      <button
+                        key={item.id}
+                        type="button"
+                        onClick={() => {
+                          setMobileMenuOpen(false);
+                          setActiveTab(item.id);
+                        }}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium cursor-pointer ${
+                          active
+                            ? 'bg-[#FF444F]/10 text-[#FF444F]'
+                            : 'text-slate-700 dark:text-slate-200 hover:bg-slate-100 dark:hover:bg-white/5'
+                        }`}
+                      >
+                        <Icon className="w-4 h-4 shrink-0" />
+                        <span>{item.label}</span>
+                      </button>
+                    );
+                  }
+                )}
+              </div>
+            </div>
+
+            <div className="pt-4 mt-4 border-t border-slate-100 dark:border-[#2A2F3D]">
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  openAdminPortal();
+                }}
+                className="w-full flex items-center justify-center gap-2 py-2.5 rounded-xl bg-[#151820] dark:bg-white/10 text-white text-xs font-semibold cursor-pointer"
+              >
+                <Shield className="w-4 h-4 text-[#FF444F]" />
+                <span>Open Admin Panel</span>
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Global Search Modal */}
       {searchOpen && (
@@ -640,23 +569,13 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                 >
                   <div>
                     <p className="text-sm font-semibold">{inst.display_name}</p>
-                    <p className="text-xs text-slate-500">{inst.symbol} · {inst.category}</p>
+                    <p className="text-xs text-slate-500">
+                      {inst.symbol} · {inst.category}
+                    </p>
                   </div>
                   <span className="font-mono-num text-sm font-semibold">{inst.price}</span>
                 </button>
               ))}
-            </div>
-            <div className="px-4 py-2.5 border-t border-slate-100 dark:border-[#2A2F3D] bg-slate-50/60 dark:bg-[#111319] flex items-center justify-between">
-              <span className="text-xs text-slate-500">Independent XAUUSD &amp; Forex Intelligence</span>
-              <a
-                href="/analyser"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#1958B7] dark:text-sky-400 hover:underline"
-              >
-                <span>Open Standalone AI Analyser</span>
-                <ExternalLink className="w-3.5 h-3.5" />
-              </a>
             </div>
           </div>
         </div>

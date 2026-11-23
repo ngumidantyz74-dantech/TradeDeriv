@@ -118,7 +118,7 @@ router.post('/auth/register', requireDb, async (req, res) => {
 
     await addNotification(
       newUser.id,
-      'Welcome to TradeDeriv',
+      'Welcome to Deriv',
       'Your trading workspace is active with $10,000.00 virtual funds.',
       'system'
     );
@@ -128,8 +128,8 @@ router.post('/auth/register', requireDb, async (req, res) => {
       to: cleanEmail,
       toName: newUser.full_name,
       template: 'welcome_verification',
-      subject: 'Verify your TradeDeriv account',
-      htmlContent: `<p>Welcome to TradeDeriv, ${newUser.full_name}. Verify your email: <a href="${config.appUrl}/api/auth/verify-email?token=${verifyToken}">Verify Email</a></p>`,
+      subject: 'Verify your Deriv account',
+      htmlContent: `<p>Welcome to Deriv, ${newUser.full_name}. Verify your email: <a href="${config.appUrl}/api/auth/verify-email?token=${verifyToken}">Verify Email</a></p>`,
     });
 
     res.status(201).json({ token, user: formatPublicUser(newUser) });
@@ -230,7 +230,7 @@ router.post('/auth/forgot-password', requireDb, async (req, res) => {
       to: cleanEmail,
       toName: user.full_name,
       template: 'password_reset',
-      subject: 'TradeDeriv Password Reset',
+      subject: 'Deriv Password Reset',
       htmlContent: `<p>Reset your password using code: <strong>${resetToken}</strong></p>`,
     });
   }

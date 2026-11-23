@@ -205,6 +205,158 @@ router.get('/intelligence/analyze', async (req, res) => {
   });
 });
 
+export interface AnalyserSignalResult {
+  symbol: string;
+  displayName: string;
+  contractType: string;
+  side: string;
+  barrier: string;
+  duration: number;
+  durationUnit: string;
+  growthRate: number;
+  confidence: number;
+  direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE';
+  reason: string;
+  lastDigit: number;
+  evenPct: number;
+  oddPct: number;
+  risePct: number;
+  fallPct: number;
+  over2Pct: number;
+  under7Pct: number;
+  rsi14: number;
+  price: number;
+  updatedAt: string;
+}
+
+export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promise<AnalyserSignalResult> {
+  const candidates = preferredSymbol
+    ? [preferredSymbol]
+    : ['1HZ100V', '1HZ75V', '1HZ50V', '1HZ25V', '1HZ10V', 'R_100'];
+
+  let best: AnalyserSignalResult | null = null;
+
+  for (const sym of candidates) {
+    const prices = await derivWs.fetchTickHistory(sym, 80).catch(() => []);
+    const tick = derivWs.getLatestTick(sym);
+    const meta = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === sym);
+    const buf = prices.length >= 10 ? prices : derivWs.getSparkline(sym, 40);
+    const latestPrice = tick?.quote ?? buf[buf.length - 1] ?? meta?.base_price ?? 1000;
+    const pip = tick?.pipSize ?? meta?.pip_size ?? 0.01;
+    const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
+
+    const digits = (buf.length ? buf : [latestPrice]).map((p) => {
+      const s = p.toFixed(dec);
+      return Number(s[s.length - 1] || 0);
+    });
+    const total = Math.max(1, digits.length);
+    const evenCount = digits.filter((d) => d % 2 === 0).length;
+    const over2Count = digits.filter((d) => d > 2).length;
+    const under7Count = digits.filter((d) => d < 7).length;
+    const evenPct = Number(((evenCount / total) * 100).toFixed(1));
+    const oddPct = Number((100 - evenPct).toFixed(1));
+    const over2Pct = Number(((over2Count / total) * 100).toFixed(1));
+    const under7Pct = Number(((under7Count / total) * 100).toFixed(1));
+
+    let rises = 0;
+    let falls = 0;
+    let gains = 0;
+    let losses = 0;
+    for (let i = 1; i < buf.length; i++) {
+      const diff = buf[i] - buf[i - 1];
+      if (diff >= 0) rises++;
+      else falls++;
+      if (i >= buf.length - 14) {
+        if (diff > 0) gains += diff;
+        else losses += Math.abs(diff);
+      }
+    }
+    const risePct = Number(((rises / Math.max(1, rises + falls)) * 100).toFixed(1));
+    const fallPct = Number((100 - risePct).toFixed(1));
+    const rs = losses === 0 ? 75 : gains / losses;
+    const rsi14 = Number((100 - 100 / (1 + rs)).toFixed(1));
+    const lastDigit = digits[digits.length - 1] ?? 0;
+
+    // Pick highest statistical confluence edge
+    let contractType = 'DIGITOVER';
+    let side = 'OVER';
+    let barrier = '2';
+    let direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE' = 'DIGIT_EDGE';
+    let confidence = 78;
+    let reason = `Over 2 probability ${over2Pct}% across last ${total} ticks`;
+
+    if (under7Pct >= over2Pct && under7Pct >= 66) {
+      contractType = 'DIGITUNDER';
+      side = 'UNDER';
+      barrier = '7';
+      confidence = Math.min(93, Math.round(62 + (under7Pct - 55) * 0.9));
+      reason = `Under 7 bias at ${under7Pct}% with RSI(14) ${rsi14}`;
+    } else if (over2Pct >= 66) {
+      contractType = 'DIGITOVER';
+      side = 'OVER';
+      barrier = '2';
+      confidence = Math.min(93, Math.round(62 + (over2Pct - 55) * 0.9));
+      reason = `Over 2 strength at ${over2Pct}% (last digit ${lastDigit})`;
+    } else if (Math.abs(evenPct - oddPct) >= 12) {
+      const pickEven = evenPct >= oddPct;
+      contractType = pickEven ? 'DIGITEVEN' : 'DIGITODD';
+      side = pickEven ? 'EVEN' : 'ODD';
+      barrier = '';
+      confidence = Math.min(90, Math.round(68 + Math.abs(evenPct - oddPct) * 0.6));
+      reason = `${pickEven ? 'Even' : 'Odd'} parity cluster (${Math.max(evenPct, oddPct)}%)`;
+    } else {
+      const bullish = risePct >= fallPct;
+      contractType = bullish ? 'CALL' : 'PUT';
+      side = bullish ? 'CALL' : 'PUT';
+      barrier = '';
+      direction = bullish ? 'BULLISH' : 'BEARISH';
+      confidence = Math.min(89, Math.round(66 + Math.abs(risePct - fallPct) * 0.5));
+      reason = `${bullish ? 'Bullish' : 'Bearish'} tick momentum (${Math.max(risePct, fallPct)}% directional)`;
+    }
+
+    const candidate: AnalyserSignalResult = {
+      symbol: sym,
+      displayName: meta?.display_name || sym,
+      contractType,
+      side,
+      barrier,
+      duration: 1,
+      durationUnit: 't',
+      growthRate: 0.02,
+      confidence,
+      direction,
+      reason,
+      lastDigit,
+      evenPct,
+      oddPct,
+      risePct,
+      fallPct,
+      over2Pct,
+      under7Pct,
+      rsi14,
+      price: latestPrice,
+      updatedAt: new Date().toISOString(),
+    };
+
+    if (!best || candidate.confidence > best.confidence) {
+      best = candidate;
+    }
+  }
+
+  return best!;
+}
+
+// 1b. Live Analyser Signal Bridge for Deriv Bot & SmartTrader
+router.get('/intelligence/analyser-signal', async (req, res) => {
+  try {
+    const symbol = req.query.symbol ? String(req.query.symbol) : undefined;
+    const signal = await computeLiveAnalyserSignal(symbol);
+    res.json({ signal });
+  } catch (err) {
+    res.status(500).json({ error: sanitizePublicError(err, 'Unable to compute live signal.') });
+  }
+});
+
 // 2. Multi-Instrument Market Radar Scanner (Always live, zero cache)
 router.get('/intelligence/radar', async (req, res) => {
   const granularity = Number(req.query.granularity || 900);
@@ -351,7 +503,7 @@ router.get('/intelligence/sessions', async (_req, res) => {
       markets: tradingTimesMarkets,
     },
     integrityNote:
-      'TradeDeriv displays real Deriv trading_times schedules and UTC liquidity windows only. No synthetic or unverified economic news headlines are fabricated.',
+      'Deriv displays real Deriv trading_times schedules and UTC liquidity windows only.',
   });
 });
 
@@ -447,7 +599,7 @@ router.post('/intelligence/copilot', requireDb, requireAuth, async (req: AuthReq
         contents: `Live Grounded Market & Portfolio Snapshot (JSON):\n${JSON.stringify(groundedPayload, null, 2)}\n\nTrader Question:\n${String(prompt)}`,
         config: {
           systemInstruction:
-            'You are the TradeDeriv Institutional Trading Co-Pilot. Analyze ONLY the supplied live Deriv market data, indicators, SMC structure, Buy Low/Sell High regime, and user open positions/risk settings. Cite exact numbers from the JSON. Never invent prices, never fabricate news, and never guarantee profits or claim certain outcomes. State invalidation levels, risk-reward trade-offs, and whether current exposure complies with the user risk limits. Keep the output concise, structured with clear markdown headings and bullet points.',
+            'You are the Deriv Institutional Trading Co-Pilot. Analyze ONLY the supplied live Deriv market data, indicators, SMC structure, Buy Low/Sell High regime, and user open positions/risk settings. Cite exact numbers from the JSON. Never invent prices, never fabricate news, and never guarantee profits or claim certain outcomes. State invalidation levels, risk-reward trade-offs, and whether current exposure complies with the user risk limits. Keep the output concise, structured with clear markdown headings and bullet points.',
         },
       });
       const text = (response.text || '').trim();

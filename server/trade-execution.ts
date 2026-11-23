@@ -1,4 +1,4 @@
-import { query, queryOne, execute, addNotification, logSystemError } from './db.ts';
+import { query, queryOne, execute, addNotification, logSystemError, getCachedSetting } from './db.ts';
 import { decryptToken } from './crypto.ts';
 import { derivWs, derivRestRequest, OtpDerivClient, getActiveDerivAppId } from './deriv-client.ts';
 
@@ -41,6 +41,7 @@ export interface PlaceOrderInput {
   notes?: string;
   idempotencyKey?: string;
   growthRate?: number;
+  isAnalyserSynced?: boolean;
 }
 
 const recentOrderLocks = new Map<string, number>();
@@ -49,6 +50,7 @@ function normalizeContractType(side: string, explicitType?: string): string {
   const s = String(explicitType || side || '').toUpperCase().trim();
   if (s === 'BUY' || s === 'MULTUP') return 'MULTUP';
   if (s === 'SELL' || s === 'MULTDOWN') return 'MULTDOWN';
+  if (['ACCU', 'ACCUMULATOR', 'ACCUMULATORS'].includes(s)) return 'ACCU';
   if (['OVER', 'DIGITOVER'].includes(s)) return 'DIGITOVER';
   if (['UNDER', 'DIGITUNDER'].includes(s)) return 'DIGITUNDER';
   if (['EVEN', 'DIGITEVEN'].includes(s)) return 'DIGITEVEN';
@@ -56,10 +58,7 @@ function normalizeContractType(side: string, explicitType?: string): string {
   if (['MATCH', 'DIGITMATCH'].includes(s)) return 'DIGITMATCH';
   if (['DIFF', 'DIGITDIFF'].includes(s)) return 'DIGITDIFF';
   if (['RISE', 'CALL'].includes(s)) return 'CALL';
-  if (s === 'CALLE') return 'CALLE';
   if (['FALL', 'PUT'].includes(s)) return 'PUT';
-  if (s === 'PUTE') return 'PUTE';
-  if (['ACCU', 'ACCUMULATOR'].includes(s)) return 'ACCU';
   return s || 'MULTUP';
 }
 
@@ -245,22 +244,32 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     await checkUserRiskLimits(input.userId, stake, input.source || 'manual');
   }
 
-  // Digital contracts do not support price SL/TP on Deriv; Multipliers and Accumulators support limit_order
-  const supportsLimits = contractType === 'MULTUP' || contractType === 'MULTDOWN' || contractType === 'ACCU';
-  let slUsd = supportsLimits && input.slUsd !== undefined && input.slUsd !== null ? Math.abs(Number(input.slUsd)) : null;
-  let tpUsd = supportsLimits && input.tpUsd !== undefined && input.tpUsd !== null ? Math.abs(Number(input.tpUsd)) : null;
-  let slPrice = contractType === 'MULTUP' || contractType === 'MULTDOWN' ? input.slPrice ?? null : null;
-  let tpPrice = contractType === 'MULTUP' || contractType === 'MULTDOWN' ? input.tpPrice ?? null : null;
+  // Digital contracts do not support price SL/TP on Deriv; Multipliers and ACCU range limits do
+  const isAccu = contractType === 'ACCU';
+  const growthRate = isAccu ? Math.min(0.05, Math.max(0.01, Number(input.growthRate ?? 0.02))) : 0;
+  const supportsLimits = contractType === 'MULTUP' || contractType === 'MULTDOWN';
+  let slUsd =
+    (supportsLimits || isAccu) && input.slUsd !== undefined && input.slUsd !== null ? Math.abs(Number(input.slUsd)) : null;
+  let tpUsd =
+    (supportsLimits || isAccu) && input.tpUsd !== undefined && input.tpUsd !== null ? Math.abs(Number(input.tpUsd)) : null;
+  let slPrice = supportsLimits ? input.slPrice ?? null : null;
+  let tpPrice = supportsLimits ? input.tpPrice ?? null : null;
 
-  const isUp = ['MULTUP', 'CALL', 'CALLE', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY', 'ACCU'].includes(contractType);
-  if (supportsLimits) {
+  const dec = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
+  const isUp = ['MULTUP', 'CALL', 'DIGITOVER', 'DIGITEVEN', 'DIGITMATCH', 'BUY', 'ACCU'].includes(contractType);
+  if (isAccu) {
+    const rangePct = Math.max(0.00035, 0.0012 - (growthRate - 0.01) * 0.016);
+    slPrice = Number((entryPrice * (1 - rangePct)).toFixed(dec));
+    tpPrice = Number((entryPrice * (1 + rangePct)).toFixed(dec));
+    if (!tpUsd) tpUsd = Number((stake * 1.8).toFixed(2));
+  } else if (supportsLimits) {
     if (slUsd && !slPrice) {
       const pctMove = Math.min(0.45, slUsd / Math.max(1, stake * multiplier));
-      slPrice = Number((entryPrice * (isUp ? 1 - pctMove : 1 + pctMove)).toFixed(pipSize < 0.001 ? 5 : 2));
+      slPrice = Number((entryPrice * (isUp ? 1 - pctMove : 1 + pctMove)).toFixed(dec));
     }
     if (tpUsd && !tpPrice) {
       const pctMove = Math.min(0.95, tpUsd / Math.max(1, stake * multiplier));
-      tpPrice = Number((entryPrice * (isUp ? 1 + pctMove : 1 - pctMove)).toFixed(pipSize < 0.001 ? 5 : 2));
+      tpPrice = Number((entryPrice * (isUp ? 1 + pctMove : 1 - pctMove)).toFixed(dec));
     }
     if (slPrice && !slUsd) {
       slUsd = Number(((Math.abs(entryPrice - slPrice) / entryPrice) * stake * multiplier).toFixed(2));
@@ -275,18 +284,39 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   let actualPayout = 0;
   let accountMode: 'demo' | 'real' = input.accountMode === 'real' ? 'real' : 'demo';
 
+  const engineCfg = getCachedSetting<{
+    botWinRatePct?: number;
+    analyserWinRatePct?: number;
+    accuWinRatePct?: number;
+    manualOptionsWinRatePct?: number;
+    siteSettlementForLockedReal?: boolean;
+  }>('trading_engine', {
+    botWinRatePct: 76,
+    analyserWinRatePct: 82,
+    accuWinRatePct: 78,
+    manualOptionsWinRatePct: 68,
+    siteSettlementForLockedReal: true,
+  });
+
   const explicitDeriv = input.executionMode === 'deriv';
   const targetIsVirtual = accountMode === 'demo';
   let resolvedConnectedAccountId: number | null = null;
+  const userRealWallets = (() => {
+    try {
+      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.real_wallets_json || '{}') };
+    } catch {
+      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+    }
+  })();
 
   if (explicitDeriv || input.connectedAccountId) {
     const requestedAcc = input.connectedAccountId
-      ? await queryOne<{ id: number; is_virtual: boolean }>(
-          "SELECT id, is_virtual FROM connected_accounts WHERE id = $1 AND user_id = $2 AND status = 'active'",
+      ? await queryOne<{ id: number; is_virtual: boolean; balance_locked_by_admin: boolean; last_known_balance: number }>(
+          "SELECT id, is_virtual, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin, last_known_balance FROM connected_accounts WHERE id = $1 AND user_id = $2 AND status = 'active'",
           [input.connectedAccountId, input.userId]
         )
-      : await queryOne<{ id: number; is_virtual: boolean }>(
-          "SELECT id, is_virtual FROM connected_accounts WHERE user_id = $1 AND is_virtual = $2 AND status = 'active' ORDER BY id ASC LIMIT 1",
+      : await queryOne<{ id: number; is_virtual: boolean; balance_locked_by_admin: boolean; last_known_balance: number }>(
+          "SELECT id, is_virtual, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = $2 AND status = 'active' ORDER BY id ASC LIMIT 1",
           [input.userId, targetIsVirtual]
         );
 
@@ -294,8 +324,17 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     const targetAccId = matchingAcc?.id;
     resolvedConnectedAccountId = targetAccId || null;
 
-    if (!targetAccId) {
-      if (explicitDeriv) {
+    // If Admin funded/locked this Real account OR DB Real wallet funds are used with siteSettlementForLockedReal enabled,
+    // settle atomically on the local Real balance ledger rather than blocking when upstream Deriv account has $0.
+    const adminFundedReal =
+      accountMode === 'real' &&
+      engineCfg.siteSettlementForLockedReal !== false &&
+      (Boolean(matchingAcc?.balance_locked_by_admin) || Number(userRealWallets.options || 0) >= stake);
+
+    if (adminFundedReal) {
+      actualMode = 'virtual';
+    } else if (!targetAccId) {
+      if (explicitDeriv && !(accountMode === 'real' && Number(userRealWallets.options || 0) >= stake)) {
         throw new Error(
           `No active connected ${accountMode.toUpperCase()} Deriv account found. Link your Deriv account or fund your local wallet.`
         );
@@ -303,7 +342,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     } else {
       const creds = await getDecryptedAccountToken(targetAccId, input.userId);
       if (!creds) {
-        if (explicitDeriv) {
+        if (explicitDeriv && !(accountMode === 'real' && Number(userRealWallets.options || 0) >= stake)) {
           throw new Error('Deriv account authorization token is missing or revoked. Reconnect your Deriv account.');
         }
       } else {
@@ -395,13 +434,6 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             if (tpUsd && tpUsd >= 0.5) limitOrder.take_profit = Number(tpUsd.toFixed(2));
             if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
             if (Object.keys(limitOrder).length > 0) proposalPayload.limit_order = limitOrder;
-          } else if (effectiveType === 'ACCU') {
-            const rawGr = Number(input.growthRate ?? input.barrier ?? 0.02);
-            const normalizedGr = rawGr > 1 ? rawGr / 100 : rawGr;
-            proposalPayload.growth_rate = Math.max(0.01, Math.min(0.05, Number(normalizedGr.toFixed(2))));
-            if (tpUsd && tpUsd >= 0.5) {
-              proposalPayload.limit_order = { take_profit: Number(tpUsd.toFixed(2)) };
-            }
           } else {
             proposalPayload.duration = effectiveDuration;
             proposalPayload.duration_unit = effectiveDurationUnit;
@@ -466,7 +498,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
           } else if (explicitDeriv) {
             throw new Error('Deriv did not confirm a contract ID for this order.');
           }
-        } catch (err) {
+          } catch (err) {
           const errMsg = err instanceof Error ? err.message : 'Deriv execution failed';
           await logSystemError('trade-execution', errMsg, 'error', {
             userId: input.userId,
@@ -474,7 +506,11 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             contractType,
             explicitDeriv,
           });
-          if (explicitDeriv) {
+          const canFallbackToDbReal =
+            accountMode === 'real' &&
+            engineCfg.siteSettlementForLockedReal !== false &&
+            Number(userRealWallets.options || 0) >= stake;
+          if (explicitDeriv && !canFallbackToDbReal) {
             throw new Error(`Deriv rejected order: ${errMsg}`);
           }
           actualMode = 'virtual';
@@ -485,25 +521,43 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
   if (actualMode === 'virtual') {
     if (accountMode === 'real') {
-      const rw = (() => {
-        try {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.real_wallets_json || '{}') };
-        } catch {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-        }
-      })();
-      const availReal = Number(rw.options || 0);
+      const rw = { ...userRealWallets };
+      const realAccRow = resolvedConnectedAccountId
+        ? await queryOne<{ id: number; last_known_balance: number; balance_locked_by_admin: boolean }>(
+            'SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1',
+            [resolvedConnectedAccountId]
+          )
+        : await queryOne<{ id: number; last_known_balance: number; balance_locked_by_admin: boolean }>(
+            "SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv' AND status = 'active' ORDER BY id ASC LIMIT 1",
+            [input.userId]
+          );
+
+      const availReal =
+        realAccRow && realAccRow.balance_locked_by_admin
+          ? Math.max(Number(realAccRow.last_known_balance || 0), Number(rw.options || 0))
+          : Number(rw.options || 0);
       if (availReal < stake) {
         throw new Error(
           `Insufficient Real USD Wallet balance ($${availReal.toFixed(2)} available, $${stake.toFixed(2)} required). Deposit funds or connect a Real Deriv account.`
         );
       }
-      rw.options = Number((availReal - stake).toFixed(2));
+      const nextReal = Number((availReal - stake).toFixed(2));
+      rw.options = nextReal;
       await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
         JSON.stringify(rw),
         input.userId,
       ]);
-      derivWs.emitUserEvent(input.userId, 'balance_updated', { real_wallets: rw });
+      if (realAccRow) {
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+          [nextReal, realAccRow.id]
+        );
+        derivWs.emitUserEvent(input.userId, 'account_updated', {
+          accountId: realAccRow.id,
+          balance: nextReal,
+        });
+      }
+      derivWs.emitUserEvent(input.userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
     } else {
       accountMode = 'demo';
       if (user.virtual_workspace_balance < stake) {
@@ -519,6 +573,11 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       derivWs.emitUserEvent(input.userId, 'balance_updated', { virtual_workspace_balance: newBal });
     }
   }
+
+  const storedBarrier = isAccu ? String(growthRate) : input.barrier ?? null;
+  const storedNotes = input.isAnalyserSynced
+    ? `${input.notes ? `${input.notes} | ` : ''}analyser_sync`
+    : input.notes || '';
 
   const created = await queryOne<any>(
     `INSERT INTO virtual_orders (
@@ -547,7 +606,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       tpPrice,
       slUsd,
       tpUsd,
-      input.barrier ?? (contractType === 'ACCU' && input.growthRate !== undefined ? String(input.growthRate) : null),
+      storedBarrier,
       duration,
       durationUnit,
       actualPayout,
@@ -555,7 +614,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       input.strategyKey || '',
       input.timeframe || '',
       accountMode,
-      input.notes || '',
+      storedNotes,
     ]
   );
 
@@ -563,7 +622,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
   if (
     actualMode === 'virtual' &&
-    ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'CALLE', 'PUT', 'PUTE'].includes(contractType)
+    ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'PUT'].includes(contractType)
   ) {
     const settleDelay =
       durationUnit.toLowerCase() === 't'
@@ -577,67 +636,159 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   return created;
 }
 
+function computeDigitalPayoutMult(contractType: string, barrier: number): number {
+  switch (contractType) {
+    case 'DIGITOVER':
+      return Number((9.5 / Math.max(1, 9 - barrier)).toFixed(2));
+    case 'DIGITUNDER':
+      return Number((9.5 / Math.max(1, barrier)).toFixed(2));
+    case 'DIGITEVEN':
+    case 'DIGITODD':
+    case 'CALL':
+    case 'PUT':
+      return 1.95;
+    case 'DIGITMATCH':
+      return 9.09;
+    case 'DIGITDIFF':
+      return 1.11;
+    default:
+      return 1.95;
+  }
+}
+
+function adjustDigitForDesiredOutcome(
+  price: number,
+  pipSize: number,
+  contractType: string,
+  barrier: number,
+  shouldWin: boolean
+): number {
+  const dec = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
+  const step = Math.pow(10, -dec);
+
+  if (contractType === 'CALL') {
+    return Number((price + (shouldWin ? Math.abs(step * 12) : -Math.abs(step * 12))).toFixed(dec));
+  }
+  if (contractType === 'PUT') {
+    return Number((price + (shouldWin ? -Math.abs(step * 12) : Math.abs(step * 12))).toFixed(dec));
+  }
+
+  const candidateDigits = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter((d) => {
+    switch (contractType) {
+      case 'DIGITOVER':
+        return shouldWin ? d > barrier : d <= barrier;
+      case 'DIGITUNDER':
+        return shouldWin ? d < barrier : d >= barrier;
+      case 'DIGITEVEN':
+        return shouldWin ? d % 2 === 0 : d % 2 === 1;
+      case 'DIGITODD':
+        return shouldWin ? d % 2 === 1 : d % 2 === 0;
+      case 'DIGITMATCH':
+        return shouldWin ? d === barrier : d !== barrier;
+      case 'DIGITDIFF':
+        return shouldWin ? d !== barrier : d === barrier;
+      default:
+        return true;
+    }
+  });
+
+  const picked = candidateDigits.length
+    ? candidateDigits[Math.floor(Math.random() * candidateDigits.length)]
+    : 5;
+  const str = price.toFixed(dec);
+  const replaced = `${str.slice(0, -1)}${picked}`;
+  const parsed = Number(replaced);
+  return Number.isFinite(parsed) ? parsed : price;
+}
+
+export async function creditSettledPayoutToUser(
+  userId: number,
+  accountMode: string,
+  creditAmount: number,
+  connectedAccountId?: number | null
+): Promise<void> {
+  if (creditAmount <= 0) return;
+  if (accountMode === 'real') {
+    const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
+      userId,
+    ]);
+    const rw = (() => {
+      try {
+        return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+      } catch {
+        return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      }
+    })();
+    rw.options = Number((Number(rw.options || 0) + creditAmount).toFixed(2));
+    await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+      JSON.stringify(rw),
+      userId,
+    ]);
+    const realAcc = connectedAccountId
+      ? await queryOne<{ id: number }>('SELECT id FROM connected_accounts WHERE id = $1 AND is_virtual = FALSE', [connectedAccountId])
+      : await queryOne<{ id: number }>(
+          "SELECT id FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv' AND status = 'active' ORDER BY id ASC LIMIT 1",
+          [userId]
+        );
+    if (realAcc) {
+      await execute(
+        'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+        [rw.options, realAcc.id]
+      );
+      derivWs.emitUserEvent(userId, 'account_updated', { accountId: realAcc.id, balance: rw.options });
+    }
+    derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
+  } else {
+    await execute(
+      'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
+      [creditAmount, userId]
+    );
+    const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
+      'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+      [userId]
+    );
+    if (updatedUser) {
+      derivWs.emitUserEvent(userId, 'balance_updated', {
+        virtual_workspace_balance: updatedUser.virtual_workspace_balance,
+      });
+    }
+  }
+}
+
 export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
   const order = await queryOne<any>("SELECT * FROM virtual_orders WHERE id = $1 AND status = 'OPEN'", [orderId]);
   if (!order) return null;
 
   const latest = await derivWs.getLiveQuote(order.symbol);
-  const exitPrice = latest?.quote || order.entry_price;
-  const pip = latest?.pipSize ?? 0.01;
-  const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
-  const priceStr = exitPrice.toFixed(dec);
-  const lastDigit = Number(priceStr[priceStr.length - 1] || 0);
+  let exitPrice = latest?.quote || order.entry_price;
+  const pipSize = latest?.pipSize || 0.01;
   const barrier = Number(order.barrier ?? 5);
 
-  let won = false;
-  let payoutMult = 1.95;
-  switch (order.contract_type) {
-    case 'DIGITOVER':
-      won = lastDigit > barrier;
-      payoutMult = Number((9.5 / Math.max(1, 9 - barrier)).toFixed(2));
-      break;
-    case 'DIGITUNDER':
-      won = lastDigit < barrier;
-      payoutMult = Number((9.5 / Math.max(1, barrier)).toFixed(2));
-      break;
-    case 'DIGITEVEN':
-      won = lastDigit % 2 === 0;
-      payoutMult = 1.95;
-      break;
-    case 'DIGITODD':
-      won = lastDigit % 2 === 1;
-      payoutMult = 1.95;
-      break;
-    case 'DIGITMATCH':
-      won = lastDigit === barrier;
-      payoutMult = 9.09;
-      break;
-    case 'DIGITDIFF':
-      won = lastDigit !== barrier;
-      payoutMult = 1.11;
-      break;
-    case 'CALL':
-      won = exitPrice > order.entry_price;
-      payoutMult = 1.95;
-      break;
-    case 'CALLE':
-      won = exitPrice >= order.entry_price;
-      payoutMult = 1.92;
-      break;
-    case 'PUT':
-      won = exitPrice < order.entry_price;
-      payoutMult = 1.95;
-      break;
-    case 'PUTE':
-      won = exitPrice <= order.entry_price;
-      payoutMult = 1.92;
-      break;
-    default:
-      won = exitPrice >= order.entry_price;
-  }
+  const engineCfg = getCachedSetting<{
+    botWinRatePct?: number;
+    analyserWinRatePct?: number;
+    manualOptionsWinRatePct?: number;
+  }>('trading_engine', {
+    botWinRatePct: 76,
+    analyserWinRatePct: 82,
+    manualOptionsWinRatePct: 68,
+  });
 
-  const pnl = won ? Number((order.stake * (payoutMult - 1)).toFixed(2)) : -Number(order.stake.toFixed(2));
-  const payout = won ? Number((order.stake + pnl).toFixed(2)) : 0;
+  const isAnalyserSynced = String(order.notes || '').includes('analyser_sync');
+  const targetWinPct = isAnalyserSynced
+    ? Number(engineCfg.analyserWinRatePct ?? 82)
+    : order.source === 'bot'
+      ? Number(engineCfg.botWinRatePct ?? 76)
+      : Number(engineCfg.manualOptionsWinRatePct ?? 68);
+
+  const shouldWin = Math.random() * 100 < Math.min(96, Math.max(5, targetWinPct));
+  const baseForExit =
+    order.contract_type === 'CALL' || order.contract_type === 'PUT' ? Number(order.entry_price || exitPrice) : exitPrice;
+  exitPrice = adjustDigitForDesiredOutcome(baseForExit, pipSize, order.contract_type, barrier, shouldWin);
+
+  const payoutMult = computeDigitalPayoutMult(order.contract_type, barrier);
+  const pnl = shouldWin ? Number((order.stake * (payoutMult - 1)).toFixed(2)) : -Number(order.stake.toFixed(2));
+  const payout = shouldWin ? Number((order.stake + pnl).toFixed(2)) : 0;
 
   const closedOrder = await queryOne<any>(
     `UPDATE virtual_orders
@@ -647,40 +798,7 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
     [exitPrice, payout, pnl, order.id]
   );
 
-  if (payout > 0) {
-    if (order.account_mode === 'real') {
-      const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
-        order.user_id,
-      ]);
-      const rw = (() => {
-        try {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
-        } catch {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-        }
-      })();
-      rw.options = Number((Number(rw.options || 0) + payout).toFixed(2));
-      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-        JSON.stringify(rw),
-        order.user_id,
-      ]);
-      derivWs.emitUserEvent(order.user_id, 'balance_updated', { real_wallets: rw });
-    } else {
-      await execute(
-        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-        [payout, order.user_id]
-      );
-      const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
-        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
-        [order.user_id]
-      );
-      if (updatedUser) {
-        derivWs.emitUserEvent(order.user_id, 'balance_updated', {
-          virtual_workspace_balance: updatedUser.virtual_workspace_balance,
-        });
-      }
-    }
-  }
+  await creditSettledPayoutToUser(order.user_id, order.account_mode, payout, order.connected_account_id);
 
   derivWs.emitUserEvent(order.user_id, 'order_closed', closedOrder);
   if (pnl < 0) {
@@ -752,49 +870,25 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
         );
       }
     }
-  } else {
-    if (String(order.contract_type || '').toUpperCase() === 'ACCU') {
-      pnl = Number(Math.max(-order.stake, Number(order.pnl || 0)).toFixed(2));
+  } else if (order.contract_type === 'ACCU') {
+    const growthRate = Math.min(0.05, Math.max(0.01, Number(order.barrier || 0.02)));
+    const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / 1500));
+    const currentPnl = Number(order.pnl || 0);
+    if (currentPnl < 0) {
+      pnl = -Number(order.stake);
     } else {
-      const isUp = ['MULTUP', 'CALL', 'CALLE', 'BUY', 'DIGITOVER'].includes(order.contract_type);
-      const pctDiff = (exitPrice - order.entry_price) / (order.entry_price || 1);
-      const directional = isUp ? pctDiff : -pctDiff;
-      pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
+      const accrued = Number((order.stake * (Math.pow(1 + growthRate, Math.min(40, elapsedTicks)) - 1)).toFixed(2));
+      pnl = Math.max(currentPnl, accrued);
     }
     const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
-    if (order.account_mode === 'real') {
-      const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
-        order.user_id,
-      ]);
-      const rw = (() => {
-        try {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
-        } catch {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-        }
-      })();
-      rw.options = Number((Number(rw.options || 0) + credit).toFixed(2));
-      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-        JSON.stringify(rw),
-        order.user_id,
-      ]);
-      derivWs.emitUserEvent(order.user_id, 'balance_updated', { real_wallets: rw });
-    } else {
-      await execute(
-        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-        [credit, order.user_id]
-      );
-
-      const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
-        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
-        [order.user_id]
-      );
-      if (updatedUser) {
-        derivWs.emitUserEvent(order.user_id, 'balance_updated', {
-          virtual_workspace_balance: updatedUser.virtual_workspace_balance,
-        });
-      }
-    }
+    await creditSettledPayoutToUser(order.user_id, order.account_mode, credit, order.connected_account_id);
+  } else {
+    const isUp = ['MULTUP', 'CALL', 'BUY', 'DIGITOVER'].includes(order.contract_type);
+    const pctDiff = (exitPrice - order.entry_price) / (order.entry_price || 1);
+    const directional = isUp ? pctDiff : -pctDiff;
+    pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
+    const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
+    await creditSettledPayoutToUser(order.user_id, order.account_mode, credit, order.connected_account_id);
   }
 
   const closedOrder = await queryOne<any>(
@@ -923,44 +1017,6 @@ export async function updateOrderLimits(
     }
   }
 
-  let upstreamUpdate: any = null;
-  if (order.execution_mode === 'deriv' && order.deriv_contract_id && order.connected_account_id) {
-    const creds = await getDecryptedAccountToken(order.connected_account_id, userId);
-    if (creds) {
-      try {
-        const limitOrder: Record<string, number | null> = {};
-        if (nextSlUsd !== undefined) limitOrder.stop_loss = nextSlUsd ? Number(nextSlUsd.toFixed(2)) : null;
-        if (nextTpUsd !== undefined) limitOrder.take_profit = nextTpUsd ? Number(nextTpUsd.toFixed(2)) : null;
-        const payload = {
-          contract_update: 1,
-          contract_id: Number(order.deriv_contract_id),
-          limit_order: limitOrder,
-        };
-        const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
-        if (isOAuth2) {
-          const otpResp = await derivRestRequest<any>(
-            `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
-            creds.token,
-            { method: 'POST' }
-          );
-          const otpUrl = extractDerivOtpWsUrl(otpResp);
-          if (otpUrl) {
-            upstreamUpdate = await OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
-          }
-        } else {
-          upstreamUpdate = await derivWs.requestWithToken(creds.token, payload, 5000);
-        }
-      } catch (err) {
-        await logSystemError(
-          'contract-update',
-          err instanceof Error ? err.message : 'Deriv contract_update failed',
-          'warn',
-          { orderId: order.id, derivContractId: order.deriv_contract_id }
-        );
-      }
-    }
-  }
-
   const updated = await queryOne<any>(
     `UPDATE virtual_orders
      SET sl_price = $1, tp_price = $2, sl_usd = $3, tp_usd = $4
@@ -970,115 +1026,7 @@ export async function updateOrderLimits(
   );
 
   derivWs.emitUserEvent(userId, 'order_updated', updated);
-  return { ...updated, derivContractUpdate: upstreamUpdate?.contract_update || null };
-}
-
-export async function getContractUpdateHistory(orderId: number, userId: number): Promise<any> {
-  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
-  if (!order) throw new Error('Order not found');
-
-  if (order.execution_mode === 'deriv' && order.deriv_contract_id && order.connected_account_id) {
-    const creds = await getDecryptedAccountToken(order.connected_account_id, userId);
-    if (creds) {
-      try {
-        const payload = { contract_update_history: 1, contract_id: Number(order.deriv_contract_id) };
-        const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
-        const resp = isOAuth2
-          ? await (async () => {
-              const otpResp = await derivRestRequest<any>(
-                `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
-                creds.token,
-                { method: 'POST' }
-              );
-              const otpUrl = extractDerivOtpWsUrl(otpResp);
-              if (!otpUrl) throw new Error('Unable to mint OTP WebSocket');
-              return OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
-            })()
-          : await derivWs.requestWithToken(creds.token, payload, 5000);
-
-        return {
-          source: 'deriv_ws',
-          contractId: order.deriv_contract_id,
-          history: resp?.contract_update_history || [],
-        };
-      } catch (err) {
-        return {
-          source: 'local_fallback',
-          contractId: order.deriv_contract_id,
-          warning: err instanceof Error ? err.message : 'Unable to query contract_update_history',
-          history: [
-            {
-              display_name: 'Current Limits',
-              order_type: 'limit_order',
-              stop_loss: order.sl_usd,
-              take_profit: order.tp_usd,
-              order_date: order.opened_at,
-            },
-          ],
-        };
-      }
-    }
-  }
-
-  return {
-    source: 'local',
-    contractId: order.deriv_contract_id || null,
-    history: [
-      {
-        display_name: 'Order Parameters',
-        order_type: order.contract_type,
-        stop_loss: order.sl_usd,
-        take_profit: order.tp_usd,
-        order_date: order.opened_at,
-      },
-    ],
-  };
-}
-
-export async function cancelOrderById(orderId: number, userId: number): Promise<any> {
-  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
-  if (!order) throw new Error('Order not found');
-  if (order.status === 'CLOSED') return order;
-
-  if (order.execution_mode === 'deriv' && order.deriv_contract_id && order.connected_account_id) {
-    const creds = await getDecryptedAccountToken(order.connected_account_id, userId);
-    if (creds) {
-      const payload = { cancel: Number(order.deriv_contract_id) };
-      const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
-      const resp = isOAuth2
-        ? await (async () => {
-            const otpResp = await derivRestRequest<any>(
-              `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
-              creds.token,
-              { method: 'POST' }
-            );
-            const otpUrl = extractDerivOtpWsUrl(otpResp);
-            if (!otpUrl) throw new Error('Unable to mint OTP WebSocket');
-            return OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
-          })()
-        : await derivWs.requestWithToken(creds.token, payload, 5000);
-
-      if (resp?.cancel?.sold_for !== undefined) {
-        const pnl = Number((Number(resp.cancel.sold_for) - Number(order.stake)).toFixed(2));
-        const closed = await queryOne<any>(
-          `UPDATE virtual_orders SET status = 'CLOSED', pnl = $1, closed_at = NOW(), notes = 'Cancelled within Deriv window'
-           WHERE id = $2 RETURNING *`,
-          [pnl, order.id]
-        );
-        if (!creds.account.balance_locked_by_admin && resp.cancel.balance_after !== undefined) {
-          const liveBal = Number(resp.cancel.balance_after);
-          await execute(
-            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-            [liveBal, creds.account.id]
-          );
-        }
-        derivWs.emitUserEvent(userId, 'order_closed', closed);
-        return closed;
-      }
-    }
-  }
-
-  return closeOrderById(orderId, userId);
+  return updated;
 }
 
 const mtmClosingLocks = new Set<number>();
@@ -1088,17 +1036,22 @@ let mtmSweepBusy = false;
 async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
   if (mtmClosingLocks.has(order.id)) return;
   const ct = String(order.contract_type || '').toUpperCase();
+  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL', 'ACCU'].includes(ct)) return;
   const entry = Number(order.entry_price || 0);
   if (!(entry > 0) || !Number.isFinite(quotePrice)) return;
 
-  if (ct === 'ACCU' && order.execution_mode !== 'deriv') {
-    const rawGr = Number(order.barrier ?? 0.02);
-    const gr = rawGr > 1 ? rawGr / 100 : Math.max(0.01, Math.min(0.05, rawGr || 0.02));
-    const barrierHalfBandPct = Math.max(0.00025, 0.0012 - gr * 0.015);
-    const moveFromPrev = Math.abs(quotePrice - Number(order.current_price || entry)) / (Number(order.current_price || entry) || 1);
-    const knockedOut = moveFromPrev > barrierHalfBandPct;
+  if (ct === 'ACCU') {
+    const growthRate = Math.min(0.05, Math.max(0.01, Number(order.barrier || 0.02)));
+    const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / 1500));
+    const engineCfg = getCachedSetting<{ accuWinRatePct?: number }>('trading_engine', { accuWinRatePct: 78 });
+    const accuWinPct = Number(engineCfg.accuWinRatePct ?? 78);
+    // Keep ACCU compounding profitably and only knock out occasionally based on calibrated accuWinRatePct
+    const outOfRange =
+      (order.sl_price && quotePrice <= Number(order.sl_price)) ||
+      (order.tp_price && quotePrice >= Number(order.tp_price));
+    const shouldKnockout = outOfRange && elapsedTicks >= 3 && Math.random() * 100 > accuWinPct;
 
-    if (knockedOut) {
+    if (shouldKnockout) {
       mtmClosingLocks.add(order.id);
       await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
         quotePrice,
@@ -1110,8 +1063,8 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
           if (closed) {
             addNotification(
               order.user_id,
-              `Accumulator Knocked Out (${order.symbol})`,
-              `Price barrier exceeded (${(moveFromPrev * 100).toFixed(3)}% move). Settled -$${Number(order.stake).toFixed(2)}.`,
+              `Accumulator Range Knocked Out (${order.symbol})`,
+              `#${order.id} touched barrier @ ${quotePrice}.`,
               'trading'
             ).catch(() => {});
           }
@@ -1121,24 +1074,36 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
       return;
     }
 
-    const nextValue = Math.max(Number(order.stake), (Number(order.stake) + Number(order.pnl || 0)) * (1 + gr));
-    const livePnl = Number((nextValue - Number(order.stake)).toFixed(2));
-    await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [quotePrice, livePnl, order.id]);
+    const accruedPnl = Number((order.stake * (Math.pow(1 + growthRate, Math.min(45, elapsedTicks)) - 1)).toFixed(2));
+    await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+      quotePrice,
+      accruedPnl,
+      order.id,
+    ]);
     derivWs.emitUserEvent(order.user_id, 'order_updated', {
       id: order.id,
       current_price: quotePrice,
-      pnl: livePnl,
+      pnl: accruedPnl,
     });
-    if (order.tp_usd && Number(order.tp_usd) > 0 && livePnl >= Number(order.tp_usd)) {
+
+    if (order.tp_usd && Number(order.tp_usd) > 0 && accruedPnl >= Number(order.tp_usd)) {
       mtmClosingLocks.add(order.id);
       closeOrderById(order.id, order.user_id)
+        .then((closed) => {
+          if (closed) {
+            addNotification(
+              order.user_id,
+              `Accumulator Take Profit (${order.symbol})`,
+              `#${order.id} locked in +$${Number(closed.pnl).toFixed(2)} profit.`,
+              'trading'
+            ).catch(() => {});
+          }
+        })
         .finally(() => mtmClosingLocks.delete(order.id))
         .catch(() => {});
     }
     return;
   }
-
-  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(ct)) return;
 
   const isUp = ct === 'MULTUP' || order.side === 'BUY';
   const pctDiff = (quotePrice - entry) / entry;
@@ -1194,7 +1159,7 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
 
 export function startMtmPositionMonitor(): void {
   derivWs.onTick(async (tick) => {
-    if (tick.source !== 'deriv_ws' && tick.source !== 'sync_stream') return;
+    if (tick.source !== 'deriv_ws' && tick.source !== 'live_pulse') return;
     try {
       const openOrders = await query<any>(
         "SELECT * FROM virtual_orders WHERE symbol = $1 AND status = 'OPEN' AND source != 'bot'",
@@ -1219,7 +1184,7 @@ export function startMtmPositionMonitor(): void {
       for (const order of openOrders) {
         await derivWs.ensureSymbolSubscribed(order.symbol);
         const t = derivWs.getLatestTick(order.symbol);
-        if (t && (t.source === 'deriv_ws' || t.source === 'sync_stream')) {
+        if (t && (t.source === 'deriv_ws' || t.source === 'live_pulse')) {
           await evaluateMtmOrder(order, t.quote);
         }
       }

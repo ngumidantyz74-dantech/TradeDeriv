@@ -6,6 +6,7 @@ export type NavTab =
   | 'portfolio'
   | 'profile'
   | 'mt5-tv'
+  | 'smart-trader'
   | 'bot-builder'
   | 'trading-bots'
   | 'market-analyser'
@@ -78,8 +79,6 @@ export interface MarketInstrument {
   sparkline: number[];
 }
 
-export type TradeWorkspaceMode = 'MT5 Market' | 'Rise/Fall' | 'Digits' | 'Accumulators';
-
 export interface TickData {
   symbol: string;
   quote: number;
@@ -87,7 +86,7 @@ export interface TickData {
   ask: number;
   epoch: number;
   pipSize: number;
-  source?: 'deriv_ws' | 'sync_stream' | 'cached';
+  source?: 'deriv_ws' | 'live_pulse' | 'cached';
 }
 
 export interface CandleData {
@@ -168,36 +167,6 @@ export interface WorkspacePreferences {
   };
 }
 
-export interface ChartLayoutPreset {
-  id: number;
-  name: string;
-  symbol: string;
-  timeframe: number;
-  is_default?: boolean;
-  updated_at?: string;
-  layout: {
-    showMarketWatch?: boolean;
-    showOrderTicket?: boolean;
-    chartMode?: 'candles' | 'line' | 'area';
-    activeMode?: TradeWorkspaceMode;
-    indicators?: Record<string, boolean>;
-  };
-}
-
-export interface MostActiveInstrument {
-  rank: number;
-  symbol: string;
-  display_name: string;
-  category: string;
-  price: number;
-  change_pct: number;
-  volatilityPct: number;
-  ticksPerMinute: number;
-  platformTrades: number;
-  activityScore: number;
-  source?: string;
-}
-
 export interface JournalEntry {
   id: number;
   user_id: number;
@@ -231,70 +200,6 @@ export interface SmartAlert {
   created_at: string;
 }
 
-export interface BotCondition {
-  id: string;
-  type:
-    | 'rsi_condition'
-    | 'ema_crossover'
-    | 'macd_condition'
-    | 'bollinger_condition'
-    | 'sr_condition'
-    | 'trend_condition'
-    | 'price_movement'
-    | 'market_structure';
-  params: Record<string, string | number | boolean>;
-}
-
-export interface BotAction {
-  type: 'BUY' | 'SELL' | 'WAIT' | 'CLOSE' | 'SET_STAKE' | 'SET_DURATION' | 'EVALUATE_OUTCOME';
-  params: Record<string, string | number | boolean>;
-}
-
-export interface BotRiskConfig {
-  maxStake: number;
-  maxDailyLoss: number;
-  takeProfit: number;
-  stopLoss: number;
-  cooldownSeconds: number;
-  maxConsecutiveLosses: number;
-  maxSessions: number;
-  martingaleFactor: number;
-}
-
-export interface BotStrategyAst {
-  version: '1.0';
-  name: string;
-  market: {
-    instrument: string;
-    category: string;
-    timeframe: string;
-    granularity: number;
-    contractType: string;
-  };
-  conditions: BotCondition[];
-  conditionLogic: 'ALL' | 'ANY';
-  actions: BotAction[];
-  risk: BotRiskConfig;
-}
-
-export interface BotDefinitionRecord {
-  id: number;
-  user_id: number | null;
-  name: string;
-  description: string;
-  category: string;
-  ast_json: string;
-  xml_source?: string;
-  symbol: string;
-  timeframe: string;
-  contract_type: string;
-  demo_tested: boolean;
-  is_template?: boolean;
-  visibility?: string;
-  created_at?: string;
-  updated_at?: string;
-}
-
 export interface BotStrategy {
   id: number;
   name: string;
@@ -321,11 +226,7 @@ export interface BotStrategy {
 }
 
 export interface BotTelemetry {
-  runId?: number | null;
-  botDefinitionId?: number | null;
   running: boolean;
-  paused?: boolean;
-  status?: 'idle' | 'running' | 'paused' | 'stopped';
   strategyName: string;
   symbol: string;
   contractType: string;
@@ -335,12 +236,7 @@ export interface BotTelemetry {
   martingaleFactor: number;
   takeProfit: number;
   stopLoss: number;
-  maxDailyLoss?: number;
-  maxStake?: number;
   maxTrades: number;
-  cooldownSeconds?: number;
-  maxConsecutiveLosses?: number;
-  consecutiveLosses?: number;
   tickCount: number;
   tradesPlaced: number;
   wins: number;
@@ -351,6 +247,33 @@ export interface BotTelemetry {
   recentPrices: number[];
   accountMode?: 'real' | 'demo';
   executionSpeed?: 'fast' | 'normal';
+  strategyType?: string;
+  growthRate?: number;
+  analyserSync?: boolean;
+}
+
+export interface AnalyserSignalResult {
+  symbol: string;
+  displayName: string;
+  contractType: string;
+  side: string;
+  barrier: string;
+  duration: number;
+  durationUnit: string;
+  growthRate: number;
+  confidence: number;
+  direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE';
+  reason: string;
+  lastDigit: number;
+  evenPct: number;
+  oddPct: number;
+  risePct: number;
+  fallPct: number;
+  over2Pct: number;
+  under7Pct: number;
+  rsi14: number;
+  price: number;
+  updatedAt: string;
 }
 
 export interface ExchangePair {
@@ -394,6 +317,9 @@ export interface PublicSettings {
     supportEmail?: string;
     supportPhone?: string;
     tagline?: string;
+    heroTitle?: string;
+    heroSubtitle?: string;
+    heroDescription?: string;
   };
   global: {
     kesRate?: number;

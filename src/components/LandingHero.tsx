@@ -1,13 +1,20 @@
 import React, { useState } from 'react';
-import { Menu, X, Star, ArrowRight, ShieldCheck, Globe, Mail, Lock } from 'lucide-react';
+import { Menu, X, Star, ArrowRight, ShieldCheck, Globe, Mail, Lock, Shield } from 'lucide-react';
 import { TradeDerivLogo } from './TradeDerivLogo';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 
 export const LandingHero: React.FC = () => {
-  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap, publicSettings } = useApp();
+  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap, openAdminPortal, publicSettings } = useApp();
+  const appName = publicSettings.branding?.appName || 'DERIV';
+  const heroTitle = publicSettings.branding?.heroTitle || 'Trading for';
+  const heroSubtitle = publicSettings.branding?.heroSubtitle || 'Anyone Anywhere Anytime';
+  const heroDescription =
+    publicSettings.branding?.heroDescription ||
+    'Widest range of products, markets, platforms with 24/7 customer support.';
   const partnerLink = publicSettings.partner?.referralLink || 'https://t.deriv.link?t=FSDRTFVTSKPA';
   const partnerCode = publicSettings.partner?.referralCode || 'VNMH2VHBRTFN';
+
   const [menuOpen, setMenuOpen] = useState(false);
   const [authModal, setAuthModal] = useState<'login' | 'register' | null>(null);
   const [email, setEmail] = useState('');
@@ -28,7 +35,7 @@ export const LandingHero: React.FC = () => {
       });
       await loginWithToken(res.token);
       setAuthModal(null);
-      showToast(authModal === 'register' ? 'Welcome to TradeDeriv!' : 'Signed in successfully', 'success');
+      showToast(authModal === 'register' ? `Welcome to ${appName}!` : 'Signed in successfully', 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Authentication failed', 'error');
     } finally {
@@ -42,32 +49,39 @@ export const LandingHero: React.FC = () => {
       <div className="absolute inset-0 z-0">
         <img
           src="/src/assets/images/hero_trader_portrait_1795009382829.jpg"
-          alt="Trader using TradeDeriv mobile terminal"
+          alt="Trader using DERIV mobile terminal"
           referrerPolicy="no-referrer"
           className="w-full h-full object-cover object-center lg:object-[center_20%]"
         />
-        {/* Measured scrim for 4.5:1+ contrast across portrait */}
-        <div className="absolute inset-0 bg-gradient-to-t from-[#090B10] via-[#090B10]/55 to-[#090B10]/50" />
-        <div className="hidden lg:block absolute inset-0 bg-gradient-to-r from-[#090B10]/85 via-[#090B10]/45 to-transparent" />
+        {/* Measured scrim for crisp contrast */}
+        <div className="absolute inset-0 bg-gradient-to-t from-[#090B10] via-[#090B10]/55 to-[#090B10]/45" />
+        <div className="hidden lg:block absolute inset-0 bg-gradient-to-r from-[#090B10]/85 via-[#090B10]/40 to-transparent" />
       </div>
 
       {/* Top Header Bar */}
-      <header className="relative z-20 flex items-center justify-between gap-4 px-5 sm:px-8 lg:px-14 pt-5 pb-4 max-w-7xl w-full mx-auto">
-        <TradeDerivLogo variant="dark" size="md" onClick={registerLogoTap} />
+      <header className="relative z-20 flex items-center justify-between gap-3 px-4 sm:px-8 lg:px-14 pt-5 pb-4 max-w-7xl w-full mx-auto">
+        <TradeDerivLogo variant="dark" size="md" appName={appName} onClick={registerLogoTap} />
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           <button
             type="button"
             onClick={() => launchDerivOAuth('login')}
-            className="min-h-[42px] px-5 py-2 rounded-full border border-white/80 text-white text-sm font-semibold hover:bg-white hover:text-[#0E1117] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
+            className="min-h-[40px] px-4 sm:px-5 py-2 rounded-full border border-white/80 text-white text-xs sm:text-sm font-semibold hover:bg-white hover:text-[#0E1117] transition-colors whitespace-nowrap shrink-0 cursor-pointer"
           >
             Log in
           </button>
           <button
             type="button"
+            onClick={() => setAuthModal('register')}
+            className="hidden sm:inline-flex min-h-[40px] px-5 py-2 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-sm font-semibold transition-colors whitespace-nowrap shrink-0 cursor-pointer items-center justify-center"
+          >
+            Sign up
+          </button>
+          <button
+            type="button"
             onClick={() => setMenuOpen(true)}
             aria-label="Open navigation menu"
-            className="min-h-[42px] min-w-[42px] flex items-center justify-center rounded-full text-white hover:bg-white/10 transition-colors cursor-pointer"
+            className="min-h-[40px] min-w-[40px] flex items-center justify-center rounded-full text-white hover:bg-white/10 transition-colors cursor-pointer"
           >
             <Menu className="w-6 h-6" />
           </button>
@@ -75,32 +89,28 @@ export const LandingHero: React.FC = () => {
       </header>
 
       {/* Bottom Editorial Hero Content */}
-      <main className="relative z-20 px-5 sm:px-8 lg:px-14 pb-10 lg:pb-16 pt-24 max-w-7xl w-full mx-auto">
+      <main className="relative z-20 px-5 sm:px-8 lg:px-14 pb-8 lg:pb-14 pt-20 max-w-7xl w-full mx-auto">
         <div className="max-w-xl">
-          <p className="text-sm sm:text-base font-semibold text-white/90 tracking-tight mb-2">
-            Trading for
-          </p>
+          <p className="text-sm sm:text-base font-semibold text-white/95 tracking-tight mb-2">{heroTitle}</p>
           <h1 className="font-display text-4xl sm:text-5xl lg:text-6xl font-extrabold tracking-tight leading-[1.06] text-white mb-4 [text-wrap:balance]">
-            Anyone Anywhere Anytime
+            {heroSubtitle}
           </h1>
-          <p className="text-sm sm:text-base text-white/80 leading-relaxed mb-7 max-w-md">
-            Widest range of products, markets, platforms with 24/7 customer support.
-          </p>
+          <p className="text-sm sm:text-base text-white/85 leading-relaxed mb-7 max-w-md">{heroDescription}</p>
 
           <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-3 mb-7">
             <button
               type="button"
               onClick={() => launchDerivOAuth('registration')}
-              className="w-full sm:w-auto sm:min-w-[260px] min-h-[52px] px-8 py-3.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-base transition-colors flex items-center justify-center gap-2 shadow-lg shadow-[#FF444F]/25 cursor-pointer whitespace-nowrap"
+              className="w-full sm:w-auto sm:min-w-[240px] min-h-[50px] px-8 py-3.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-base transition-colors flex items-center justify-center gap-2 shadow-lg shadow-[#FF444F]/25 cursor-pointer whitespace-nowrap"
             >
               <span>Open account</span>
             </button>
             <button
               type="button"
-              onClick={() => setAuthModal('register')}
-              className="w-full sm:w-auto min-h-[52px] px-6 py-3.5 rounded-full bg-white/10 hover:bg-white/15 border border-white/25 backdrop-blur-md text-white font-medium text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap"
+              onClick={() => setAuthModal('login')}
+              className="w-full sm:w-auto min-h-[50px] px-6 py-3.5 rounded-full bg-white/10 hover:bg-white/15 border border-white/25 backdrop-blur-md text-white font-medium text-sm transition-colors flex items-center justify-center gap-2 cursor-pointer whitespace-nowrap"
             >
-              <span>Email workspace</span>
+              <span>Email sign in</span>
               <ArrowRight className="w-4 h-4" />
             </button>
           </div>
@@ -125,18 +135,28 @@ export const LandingHero: React.FC = () => {
             </div>
           </div>
 
-          <p className="mt-4 text-xs text-white/70 text-center sm:text-left">
-            New to Deriv?{' '}
-            <a
-              href={partnerLink}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-white underline hover:text-[#FF444F] font-semibold"
+          <div className="mt-5 flex flex-wrap items-center justify-center sm:justify-start gap-x-4 gap-y-2 text-xs text-white/75">
+            <span>
+              New to {appName}?{' '}
+              <a
+                href={partnerLink}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-white underline hover:text-[#FF444F] font-semibold"
+              >
+                Partner Sign up
+              </a>{' '}
+              <span className="font-mono-num text-white/60">({partnerCode})</span>
+            </span>
+            <button
+              type="button"
+              onClick={openAdminPortal}
+              className="inline-flex items-center gap-1 text-white/60 hover:text-white underline cursor-pointer"
             >
-              Sign up via Partner Link
-            </a>{' '}
-            <span className="font-mono-num text-white/60">(Code: {partnerCode})</span>
-          </p>
+              <Shield className="w-3 h-3" />
+              <span>Admin Portal</span>
+            </button>
+          </div>
         </div>
       </main>
 
@@ -146,7 +166,7 @@ export const LandingHero: React.FC = () => {
           <div className="w-full max-w-sm bg-[#151820] border-l border-[#2A2F3D] h-full p-6 flex flex-col justify-between text-white">
             <div>
               <div className="flex items-center justify-between mb-8">
-                <TradeDerivLogo variant="dark" size="sm" />
+                <TradeDerivLogo variant="dark" size="sm" appName={appName} />
                 <button
                   type="button"
                   onClick={() => setMenuOpen(false)}
@@ -165,7 +185,7 @@ export const LandingHero: React.FC = () => {
                   }}
                   className="w-full py-3.5 px-5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-sm text-center cursor-pointer"
                 >
-                  Continue with Deriv OAuth2
+                  Continue with {appName} OAuth2
                 </button>
                 <button
                   type="button"
@@ -175,7 +195,7 @@ export const LandingHero: React.FC = () => {
                   }}
                   className="w-full py-3.5 px-5 rounded-full border border-white/25 hover:bg-white/10 text-white font-semibold text-sm text-center cursor-pointer"
                 >
-                  Open Deriv Account
+                  Open {appName} Account
                 </button>
                 <a
                   href={partnerLink}
@@ -184,12 +204,12 @@ export const LandingHero: React.FC = () => {
                   onClick={() => setMenuOpen(false)}
                   className="block w-full py-2.5 px-4 rounded-xl bg-white/5 hover:bg-white/10 border border-white/10 text-xs text-slate-300 text-center"
                 >
-                  Register with Partner Code: <strong className="font-mono-num text-white">{partnerCode}</strong>
+                  Partner Code: <strong className="font-mono-num text-white">{partnerCode}</strong>
                 </a>
               </div>
 
               <div className="mt-8 pt-6 border-t border-[#2A2F3D] space-y-2">
-                <p className="text-xs text-slate-400 mb-3">Direct Workspace Sign-In</p>
+                <p className="text-xs text-slate-400 mb-3">Direct Account Sign-In</p>
                 <button
                   type="button"
                   onClick={() => {
@@ -198,7 +218,9 @@ export const LandingHero: React.FC = () => {
                   }}
                   className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-[#1A1D26] hover:bg-[#222633] text-sm cursor-pointer"
                 >
-                  <span className="flex items-center gap-2.5"><Mail className="w-4 h-4 text-[#FF444F]" /> Sign in with Email</span>
+                  <span className="flex items-center gap-2.5">
+                    <Mail className="w-4 h-4 text-[#FF444F]" /> Sign in with Email
+                  </span>
                   <ArrowRight className="w-4 h-4 text-slate-400" />
                 </button>
                 <button
@@ -209,26 +231,43 @@ export const LandingHero: React.FC = () => {
                   }}
                   className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-[#1A1D26] hover:bg-[#222633] text-sm cursor-pointer"
                 >
-                  <span className="flex items-center gap-2.5"><ShieldCheck className="w-4 h-4 text-[#00A878]" /> Create Demo Workspace</span>
+                  <span className="flex items-center gap-2.5">
+                    <ShieldCheck className="w-4 h-4 text-[#00A878]" /> Try free demo ($10,000)
+                  </span>
+                  <ArrowRight className="w-4 h-4 text-slate-400" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMenuOpen(false);
+                    openAdminPortal();
+                  }}
+                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-[#1A1D26] hover:bg-[#222633] text-sm cursor-pointer"
+                >
+                  <span className="flex items-center gap-2.5">
+                    <Shield className="w-4 h-4 text-amber-400" /> Admin Portal
+                  </span>
                   <ArrowRight className="w-4 h-4 text-slate-400" />
                 </button>
               </div>
             </div>
 
             <div className="text-xs text-slate-400 flex items-center justify-between pt-4 border-t border-[#2A2F3D]">
-              <span className="flex items-center gap-1.5"><Globe className="w-3.5 h-3.5" /> EN · Global</span>
+              <span className="flex items-center gap-1.5">
+                <Globe className="w-3.5 h-3.5" /> EN · Global
+              </span>
               <span>24/7 Support</span>
             </div>
           </div>
         </div>
       )}
 
-      {/* Email Sign-In / Demo Workspace Modal */}
+      {/* Email Sign-In / Account Modal */}
       {authModal && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-white dark:bg-[#181C25] text-[#0E1117] dark:text-white rounded-3xl p-6 sm:p-8 border border-slate-200 dark:border-[#2A2F3D] shadow-2xl">
             <div className="flex items-center justify-between mb-6">
-              <TradeDerivLogo variant="light" size="sm" />
+              <TradeDerivLogo variant="light" size="sm" appName={appName} />
               <button
                 type="button"
                 onClick={() => setAuthModal(null)}
@@ -239,12 +278,12 @@ export const LandingHero: React.FC = () => {
             </div>
 
             <h2 className="font-display text-2xl font-bold mb-1">
-              {authModal === 'register' ? 'Create TradeDeriv account' : 'Welcome back'}
+              {authModal === 'register' ? `Create ${appName} account` : 'Welcome back'}
             </h2>
             <p className="text-sm text-slate-500 dark:text-slate-400 mb-6">
               {authModal === 'register'
-                ? 'Starts with $10,000.00 virtual balance + instant Deriv OAuth2 sync.'
-                : 'Sign in to access your TradeDeriv terminals and bots.'}
+                ? 'Starts with $10,000.00 Demo balance & instant Real account access.'
+                : `Sign in to access your ${appName} trading platforms & bots.`}
             </p>
 
             <button
@@ -256,7 +295,7 @@ export const LandingHero: React.FC = () => {
               className="w-full min-h-[46px] mb-5 rounded-full border border-slate-300 dark:border-[#2A2F3D] hover:bg-slate-50 dark:hover:bg-white/5 font-semibold text-sm flex items-center justify-center gap-2 cursor-pointer"
             >
               <span className="w-2.5 h-2.5 rounded-full bg-[#FF444F]" />
-              <span>Continue directly with Deriv (Google / Apple / Email)</span>
+              <span>Continue directly with {appName} OAuth</span>
             </button>
 
             <div className="relative flex items-center justify-center my-4">
@@ -309,7 +348,7 @@ export const LandingHero: React.FC = () => {
                 disabled={submitting}
                 className="w-full min-h-[48px] rounded-full bg-[#FF444F] hover:bg-[#E63946] disabled:opacity-60 text-white font-semibold text-sm transition-colors cursor-pointer mt-2"
               >
-                {submitting ? 'Authenticating...' : authModal === 'register' ? 'Open workspace' : 'Log in'}
+                {submitting ? 'Authenticating...' : authModal === 'register' ? 'Open account' : 'Log in'}
               </button>
             </form>
 

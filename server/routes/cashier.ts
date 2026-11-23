@@ -1,14 +1,8 @@
 import { Router } from 'express';
-import { pool, query, queryOne, execute, requireDb, addNotification, getSetting } from '../db.ts';
+import { pool, query, queryOne, execute, requireDb, addNotification } from '../db.ts';
 import { randomId, decryptToken } from '../crypto.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
-import {
-  derivWs,
-  derivRestRequest,
-  fetchDerivWallets,
-  fetchDerivPartnerOverview,
-  checkDerivPartnerClientTag,
-} from '../deriv-client.ts';
+import { derivWs, derivRestRequest } from '../deriv-client.ts';
 
 const router = Router();
 
@@ -38,7 +32,7 @@ function bucketDisplayName(bucket: WalletBucket): string {
     case 'mt5_gold':
       return 'MT5 Gold';
     case 'exchange_usdt':
-      return 'TradeDeriv Exchange';
+      return 'Deriv Exchange';
     case 'options':
     default:
       return 'USD Wallet / Options';
@@ -117,32 +111,6 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
     ).toFixed(2)
   );
 
-  let derivWallets: any[] = [];
-  let derivWalletsStatus: 'skipped' | 'synced' | 'unavailable' = 'skipped';
-  const wantsSync = req.query.sync === '1' || req.query.sync === 'true';
-  if (wantsSync && !isOwner) {
-    const token = await getUserAuthToken(req.user!.id);
-    if (token) {
-      try {
-        const conv = typeof req.query.conversion === 'string' && req.query.conversion ? req.query.conversion : 'USD';
-        const wResp = await fetchDerivWallets(token, conv);
-        const rawList = Array.isArray(wResp?.data)
-          ? wResp.data
-          : Array.isArray(wResp?.wallets)
-            ? wResp.wallets
-            : Array.isArray(wResp)
-              ? wResp
-              : [];
-        derivWallets = rawList;
-        derivWalletsStatus = 'synced';
-      } catch {
-        derivWalletsStatus = 'unavailable';
-      }
-    } else {
-      derivWalletsStatus = 'unavailable';
-    }
-  }
-
   res.json({
     virtualWorkspaceBalance: demoOptionsBal,
     realWallets: { ...realWallets, options: realOptionsBal },
@@ -153,161 +121,7 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
     realExchangeBalances,
     accounts,
     demoAccountsCount: demoAccounts.length,
-    derivWallets,
-    derivWalletsStatus,
   });
-});
-
-router.get('/cashier/exchange-rate', requireAuth, async (req: AuthRequest, res) => {
-  const baseCurrency = String(req.query.base || 'USD').toUpperCase();
-  const targetCurrency = String(req.query.target || 'KES').toUpperCase();
-  const globalCfg = await getSetting<{ kesRate?: number }>('global', { kesRate: 130.0 });
-  const configuredKes = Number(globalCfg?.kesRate || 130.0);
-
-  const btcSpot = derivWs.getLatestTick('cryBTCUSD')?.quote ?? 90000;
-  const ethSpot = derivWs.getLatestTick('cryETHUSD')?.quote ?? 3000;
-  const rates: Record<string, number> = {
-    USD: 1,
-    USDT: 1,
-    USDC: 1,
-    KES: configuredKes,
-    EUR: 0.92,
-    GBP: 0.79,
-    BTC: btcSpot > 0 ? Number((1 / btcSpot).toFixed(8)) : 0,
-    ETH: ethSpot > 0 ? Number((1 / ethSpot).toFixed(8)) : 0,
-  };
-
-  let upstreamRate: number | null = null;
-  const token = await getUserAuthToken(req.user!.id).catch(() => null);
-  if (token && !token.startsWith('ory_at_') && targetCurrency !== 'KES') {
-    try {
-      const resp = await derivWs.requestWithToken(
-        token,
-        { exchange_rates: 1, base_currency: baseCurrency, target_currency: targetCurrency },
-        3500
-      );
-      const val = Number(resp?.exchange_rates?.rates?.[targetCurrency]);
-      if (Number.isFinite(val) && val > 0) upstreamRate = val;
-    } catch {
-      // use synchronized platform rates below
-    }
-  }
-
-  const baseInUsd = rates[baseCurrency] || 1;
-  const targetInUsd = rates[targetCurrency] || 1;
-  const computedRate =
-    upstreamRate ??
-    (baseCurrency === 'USD'
-      ? targetInUsd
-      : targetCurrency === 'USD'
-        ? Number((1 / Math.max(0.0000001, baseInUsd)).toFixed(6))
-        : Number((targetInUsd / Math.max(0.0000001, baseInUsd)).toFixed(6)));
-
-  res.json({
-    base: baseCurrency,
-    target: targetCurrency,
-    rate: computedRate,
-    rates,
-    source: upstreamRate ? 'deriv_ws' : 'platform_live_sync',
-    timestamp: new Date().toISOString(),
-  });
-});
-
-router.get('/partners/overview', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  let token = await getUserAuthToken(req.user!.id);
-  let tokenSource: 'user' | 'owner' | 'none' = token ? 'user' : 'none';
-
-  if (!token && (req.user!.role === 'owner' || req.user!.role === 'admin')) {
-    const commCfg = await getSetting<{
-      ownerAdminTokenEncrypted?: { encrypted: string; iv: string; tag: string };
-    }>('commissions', {});
-    if (commCfg.ownerAdminTokenEncrypted?.encrypted) {
-      try {
-        token = decryptToken(
-          commCfg.ownerAdminTokenEncrypted.encrypted,
-          commCfg.ownerAdminTokenEncrypted.iv,
-          commCfg.ownerAdminTokenEncrypted.tag
-        );
-        tokenSource = 'owner';
-      } catch {
-        token = null;
-      }
-    }
-  }
-
-  if (!token) {
-    res.json({
-      verified: false,
-      overview: null,
-      message: 'Connect a Deriv account or configure a Partner API token to query /partners/analytics/v1/overview.',
-    });
-    return;
-  }
-
-  try {
-    const resp = await fetchDerivPartnerOverview(token);
-    res.json({
-      verified: true,
-      tokenSource,
-      overview: resp?.data || resp,
-    });
-  } catch (err) {
-    res.json({
-      verified: false,
-      tokenSource,
-      overview: null,
-      message:
-        err instanceof Error
-          ? err.message
-          : 'Deriv Partner Analytics requires an authorized Deriv Partner token.',
-    });
-  }
-});
-
-router.post('/partners/client-tags/check', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const { email, client_id, loginid } = req.body || {};
-  if (!email && !client_id && !loginid) {
-    res.status(400).json({ error: 'Provide at least one identifier (email, client_id, or loginid)' });
-    return;
-  }
-
-  let token = await getUserAuthToken(req.user!.id);
-  if (!token && (req.user!.role === 'owner' || req.user!.role === 'admin')) {
-    const commCfg = await getSetting<{
-      ownerAdminTokenEncrypted?: { encrypted: string; iv: string; tag: string };
-    }>('commissions', {});
-    if (commCfg.ownerAdminTokenEncrypted?.encrypted) {
-      try {
-        token = decryptToken(
-          commCfg.ownerAdminTokenEncrypted.encrypted,
-          commCfg.ownerAdminTokenEncrypted.iv,
-          commCfg.ownerAdminTokenEncrypted.tag
-        );
-      } catch {
-        token = null;
-      }
-    }
-  }
-
-  if (!token) {
-    res.status(400).json({
-      error: 'No authorized Deriv token found. Connect your Deriv account first.',
-    });
-    return;
-  }
-
-  try {
-    const result = await checkDerivPartnerClientTag(token, {
-      ...(email ? { email: String(email).trim() } : {}),
-      ...(client_id ? { client_id: String(client_id).trim() } : {}),
-      ...(loginid ? { loginid: String(loginid).trim() } : {}),
-    });
-    res.json({ ok: true, result: result?.data || result });
-  } catch (err) {
-    res.status(400).json({
-      error: err instanceof Error ? err.message : 'Unable to verify client partner tag',
-    });
-  }
 });
 
 router.get('/cashier/transactions', requireDb, requireAuth, async (req: AuthRequest, res) => {
@@ -424,7 +238,7 @@ router.post('/cashier/deposit', requireDb, requireAuth, async (req: AuthRequest,
       req.user!.id,
       method,
       provider,
-      isCryptoStable ? 'TradeDeriv Exchange' : 'USD Wallet',
+      isCryptoStable ? 'Deriv Exchange' : 'USD Wallet',
       amt,
       currency,
       ref,
@@ -555,52 +369,6 @@ router.post('/cashier/withdraw', requireDb, requireAuth, async (req: AuthRequest
   res.json({ transaction: tx, cashierUrl });
 });
 
-router.post('/cashier/transfer/preview', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const {
-    account_from = 'USD Wallet',
-    account_to = 'MT5 Standard',
-    amount,
-    currency = 'USD',
-    accountMode = 'demo',
-  } = req.body || {};
-
-  const mode: ModeKey = accountMode === 'real' ? 'real' : 'demo';
-  const fromBucket = normalizeWalletBucket(account_from);
-  const toBucket = normalizeWalletBucket(account_to);
-
-  if (fromBucket === toBucket) {
-    res.status(400).json({ error: 'Source and destination wallets must be different' });
-    return;
-  }
-
-  const amt = Number(amount);
-  if (Number.isNaN(amt) || amt <= 0) {
-    res.status(400).json({ error: 'Transfer amount must be positive' });
-    return;
-  }
-
-  const fee = 0;
-  const exchangeRate = 1.0;
-  const netReceived = Number((amt - fee).toFixed(2));
-  const involvesMt5 = fromBucket.startsWith('mt5_') || toBucket.startsWith('mt5_');
-
-  res.json({
-    fromBucket,
-    toBucket,
-    fromLabel: bucketDisplayName(fromBucket),
-    toLabel: bucketDisplayName(toBucket),
-    accountMode: mode,
-    currency,
-    amount: amt,
-    fee,
-    exchangeRate,
-    netReceived,
-    honestBridgeNote: involvesMt5
-      ? 'Platform wallet allocation is atomic in PostgreSQL. External MT5 broker terminal balance only updates if a live Deriv MT5 account or MT5 EA Bridge is linked.'
-      : 'Instant internal platform wallet transfer with $0.00 fee.',
-  });
-});
-
 router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest, res) => {
   if (req.user!.role === 'owner' || req.user!.role === 'admin') {
     res.status(403).json({ error: 'Owner / Admin MIS accounts are not trading wallets.' });
@@ -612,7 +380,6 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     amount,
     currency = 'USD',
     accountMode = 'demo',
-    idempotencyKey = '',
   } = req.body || {};
 
   const mode: ModeKey = accountMode === 'real' ? 'real' : 'demo';
@@ -633,21 +400,6 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
   if (!pool) {
     res.status(503).json({ error: 'Database unavailable' });
     return;
-  }
-
-  const cleanIdem = String(idempotencyKey || '').trim();
-  if (cleanIdem) {
-    const duplicate = await queryOne<any>(
-      'SELECT * FROM cashier_transactions WHERE user_id = $1 AND idempotency_key = $2',
-      [req.user!.id, cleanIdem]
-    );
-    if (duplicate) {
-      res.status(409).json({
-        error: 'Duplicate transfer prevented by idempotency guard.',
-        transaction: duplicate,
-      });
-      return;
-    }
   }
 
   // Attempt upstream Deriv platform transfer if a Real Deriv token is linked
@@ -810,10 +562,10 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
 
     const ref = `TRF-${randomId(4).toUpperCase()}`;
     const txRes = await client.query(
-      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, fee, idempotency_key)
-       VALUES ($1, 'transfer', 'Internal Platform Transfer', 'deriv', $2, $3, $4, $5, $6, 'completed', $7, $8, $9)
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
+       VALUES ($1, 'transfer', 'Internal Platform Transfer', 'deriv', $2, $3, $4, $5, $6, 'completed', $7)
        RETURNING *`,
-      [req.user!.id, bucketDisplayName(fromBucket), bucketDisplayName(toBucket), amt, currency, ref, mode, 0, cleanIdem]
+      [req.user!.id, bucketDisplayName(fromBucket), bucketDisplayName(toBucket), amt, currency, ref, mode]
     );
 
     await client.query('COMMIT');

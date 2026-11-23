@@ -482,9 +482,6 @@ export const ReportsPage: React.FC = () => {
   const [subTab, setSubTab] = useState<'performance' | 'journal' | 'alerts' | 'ledger'>('performance');
   const [selectedAccId, setSelectedAccId] = useState<string>(accounts[0]?.id ? String(accounts[0].id) : '');
   const [statementRows, setStatementRows] = useState<any[]>([]);
-  const [profitRows, setProfitRows] = useState<any[]>([]);
-  const [profitSource, setProfitSource] = useState<string>('');
-  const [profitLoading, setProfitLoading] = useState(false);
 
   // Performance Analytics state
   const [perf, setPerf] = useState<any>(null);
@@ -537,22 +534,6 @@ export const ReportsPage: React.FC = () => {
       .catch(() => {});
   }, [selectedAccId]);
 
-  const loadProfitTable = useCallback(async () => {
-    setProfitLoading(true);
-    try {
-      const accParam = selectedAccId ? `&connectedAccountId=${encodeURIComponent(selectedAccId)}` : '';
-      const res = await apiFetch<{ transactions: any[]; source?: string }>(
-        `/api/deriv/profit-table?limit=25${accParam}`
-      );
-      setProfitRows(res.transactions || []);
-      setProfitSource(res.source || '');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Unable to load profit table', 'error');
-    } finally {
-      setProfitLoading(false);
-    }
-  }, [selectedAccId, showToast]);
-
   const exportCsv = () => {
     const header = 'ID,Symbol,Side,Mode,AccountMode,Strategy,Stake,Entry,Exit,PnL,Status,OpenedAt\n';
     const rows = orders
@@ -565,7 +546,7 @@ export const ReportsPage: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `tradederiv_reports_${new Date().toISOString().slice(0, 10)}.csv`;
+    a.download = `deriv_reports_${new Date().toISOString().slice(0, 10)}.csv`;
     a.click();
     URL.revokeObjectURL(url);
     showToast('Orders CSV exported', 'success');
@@ -1221,72 +1202,6 @@ export const ReportsPage: React.FC = () => {
             </div>
           </div>
 
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 space-y-3">
-            <div className="flex flex-wrap items-center justify-between gap-2">
-              <div>
-                <h2 className="font-display text-base font-bold">Deriv Profit Table (Settled Contracts)</h2>
-                {profitSource && (
-                  <p className="text-[11px] text-slate-500">
-                    Source: {profitSource === 'deriv_ws' ? 'Live Deriv WebSocket profit_table' : 'Local Closed Order Ledger'}
-                  </p>
-                )}
-              </div>
-              <button
-                type="button"
-                disabled={profitLoading}
-                onClick={loadProfitTable}
-                className="px-3.5 py-2 rounded-xl bg-[#1958B7] text-white text-xs font-bold cursor-pointer disabled:opacity-60"
-              >
-                {profitLoading ? 'Syncing...' : 'Sync Deriv Profit Table'}
-              </button>
-            </div>
-            {profitRows.length === 0 ? (
-              <p className="text-xs text-slate-500">
-                Click Sync Deriv Profit Table to query settled contract buy/sell prices and realized profit.
-              </p>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
-                      <th className="text-left py-2">Contract / ID</th>
-                      <th className="text-left py-2">App / Desc</th>
-                      <th className="text-right py-2">Buy Price</th>
-                      <th className="text-right py-2">Sell Price</th>
-                      <th className="text-right py-2">Profit</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                    {profitRows.slice(0, 25).map((p: any, idx: number) => {
-                      const buy = Number(p.buy_price ?? p.stake ?? 0);
-                      const sell = Number(p.sell_price ?? buy + Number(p.pnl ?? 0));
-                      const pnl = Number(p.profit_loss ?? p.pnl ?? sell - buy);
-                      return (
-                        <tr key={p.contract_id || p.transaction_id || idx}>
-                          <td className="py-2 font-mono tabular-nums font-semibold">
-                            {p.shortcode || p.symbol || `#${p.contract_id || p.id}`}
-                          </td>
-                          <td className="py-2 text-slate-500 truncate max-w-[220px]">
-                            {p.longcode || p.contract_type || 'Contract'}
-                          </td>
-                          <td className="py-2 text-right font-mono tabular-nums">${buy.toFixed(2)}</td>
-                          <td className="py-2 text-right font-mono tabular-nums">${sell.toFixed(2)}</td>
-                          <td
-                            className={`py-2 text-right font-mono tabular-nums font-bold ${
-                              pnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'
-                            }`}
-                          >
-                            {pnl >= 0 ? '+' : ''}${pnl.toFixed(2)}
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-
           {statementRows.length > 0 && (
             <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5">
               <h2 className="font-display text-base font-bold mb-3">Deriv Account Statement Preview</h2>
@@ -1383,7 +1298,7 @@ export const LearningHubPage: React.FC = () => {
     <div className="max-w-5xl mx-auto px-4 sm:px-8 py-6 space-y-6">
       <div>
         <h1 className="font-display text-2xl font-bold flex items-center gap-2">
-          <BookOpen className="w-6 h-6 text-[#FF444F]" /> TradeDeriv Learning Hub
+          <BookOpen className="w-6 h-6 text-[#FF444F]" /> DERIV Learning Hub
         </h1>
         <p className="text-xs text-slate-500">Practical playbooks for synthetic indices, MT5 CFDs, and automated strategies</p>
       </div>

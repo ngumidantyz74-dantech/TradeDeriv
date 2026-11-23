@@ -18,10 +18,12 @@ import {
   Sparkles,
   Wifi,
   WifiOff,
+  Sliders,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
+import { SparklineSvg } from '../components/SparklineSvg';
 
 export const HomeHub: React.FC = () => {
   const {
@@ -31,14 +33,17 @@ export const HomeHub: React.FC = () => {
     activeConnectedAccount,
     orders,
     ticks,
+    instruments,
     wsConnected,
     formatMoney,
     setActiveTab,
     setSelectedSymbol,
     workspacePreferences,
     saveWorkspacePreferences,
+    publicSettings,
   } = useApp();
 
+  const appName = publicSettings.branding?.appName || 'DERIV';
   const [promoDismissed, setPromoDismissed] = useState(false);
   const [moreOpen, setMoreOpen] = useState(false);
   const [customizeOpen, setCustomizeOpen] = useState(false);
@@ -88,6 +93,21 @@ export const HomeHub: React.FC = () => {
   const weeklyPnl = Number(perfSummary?.periods?.weeklyPnlUsd ?? 0);
   const monthlyPnl = Number(perfSummary?.periods?.monthlyPnlUsd ?? 0);
 
+  const topMovers = ['1HZ100V', '1HZ75V', '1HZ50V', 'frxXAUUSD', 'cryBTCUSD'].map((sym) => {
+    const inst = instruments.find((i) => i.symbol === sym);
+    const live = ticks[sym];
+    const price = live?.quote ?? inst?.price ?? 1000;
+    const base = inst?.price || price;
+    const livePct = base > 0 ? Number((((price - base) / base) * 100 + (inst?.change_pct || 0)).toFixed(2)) : (inst?.change_pct || 0);
+    return {
+      symbol: sym,
+      name: inst?.display_name || sym,
+      price,
+      changePct: livePct,
+      sparkline: inst?.sparkline?.length ? [...inst.sparkline.slice(-18), price] : [price * 0.999, price],
+    };
+  });
+
   return (
     <div className="max-w-7xl mx-auto">
       {/* Dark Hero Banner */}
@@ -101,7 +121,7 @@ export const HomeHub: React.FC = () => {
                 }`}
               >
                 {wsConnected ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
-                {wsConnected ? 'Deriv WS Live' : 'Connecting Relay'}
+                {wsConnected ? 'Live Markets Connected' : 'Connecting Feed'}
               </span>
               <button
                 type="button"
@@ -133,7 +153,7 @@ export const HomeHub: React.FC = () => {
                 onClick={() => setActiveTab('mt5-tv')}
                 className="px-5 py-3 rounded-full bg-white/10 hover:bg-white/15 text-white font-semibold text-sm transition-colors cursor-pointer whitespace-nowrap"
               >
-                Open Terminal
+                Deriv Trader
               </button>
             </div>
           </div>
@@ -141,7 +161,7 @@ export const HomeHub: React.FC = () => {
           <div className="flex justify-end sm:justify-center shrink-0">
             <img
               src="/src/assets/images/deposit_candlesticks_1795009383277.jpg"
-              alt="Trading candlesticks illustration"
+              alt="Trading candlesticks"
               referrerPolicy="no-referrer"
               className="w-32 h-32 sm:w-40 sm:h-40 object-cover rounded-2xl border border-[#2A2F3D]"
             />
@@ -153,10 +173,10 @@ export const HomeHub: React.FC = () => {
           <div className="mt-5 pt-4 border-t border-white/10 flex flex-wrap items-center gap-2 text-xs">
             <span className="text-slate-400 font-semibold mr-1">Dashboard Modules:</span>
             {[
-              { key: 'showKpis' as const, label: 'Institutional KPIs' },
+              { key: 'showKpis' as const, label: 'Account KPIs' },
               { key: 'showAccounts' as const, label: 'Trading Accounts' },
               { key: 'showQuickTools' as const, label: 'Explore Hub' },
-              { key: 'showHighlights' as const, label: 'Intelligence Highlights' },
+              { key: 'showHighlights' as const, label: 'Market Intelligence' },
             ].map((w) => (
               <button
                 key={w.key}
@@ -173,7 +193,7 @@ export const HomeHub: React.FC = () => {
         )}
       </section>
 
-      {/* Institutional KPI Strip */}
+      {/* Account KPI Strip */}
       {layout.showKpis && (
         <section className="px-5 sm:px-8 mt-5">
           <div className="grid grid-cols-2 md:grid-cols-4 lg:grid-cols-6 gap-3">
@@ -205,7 +225,9 @@ export const HomeHub: React.FC = () => {
                 {dailyPnl.toFixed(2)} USD
               </p>
               <p className="text-[10px] text-slate-400 mt-0.5">
-                7d: {weeklyPnl >= 0 ? '+' : ''}{weeklyPnl.toFixed(2)} · 30d: {monthlyPnl >= 0 ? '+' : ''}{monthlyPnl.toFixed(2)}
+                7d: {weeklyPnl >= 0 ? '+' : ''}
+                {weeklyPnl.toFixed(2)} · 30d: {monthlyPnl >= 0 ? '+' : ''}
+                {monthlyPnl.toFixed(2)}
               </p>
             </div>
 
@@ -240,9 +262,9 @@ export const HomeHub: React.FC = () => {
           </span>
           {[
             { label: 'Deriv Cashier', icon: Wallet, color: 'text-[#FF444F]', href: 'https://app.deriv.com/cashier/deposit' },
+            { label: 'Withdraw Funds', icon: ArrowLeftRight, color: 'text-slate-700 dark:text-slate-200', href: 'https://app.deriv.com/cashier/withdrawal' },
             { label: 'Payment Agent', icon: Users, color: 'text-slate-700 dark:text-slate-200', tab: 'portfolio' as const },
             { label: 'M-Pesa / P2P', icon: Smartphone, color: 'text-[#00A878]', tab: 'portfolio' as const },
-            { label: 'Crypto (Deriv)', icon: ArrowLeftRight, color: 'text-blue-500', href: 'https://app.deriv.com/cashier/deposit' },
           ].map((item) => {
             const Icon = item.icon;
             return item.href ? (
@@ -309,7 +331,7 @@ export const HomeHub: React.FC = () => {
               <div className="w-10 h-10 rounded-xl bg-[#FF444F] text-white flex items-center justify-center mb-3 text-[11px] font-bold">
                 DXN
               </div>
-              <p className="text-sm font-medium text-slate-700 dark:text-slate-200">TradeDeriv Exchange</p>
+              <p className="text-sm font-medium text-slate-700 dark:text-slate-200">{appName} Exchange</p>
               <p className="font-mono-num text-lg font-bold mt-1">
                 {formatMoney(exchangeUsdt, { hideable: true, currencyOverride: 'USDT' })}
               </p>
@@ -318,6 +340,46 @@ export const HomeHub: React.FC = () => {
         </section>
       )}
 
+      {/* Most Traded Live Markets Strip */}
+      <section className="px-5 sm:px-8 mt-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-display text-lg font-bold">Most traded</h2>
+          <button
+            type="button"
+            onClick={() => setActiveTab('mt5-tv')}
+            className="text-xs font-semibold text-[#FF444F] hover:underline cursor-pointer"
+          >
+            Open Live Chart →
+          </button>
+        </div>
+        <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1">
+          {topMovers.map((m) => {
+            const pos = m.changePct >= 0;
+            return (
+              <button
+                key={m.symbol}
+                type="button"
+                onClick={() => {
+                  setSelectedSymbol(m.symbol);
+                  setActiveTab('mt5-tv');
+                }}
+                className="min-w-[180px] p-3.5 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200/80 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 text-left shrink-0 cursor-pointer"
+              >
+                <p className="text-xs font-semibold truncate text-slate-600 dark:text-slate-300">{m.name}</p>
+                <p className="font-mono-num text-base font-bold mt-1">{m.price.toFixed(2)}</p>
+                <div className="mt-2 flex items-center justify-between gap-2">
+                  <SparklineSvg data={m.sparkline} positive={pos} width={72} height={22} />
+                  <span className={`font-mono-num text-xs font-semibold ${pos ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                    {pos ? '+' : ''}
+                    {m.changePct.toFixed(2)}%
+                  </span>
+                </div>
+              </button>
+            );
+          })}
+        </div>
+      </section>
+
       {/* Dark Promo Banner */}
       {!promoDismissed && (
         <section className="px-5 sm:px-8 mt-6">
@@ -325,7 +387,7 @@ export const HomeHub: React.FC = () => {
             <div className="max-w-lg">
               <h3 className="font-display text-base sm:text-lg font-bold mb-1">New Crash/Boom trades</h3>
               <p className="text-xs sm:text-sm text-slate-300">
-                Trade the spikes with Rise/Fall. Now live in Demo & Real workspaces.
+                Trade the spikes with Rise/Fall. Now live in Demo & Real accounts.
               </p>
               <button
                 type="button"
@@ -350,17 +412,17 @@ export const HomeHub: React.FC = () => {
         </section>
       )}
 
-      {/* Explore TradeDeriv 3x2 Circular Grid */}
+      {/* Explore DERIV 3x2 Circular Grid */}
       {layout.showQuickTools && (
         <section className="px-5 sm:px-8 mt-7">
-          <h2 className="font-display text-lg font-bold mb-4">Explore TradeDeriv</h2>
+          <h2 className="font-display text-lg font-bold mb-4">Explore {appName}</h2>
           <div className="grid grid-cols-3 sm:grid-cols-6 gap-4">
             {[
-              { label: 'Exchange', badge: 'New', bg: 'bg-[#FF444F]', text: 'DXN', action: () => setActiveTab('exchange') },
-              { label: 'Options', bg: 'bg-[#FF444F]', icon: ArrowLeftRight, action: () => setActiveTab('options') },
-              { label: 'TradingView', bg: 'bg-[#111319]', icon: CandlestickChart, action: () => setActiveTab('mt5-tv') },
-              { label: 'Market Radar', bg: 'bg-[#0284C7]', icon: Activity, action: () => setActiveTab('market-analyser') },
-              { label: 'Risk & Journal', bg: 'bg-[#00A878]', icon: FileText, action: () => setActiveTab('reports') },
+              { label: 'Deriv Trader', bg: 'bg-[#FF444F]', text: 'DT', action: () => setActiveTab('mt5-tv') },
+              { label: 'Deriv Bot', bg: 'bg-[#FF444F]', text: 'DB', action: () => setActiveTab('bot-builder') },
+              { label: 'SmartTrader', bg: 'bg-[#2C3A67]', text: 'ST', action: () => setActiveTab('smart-trader') },
+              { label: 'Exchange', badge: 'Live', bg: 'bg-[#111319]', text: 'DXN', action: () => setActiveTab('exchange') },
+              { label: 'Market Analyser', bg: 'bg-[#00A878]', icon: Activity, action: () => setActiveTab('market-analyser') },
               { label: 'More Tools', bg: 'bg-[#151820]', icon: Bot, action: () => setMoreOpen(true) },
             ].map((tile) => {
               const Icon = tile.icon;
@@ -381,7 +443,7 @@ export const HomeHub: React.FC = () => {
                       {Icon ? <Icon className="w-4 h-4" /> : tile.text}
                     </div>
                   </div>
-                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300">{tile.label}</span>
+                  <span className="text-xs font-medium text-slate-700 dark:text-slate-300 text-center">{tile.label}</span>
                 </button>
               );
             })}
@@ -389,11 +451,11 @@ export const HomeHub: React.FC = () => {
         </section>
       )}
 
-      {/* Institutional Intelligence Highlights */}
+      {/* Market Intelligence Highlights */}
       {layout.showHighlights && (
         <section className="px-5 sm:px-8 mt-8 pb-6">
           <div className="flex items-center justify-between mb-3.5">
-            <h2 className="font-display text-lg font-bold">Institutional Intelligence</h2>
+            <h2 className="font-display text-lg font-bold">Market Intelligence</h2>
             <div className="flex items-center gap-1.5 text-slate-400">
               <ChevronLeft className="w-4 h-4" />
               <ChevronRight className="w-4 h-4" />
@@ -408,21 +470,21 @@ export const HomeHub: React.FC = () => {
               <span className="text-xs font-semibold text-[#00A878] flex items-center gap-1">
                 <Sparkles className="w-3.5 h-3.5" /> SMC & Buy Low / Sell High
               </span>
-              <h3 className="font-display text-base font-bold mt-1">Market Radar & AI Co-Pilot</h3>
+              <h3 className="font-display text-base font-bold mt-1">Market Radar & AI Analyser</h3>
               <p className="text-xs text-slate-400 mt-1">
-                Multi-instrument volatility scanner, BOS/CHoCH, Order Blocks, FVG detection, and AI market reasoning.
+                Live digit probabilities, RSI/MACD confluence, BOS/CHoCH zones, and direct sync to Deriv Bot.
               </p>
             </button>
 
             <button
               type="button"
-              onClick={() => setActiveTab('trading-bots')}
+              onClick={() => setActiveTab('bot-builder')}
               className="text-left rounded-2xl bg-[#151820] text-white p-5 border border-[#2A2F3D] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
             >
-              <span className="text-xs font-semibold text-[#FF444F]">10 Quant Strategies</span>
-              <h3 className="font-display text-base font-bold mt-1">Strategy Lab & Backtester</h3>
+              <span className="text-xs font-semibold text-[#FF444F]">Quick Strategy & Analyser Sync</span>
+              <h3 className="font-display text-base font-bold mt-1">Deriv Bot Automation</h3>
               <p className="text-xs text-slate-400 mt-1">
-                Causal In-Sample / Out-of-Sample backtesting on real Deriv candles with spread friction & Paper/Live modes.
+                Run Martingale, D&apos;Alembert, Oscar&apos;s Grind, 1-3-2-6, Accumulators, or Analyser Sync bots live.
               </p>
             </button>
 
@@ -434,7 +496,7 @@ export const HomeHub: React.FC = () => {
               <span className="text-xs font-semibold text-amber-400">Account Protection</span>
               <h3 className="font-display text-base font-bold mt-1">Risk Centre & Trade Journal</h3>
               <p className="text-xs text-slate-400 mt-1">
-                Enforce daily loss limits, max open exposure, consecutive-loss cooldowns, and log disciplined trade reviews.
+                Manage daily loss limits, max exposure, consecutive-loss cooldowns, and trade execution logs.
               </p>
             </button>
           </div>
@@ -446,7 +508,7 @@ export const HomeHub: React.FC = () => {
         <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
           <div className="w-full sm:max-w-md bg-white dark:bg-[#181C25] rounded-t-3xl sm:rounded-3xl p-6 border border-slate-200 dark:border-[#2A2F3D]">
             <div className="flex items-center justify-between mb-5">
-              <h3 className="font-display text-lg font-bold">All Hubs & Pro Tools</h3>
+              <h3 className="font-display text-lg font-bold">All Platforms & Tools</h3>
               <button
                 type="button"
                 onClick={() => setMoreOpen(false)}
@@ -457,14 +519,14 @@ export const HomeHub: React.FC = () => {
             </div>
             <div className="grid grid-cols-2 gap-3">
               {[
-                { id: 'mt5-tv', label: 'MT5 Terminal', icon: CandlestickChart },
+                { id: 'mt5-tv', label: 'Deriv Trader', icon: CandlestickChart },
+                { id: 'bot-builder', label: 'Deriv Bot', icon: Bot },
+                { id: 'smart-trader', label: 'SmartTrader', icon: Sliders },
                 { id: 'cfds', label: 'MT5 CFDs Hub', icon: Shield },
                 { id: 'portfolio', label: 'Portfolio & Cashier', icon: Wallet },
-                { id: 'bot-builder', label: 'Bot Builder', icon: Bot },
-                { id: 'trading-bots', label: 'Strategy Lab & Bots', icon: Activity },
+                { id: 'trading-bots', label: 'Strategy Lab', icon: Activity },
                 { id: 'bulk-trader', label: 'Bulk Trader', icon: Zap },
                 { id: 'risk-calc', label: 'Risk Centre', icon: Calculator },
-                { id: 'reports', label: 'Analytics & Journal', icon: FileText },
               ].map((tool) => {
                 const Icon = tool.icon;
                 return (

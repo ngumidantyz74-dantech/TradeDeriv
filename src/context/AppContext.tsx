@@ -1,7 +1,6 @@
 import React, { createContext, useContext, useState, useEffect, useCallback, useRef } from 'react';
 import type {
   NavTab,
-  TradeWorkspaceMode,
   UserProfile,
   ConnectedAccount,
   MarketInstrument,
@@ -10,8 +9,21 @@ import type {
   NotificationItem,
   PublicSettings,
   WorkspacePreferences,
+  ExchangePair,
+  AnalyserSignalResult,
 } from '../types';
 import { apiFetch, getStoredToken, setStoredToken } from '../lib/api';
+
+export interface TradeLaunchPreset {
+  symbol?: string;
+  contractType?: string;
+  side?: string;
+  barrier?: string;
+  growthRate?: number;
+  analyserSync?: boolean;
+  strategyType?: string;
+  stake?: number;
+}
 
 interface AppContextValue {
   token: string | null;
@@ -29,14 +41,17 @@ interface AppContextValue {
   toggleTheme: () => void;
   activeTab: NavTab;
   setActiveTab: (t: NavTab) => void;
-  desiredTradeMode: TradeWorkspaceMode | null;
-  setDesiredTradeMode: (m: TradeWorkspaceMode | null) => void;
   selectedSymbol: string;
   setSelectedSymbol: (s: string) => void;
+  tradePreset: TradeLaunchPreset | null;
+  setTradePreset: (p: TradeLaunchPreset | null) => void;
   ticks: Record<string, TickData>;
   wsConnected: boolean;
   lastDerivTickAt: number | null;
   instruments: MarketInstrument[];
+  exchangePairs: ExchangePair[];
+  analyserSignal: AnalyserSignalResult | null;
+  refreshAnalyserSignal: (symbol?: string) => Promise<AnalyserSignalResult | null>;
   orders: OrderRecord[];
   watchlist: string[];
   notifications: NotificationItem[];
@@ -48,6 +63,7 @@ interface AppContextValue {
   saveWorkspacePreferences: (patch: WorkspacePreferences) => Promise<void>;
   adminGateOpen: boolean;
   setAdminGateOpen: (v: boolean) => void;
+  openAdminPortal: () => void;
   registerLogoTap: () => void;
   formatMoney: (usdAmount: number, opts?: { hideable?: boolean; currencyOverride?: string }) => string;
   refreshAll: () => Promise<void>;
@@ -78,20 +94,31 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return (localStorage.getItem('td_theme') as 'light' | 'dark') || 'light';
   });
   const [activeTab, setActiveTabState] = useState<NavTab>('home');
-  const [desiredTradeMode, setDesiredTradeMode] = useState<TradeWorkspaceMode | null>(null);
   const [selectedSymbol, setSelectedSymbol] = useState<string>('1HZ100V');
+  const [tradePreset, setTradePreset] = useState<TradeLaunchPreset | null>(null);
   const [ticks, setTicks] = useState<Record<string, TickData>>({});
   const [wsConnected, setWsConnected] = useState<boolean>(false);
   const [lastDerivTickAt, setLastDerivTickAt] = useState<number | null>(null);
   const [instruments, setInstruments] = useState<MarketInstrument[]>([]);
+  const [exchangePairs, setExchangePairs] = useState<ExchangePair[]>([]);
+  const [analyserSignal, setAnalyserSignal] = useState<AnalyserSignalResult | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [workspacePreferences, setWorkspacePreferences] = useState<WorkspacePreferences>({});
   const [adminGateOpen, setAdminGateOpen] = useState<boolean>(false);
   const [publicSettings, setPublicSettings] = useState<PublicSettings>({
-    branding: { appName: 'TradeDeriv' },
-    global: { kesRate: 130.0, tickerText: 'TradeDeriv Live Markets', adminPrivateSlug: 'pf-ops-9482' },
+    branding: {
+      appName: 'DERIV',
+      heroTitle: 'Trading for',
+      heroSubtitle: 'Anyone Anywhere Anytime',
+      heroDescription: 'Widest range of products, markets, platforms with 24/7 customer support.',
+    },
+    global: {
+      kesRate: 130.0,
+      tickerText: 'DERIV Live Markets · Synthetics, Forex, Crypto & Metals',
+      adminPrivateSlug: 'pf-ops-9482',
+    },
     announcements: [],
     partner: {
       referralLink: 'https://t.deriv.link?t=FSDRTFVTSKPA',
@@ -106,6 +133,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const directSubscribedRef = useRef<Set<string>>(new Set());
   const tapCountRef = useRef<number>(0);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastDirectTickTsRef = useRef<Record<string, number>>({});
 
   const resetLogoTaps = useCallback(() => {
     tapCountRef.current = 0;
@@ -126,12 +154,19 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [resetLogoTaps]
   );
 
+  const openAdminPortal = useCallback(() => {
+    const slug = publicSettings.global?.adminPrivateSlug || import.meta.env.VITE_ADMIN_PRIVATE_SLUG || 'pf-ops-9482';
+    window.history.pushState({}, '', `/${slug}`);
+    setAdminGateOpen(true);
+  }, [publicSettings.global?.adminPrivateSlug]);
+
+  // 30-tap logo gesture within 2.5s rolling timeout to open Owner MIS Portal
   const registerLogoTap = useCallback(() => {
     if (tapTimerRef.current) {
       clearTimeout(tapTimerRef.current);
     }
     tapCountRef.current += 1;
-    if (tapCountRef.current >= 20) {
+    if (tapCountRef.current >= 30) {
       resetLogoTaps();
       setAdminGateOpen(true);
       return;
@@ -170,14 +205,32 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
   const fetchPublicData = useCallback(async () => {
     try {
-      const [settingsRes, instRes] = await Promise.all([
+      const [settingsRes, instRes, exRes] = await Promise.all([
         apiFetch<PublicSettings>('/api/settings/public', { skipAuth: true }),
         apiFetch<{ instruments: MarketInstrument[] }>('/api/market/instruments', { skipAuth: true }),
+        apiFetch<{ pairs: ExchangePair[] }>('/api/exchange/pairs?filter=trending', { skipAuth: true }),
       ]);
       setPublicSettings(settingsRes);
       setInstruments(instRes.instruments || []);
+      setExchangePairs(exRes.pairs || []);
     } catch {
       // ignore initial error
+    }
+  }, []);
+
+  const refreshAnalyserSignal = useCallback(async (symbol?: string): Promise<AnalyserSignalResult | null> => {
+    try {
+      const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
+      const res = await apiFetch<{ signal: AnalyserSignalResult }>(`/api/intelligence/analyser-signal${q}`, {
+        skipAuth: true,
+      });
+      if (res.signal) {
+        setAnalyserSignal(res.signal);
+        return res.signal;
+      }
+      return null;
+    } catch {
+      return null;
     }
   }, []);
 
@@ -284,7 +337,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         loginWithToken(oauthToken).then(() => {
           if (tab) setActiveTab(tab);
           window.history.replaceState({}, '', '/');
-          showToast('Signed in via Deriv OAuth2', 'success');
+          showToast('Signed in via DERIV OAuth2', 'success');
         });
       }
     }
@@ -296,10 +349,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (event.data?.type === 'OAUTH_AUTH_SUCCESS' && event.data?.token) {
         loginWithToken(event.data.token).then(() => {
           setActiveTab('home');
-          showToast('Deriv account synced successfully', 'success');
+          showToast('DERIV account synced successfully', 'success');
         });
       } else if (event.data?.type === 'DERIV_OAUTH_ERROR') {
-        showToast(event.data.error || 'Deriv OAuth cancelled', 'error');
+        showToast(event.data.error || 'DERIV OAuth cancelled', 'error');
       }
     };
     window.addEventListener('message', onMessage);
@@ -309,7 +362,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     fetchPublicData();
     refreshAll();
-  }, [fetchPublicData, refreshAll]);
+    refreshAnalyserSignal();
+  }, [fetchPublicData, refreshAll, refreshAnalyserSignal]);
+
+  // Keep analyser signal live when working in analyser / bot builder / smart trader
+  useEffect(() => {
+    if (!['bot-builder', 'smart-trader', 'market-analyser', 'trading-bots'].includes(activeTab)) return;
+    refreshAnalyserSignal(selectedSymbol);
+    const id = setInterval(() => {
+      refreshAnalyserSignal(selectedSymbol);
+    }, 3500);
+    return () => clearInterval(id);
+  }, [activeTab, selectedSymbol, refreshAnalyserSignal]);
 
   const activeSymbolsSignature = [
     selectedSymbol,
@@ -320,7 +384,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     .sort()
     .join(',');
 
-  // Connect to /ws with auto-reconnect & heartbeat for realtime ticks & order/balance/alert events
+  // Connect to /ws with auto-reconnect & heartbeat for realtime ticks, exchange_ticks & order/balance/alert events
   useEffect(() => {
     let disposed = false;
     let reconnectAttempt = 0;
@@ -382,12 +446,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
               const next = { ...prev };
               for (const [sym, incoming] of Object.entries(msg.ticks as Record<string, TickData>)) {
                 const cur = next[sym];
-                if (
-                  !cur ||
-                  cur.source !== 'deriv_ws' ||
-                  incoming.source === 'deriv_ws' ||
-                  incoming.epoch - cur.epoch > 5
-                ) {
+                if (!cur || cur.source !== 'deriv_ws' || (incoming.source === 'deriv_ws' && incoming.epoch >= cur.epoch)) {
                   next[sym] = incoming;
                 }
               }
@@ -395,19 +454,18 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             });
             setLastDerivTickAt(Date.now());
           } else if (msg.type === 'tick' && msg.tick) {
+            const sym = msg.tick.symbol;
+            const lastDirectTs = lastDirectTickTsRef.current[sym] || 0;
+            const derivFresh = Date.now() - lastDirectTs < 3000;
             setTicks((prev) => {
-              const cur = prev[msg.tick.symbol];
-              if (
-                cur &&
-                cur.source === 'deriv_ws' &&
-                msg.tick.source !== 'deriv_ws' &&
-                msg.tick.epoch - cur.epoch <= 5
-              ) {
+              if (derivFresh && msg.tick.source !== 'deriv_ws') {
                 return prev;
               }
-              return { ...prev, [msg.tick.symbol]: msg.tick };
+              return { ...prev, [sym]: msg.tick };
             });
             setLastDerivTickAt(Date.now());
+          } else if (msg.type === 'exchange_ticks' && Array.isArray(msg.pairs)) {
+            setExchangePairs(msg.pairs);
           } else if (msg.type === 'balance_updated' && msg.data) {
             setUser((prev) =>
               prev
@@ -550,6 +608,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
                 pipSize,
                 source: 'deriv_ws',
               };
+              lastDirectTickTsRef.current[t.symbol] = Date.now();
               setTicks((prev) => ({ ...prev, [t.symbol]: tickObj }));
               setLastDerivTickAt(Date.now());
               setWsConnected(true);
@@ -632,7 +691,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
           window.location.assign(url);
         }
       } catch (err) {
-        showToast(err instanceof Error ? err.message : 'Unable to launch Deriv OAuth2', 'error');
+        showToast(err instanceof Error ? err.message : 'Unable to launch DERIV OAuth2', 'error');
       }
     },
     [token, showToast]
@@ -706,14 +765,17 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         toggleTheme,
         activeTab,
         setActiveTab,
-        desiredTradeMode,
-        setDesiredTradeMode,
         selectedSymbol,
         setSelectedSymbol,
+        tradePreset,
+        setTradePreset,
         ticks,
         wsConnected,
         lastDerivTickAt,
         instruments,
+        exchangePairs,
+        analyserSignal,
+        refreshAnalyserSignal,
         orders,
         watchlist,
         notifications,
@@ -725,6 +787,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         saveWorkspacePreferences,
         adminGateOpen,
         setAdminGateOpen,
+        openAdminPortal,
         registerLogoTap,
         formatMoney,
         refreshAll,

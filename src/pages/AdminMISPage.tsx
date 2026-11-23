@@ -23,6 +23,9 @@ import {
   Lock,
   ExternalLink,
   Copy,
+  Sliders,
+  BarChart3,
+  Edit3,
 } from 'lucide-react';
 import { TradeDerivLogo } from '../components/TradeDerivLogo';
 
@@ -33,7 +36,8 @@ type AdminTab =
   | 'accounts'
   | 'strategies'
   | 'orders'
-  | 'ecosystem'
+  | 'engine'
+  | 'markets'
   | 'cashier'
   | 'settings'
   | 'announcements'
@@ -97,13 +101,43 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [ownerAdminToken, setOwnerAdminToken] = useState('');
 
   // Settings forms
-  const [appName, setAppName] = useState('TradeDeriv');
-  const [supportEmail, setSupportEmail] = useState('support@tradederiv.app');
+  const [appName, setAppName] = useState('DERIV');
+  const [tagline, setTagline] = useState('Precision Synthetic, CFD, Options & Crypto Exchange Terminal');
+  const [heroTitle, setHeroTitle] = useState('Trade global markets on one precision platform');
+  const [heroSubtitle, setHeroSubtitle] = useState('Real-time Deriv Synthetics, Forex CFDs, Options & Exchange');
+  const [heroDescription, setHeroDescription] = useState(
+    'Trade CFDs, Options, Deriv Bot, SmartTrader, and Crypto Spot/Futures from a unified institutional terminal.'
+  );
+  const [supportEmail, setSupportEmail] = useState('support@deriv.com');
+  const [supportPhone, setSupportPhone] = useState('+44 20 8089 0000');
   const [kesRate, setKesRate] = useState('130');
   const [tickerText, setTickerText] = useState('');
   const [adminSlug, setAdminSlug] = useState('pf-ops-9482');
+  const [defaultVirtualBalance, setDefaultVirtualBalance] = useState('10000');
+  const [allowRegistration, setAllowRegistration] = useState(true);
+  const [maintenanceMode, setMaintenanceMode] = useState(false);
   const [newAdminEmail, setNewAdminEmail] = useState('');
   const [newAdminPassword, setNewAdminPassword] = useState('');
+
+  // Trading Engine Control state
+  const [engineConfig, setEngineConfig] = useState({
+    botWinRatePct: 76,
+    analyserWinRatePct: 82,
+    accuWinRatePct: 78,
+    manualOptionsWinRatePct: 68,
+    siteSettlementForLockedReal: true,
+    liveMicroTickEnabled: true,
+  });
+
+  // Instruments & Pricing Overrides state
+  const [instrumentsList, setInstrumentsList] = useState<any[]>([]);
+  const [instrumentEdits, setInstrumentEdits] = useState<
+    Record<string, { display_name: string; price: string; spread: string; min_stake: string; max_stake: string; is_active: boolean }>
+  >({});
+
+  // Full User & Order Edit Modals
+  const [editingUser, setEditingUser] = useState<any | null>(null);
+  const [editingOrder, setEditingOrder] = useState<any | null>(null);
 
   // Create forms
   const [newUserEmail, setNewUserEmail] = useState('');
@@ -131,8 +165,6 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [pendingReauthAction, setPendingReauthAction] = useState<(() => Promise<void>) | null>(null);
   const [diagnostics, setDiagnostics] = useState<any>(null);
   const [diagLoading, setDiagLoading] = useState(false);
-  const [ecosystemHealth, setEcosystemHealth] = useState<any>(null);
-  const [ecosystemLoading, setEcosystemLoading] = useState(false);
 
   const flash = (msg: string, type: 'ok' | 'err' = 'ok') => {
     setNotice({ msg, type });
@@ -180,11 +212,51 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
       }
       setAccountBalances(aMap);
 
-      setAppName(ov.branding?.appName || 'TradeDeriv');
-      setSupportEmail(ov.branding?.supportEmail || 'support@tradederiv.app');
+      setAppName(ov.branding?.appName || 'DERIV');
+      setTagline(ov.branding?.tagline || 'Precision Synthetic, CFD, Options & Crypto Exchange Terminal');
+      setHeroTitle(ov.branding?.heroTitle || 'Trade global markets on one precision platform');
+      setHeroSubtitle(ov.branding?.heroSubtitle || 'Real-time Deriv Synthetics, Forex CFDs, Options & Exchange');
+      setHeroDescription(
+        ov.branding?.heroDescription ||
+          'Trade CFDs, Options, Deriv Bot, SmartTrader, and Crypto Spot/Futures from a unified institutional terminal.'
+      );
+      setSupportEmail(ov.branding?.supportEmail || 'support@deriv.com');
+      setSupportPhone(ov.branding?.supportPhone || '+44 20 8089 0000');
       setKesRate(String(ov.global?.kesRate || 130));
       setTickerText(ov.global?.tickerText || '');
       setAdminSlug(ov.global?.adminPrivateSlug || 'pf-ops-9482');
+      setDefaultVirtualBalance(String(ov.global?.defaultVirtualBalance ?? 10000));
+      setAllowRegistration(ov.global?.allowRegistration !== false);
+      setMaintenanceMode(Boolean(ov.global?.maintenanceMode));
+
+      if (ov.tradingEngine) {
+        setEngineConfig({
+          botWinRatePct: Number(ov.tradingEngine.botWinRatePct ?? 76),
+          analyserWinRatePct: Number(ov.tradingEngine.analyserWinRatePct ?? 82),
+          accuWinRatePct: Number(ov.tradingEngine.accuWinRatePct ?? 78),
+          manualOptionsWinRatePct: Number(ov.tradingEngine.manualOptionsWinRatePct ?? 68),
+          siteSettlementForLockedReal: ov.tradingEngine.siteSettlementForLockedReal !== false,
+          liveMicroTickEnabled: ov.tradingEngine.liveMicroTickEnabled !== false,
+        });
+      }
+
+      const insts = Array.isArray(ov.instruments) ? ov.instruments : [];
+      setInstrumentsList(insts);
+      const iMap: Record<
+        string,
+        { display_name: string; price: string; spread: string; min_stake: string; max_stake: string; is_active: boolean }
+      > = {};
+      for (const item of insts) {
+        iMap[item.symbol] = {
+          display_name: String(item.display_name || item.symbol),
+          price: String(Number(item.price ?? 0)),
+          spread: String(Number(item.spread ?? 0.5)),
+          min_stake: String(Number(item.min_stake ?? 0.35)),
+          max_stake: String(Number(item.max_stake ?? 50000)),
+          is_active: item.is_active !== false,
+        };
+      }
+      setInstrumentEdits(iMap);
 
       setDerivAppId(comm.config?.derivAppId || '');
       setMarkupPct(String(comm.config?.markupPercentage ?? 2.0));
@@ -245,26 +317,11 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     }
   }, [adminToken]);
 
-  const loadEcosystemHealth = useCallback(async () => {
-    if (!adminToken) return;
-    setEcosystemLoading(true);
-    try {
-      const res = await adminFetch('/api/admin/ecosystem-health');
-      setEcosystemHealth(res);
-    } catch {
-      // ignore
-    } finally {
-      setEcosystemLoading(false);
-    }
-  }, [adminToken]);
-
   useEffect(() => {
     if (tab === 'security') {
       loadDiagnostics();
-    } else if (tab === 'ecosystem') {
-      loadEcosystemHealth();
     }
-  }, [tab, loadDiagnostics, loadEcosystemHealth]);
+  }, [tab, loadDiagnostics]);
 
   const runWithReauth = async (action: () => Promise<void>) => {
     try {
@@ -332,7 +389,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             <p className="text-xs text-slate-400 mt-1">
               {bootstrapped
                 ? 'Authorized platform administrators only.'
-                : 'Initialize the primary TradeDeriv platform owner account.'}
+                : 'Initialize the primary DERIV platform owner account.'}
             </p>
           </div>
 
@@ -397,8 +454,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     { id: 'commissions', label: 'Commissions & Markup', icon: DollarSign },
     { id: 'users', label: 'Users CRUD', icon: Users },
     { id: 'accounts', label: 'Connected Deriv', icon: Link2 },
+    { id: 'engine', label: 'Trading Engine Control', icon: Sliders },
+    { id: 'markets', label: 'Instruments & Pricing', icon: BarChart3 },
     { id: 'strategies', label: 'Bot Strategies', icon: Bot },
-    { id: 'ecosystem', label: 'Ecosystem & Bots', icon: Shield },
     { id: 'orders', label: 'Orders Oversight', icon: Activity },
     { id: 'cashier', label: 'Cashier Logs', icon: Wallet },
     { id: 'settings', label: 'Global Settings', icon: Settings },
@@ -679,43 +737,13 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
               {Array.isArray(commData.markupStatistics?.breakdown) && commData.markupStatistics.breakdown.length > 0 && (
                 <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
-                  <div className="px-4 py-3 border-b border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2">
+                  <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between">
                     <h3 className="font-display text-xs font-bold uppercase tracking-wider text-slate-300">
                       Deriv Application Breakdown
                     </h3>
-                    <div className="flex items-center gap-3">
-                      <span className="text-[11px] font-mono-num text-slate-400">
-                        {commData.markupStatistics.breakdown.length} entries
-                      </span>
-                      <button
-                        type="button"
-                        onClick={() => {
-                          const header = 'App_Period,Contracts,Volume_USD,App_Markup_USD\n';
-                          const rows = (commData.markupStatistics.breakdown || [])
-                            .map((row: any, idx: number) => {
-                              const label = String(
-                                row.app_name || row.name || row.date || row.app_id || row.id || `Entry_${idx + 1}`
-                              ).replace(/,/g, ' ');
-                              const contracts = Number(row.transactions_count ?? row.contract_count ?? row.trades ?? 0);
-                              const vol = Number(row.volume_usd ?? row.total_volume_usd ?? 0).toFixed(2);
-                              const mk = Number(row.app_markup_usd ?? row.markup_usd ?? row.total_app_markup_usd ?? 0).toFixed(2);
-                              return `${label},${contracts},${vol},${mk}`;
-                            })
-                            .join('\n');
-                          const blob = new Blob([header + rows], { type: 'text/csv' });
-                          const url = URL.createObjectURL(blob);
-                          const a = document.createElement('a');
-                          a.href = url;
-                          a.download = `deriv_markup_${commData.dateFrom || 'from'}_${commData.dateTo || 'to'}.csv`;
-                          a.click();
-                          URL.revokeObjectURL(url);
-                          flash('Deriv markup breakdown CSV exported');
-                        }}
-                        className="px-3 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-[11px] font-semibold text-white cursor-pointer"
-                      >
-                        Export Markup CSV
-                      </button>
-                    </div>
+                    <span className="text-[11px] font-mono-num text-slate-400">
+                      {commData.markupStatistics.breakdown.length} entries
+                    </span>
                   </div>
                   <table className="w-full text-xs">
                     <thead>
@@ -1035,6 +1063,29 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         <div className="flex items-center justify-end gap-2 pt-1 border-t border-[#2A2F3D]">
                           <button
                             type="button"
+                            onClick={() => {
+                              const parseJson = (raw: any, def: any) => {
+                                try {
+                                  return { ...def, ...(typeof raw === 'string' ? JSON.parse(raw || '{}') : raw || {}) };
+                                } catch {
+                                  return { ...def };
+                                }
+                              };
+                              setEditingUser({
+                                ...u,
+                                password: '',
+                                demo_wallets: parseJson(u.demo_wallets_json, { mt5_standard: 10000, mt5_gold: 10000, exchange_usdt: 10000 }),
+                                real_wallets: parseJson(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+                                exchange_balances: parseJson(u.exchange_balances_json, { USDT: 10000, USDC: 2500, BTC: 0.15, ETH: 2.5 }),
+                                real_exchange_balances: parseJson(u.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
+                              });
+                            }}
+                            className="px-3 py-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] font-semibold flex items-center gap-1 cursor-pointer"
+                          >
+                            <Edit3 className="w-3 h-3" /> Edit All
+                          </button>
+                          <button
+                            type="button"
                             onClick={() =>
                               runWithReauth(async () => {
                                 await adminFetch(`/api/admin/users/${u.id}/status`, {
@@ -1178,6 +1229,29 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                             </div>
                           </td>
                           <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const parseJson = (raw: any, def: any) => {
+                                  try {
+                                    return { ...def, ...(typeof raw === 'string' ? JSON.parse(raw || '{}') : raw || {}) };
+                                  } catch {
+                                    return { ...def };
+                                  }
+                                };
+                                setEditingUser({
+                                  ...u,
+                                  password: '',
+                                  demo_wallets: parseJson(u.demo_wallets_json, { mt5_standard: 10000, mt5_gold: 10000, exchange_usdt: 10000 }),
+                                  real_wallets: parseJson(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+                                  exchange_balances: parseJson(u.exchange_balances_json, { USDT: 10000, USDC: 2500, BTC: 0.15, ETH: 2.5 }),
+                                  real_exchange_balances: parseJson(u.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
+                                });
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <Edit3 className="w-3 h-3" /> Edit Details &amp; Wallets
+                            </button>
                             <button
                               type="button"
                               onClick={() =>
@@ -1528,6 +1602,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   <tr className="border-b border-[#2A2F3D] text-slate-400">
                     <th className="text-left px-4 py-3">Order</th>
                     <th className="text-left px-4 py-3">Trader</th>
+                    <th className="text-left px-4 py-3">Mode</th>
                     <th className="text-right px-4 py-3">Stake</th>
                     <th className="text-right px-4 py-3">P/L</th>
                     <th className="text-right px-4 py-3">Actions</th>
@@ -1540,17 +1615,45 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         <strong>#{o.id} {o.symbol}</strong> ({o.side} · {o.status})
                       </td>
                       <td className="px-4 py-3">{o.user_email}</td>
-                      <td className="px-4 py-3 text-right font-mono-num">${o.stake}</td>
-                      <td className={`px-4 py-3 text-right font-mono-num font-bold ${o.pnl >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
-                        {Number(o.pnl).toFixed(2)}
+                      <td className="px-4 py-3">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            o.account_mode === 'real' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-slate-700/60 text-slate-300'
+                          }`}
+                        >
+                          {o.account_mode || 'demo'}
+                        </span>
                       </td>
-                      <td className="px-4 py-3 text-right space-x-2">
+                      <td className="px-4 py-3 text-right font-mono-num">${Number(o.stake || 0).toFixed(2)}</td>
+                      <td className={`px-4 py-3 text-right font-mono-num font-bold ${Number(o.pnl) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                        {Number(o.pnl || 0) >= 0 ? '+' : ''}${Number(o.pnl || 0).toFixed(2)}
+                      </td>
+                      <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                        <button
+                          type="button"
+                          onClick={() =>
+                            setEditingOrder({
+                              id: o.id,
+                              symbol: o.symbol,
+                              side: o.side,
+                              user_email: o.user_email,
+                              status: o.status,
+                              stake: String(Number(o.stake || 1)),
+                              exit_price: String(Number(o.exit_price ?? o.current_price ?? o.entry_price ?? 0)),
+                              pnl: String(Number(o.pnl || 0)),
+                            })
+                          }
+                          className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                        >
+                          <Edit3 className="w-3 h-3" /> Edit P/L
+                        </button>
                         {o.status === 'OPEN' && (
                           <button
                             type="button"
                             onClick={async () => {
                               await adminFetch(`/api/admin/orders/${o.id}/close`, { method: 'POST' });
                               loadAllAdminData();
+                              flash(`Order #${o.id} settled & closed`);
                             }}
                             className="px-2.5 py-1 rounded-lg bg-[#FF444F]/15 text-[#FF444F] cursor-pointer"
                           >
@@ -1572,6 +1675,250 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   ))}
                 </tbody>
               </table>
+            </div>
+          )}
+
+          {/* 6b. Trading Engine Control (Admin Only) */}
+          {tab === 'engine' && (
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                try {
+                  await adminFetch('/api/admin/settings/trading-engine', {
+                    method: 'PUT',
+                    body: JSON.stringify(engineConfig),
+                  });
+                  await loadAllAdminData();
+                  flash('Trading Engine win-bias & settlement parameters saved to PostgreSQL');
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Failed to update engine config', 'err');
+                }
+              }}
+              className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-6 max-w-4xl"
+            >
+              <div>
+                <h2 className="font-display text-base font-bold">Execution Win-Rate &amp; Settlement Engine</h2>
+                <p className="text-xs text-slate-400 mt-1">
+                  Admin-exclusive controls governing Deriv Bot cycles, Market Analyser synced entries, Accumulators growth targets, and manual Options settlement probabilities. Changes take effect immediately across Demo &amp; DB-settled Real accounts.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                {[
+                  { key: 'botWinRatePct', label: 'Deriv Bot Cycle Win Rate (%)', desc: 'Applies to automated Bot Builder strategies' },
+                  { key: 'analyserWinRatePct', label: 'Analyser Live Sync Win Rate (%)', desc: 'Higher accuracy when Analyser Sync is enabled' },
+                  { key: 'accuWinRatePct', label: 'Accumulators Target Win Rate (%)', desc: 'Governs tick growth survival & take-profit hits' },
+                  { key: 'manualOptionsWinRatePct', label: 'Manual Options & SmartTrader Win Rate (%)', desc: 'Controls manual digital/options contract settlement' },
+                ].map((item) => {
+                  const val = Number((engineConfig as any)[item.key] ?? 75);
+                  return (
+                    <div key={item.key} className="p-4 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-2">
+                      <div className="flex items-center justify-between">
+                        <label className="text-xs font-bold text-slate-200">{item.label}</label>
+                        <span className="font-mono-num text-sm font-bold text-[#00A878]">{val}%</span>
+                      </div>
+                      <input
+                        type="range"
+                        min={5}
+                        max={96}
+                        value={val}
+                        onChange={(e) =>
+                          setEngineConfig((prev) => ({ ...prev, [item.key]: Number(e.target.value) }))
+                        }
+                        className="w-full accent-[#FF444F] cursor-pointer"
+                      />
+                      <p className="text-[11px] text-slate-400">{item.desc}</p>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <label className="flex items-start gap-3 p-4 rounded-xl bg-[#111319] border border-[#2A2F3D] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={engineConfig.siteSettlementForLockedReal}
+                    onChange={(e) =>
+                      setEngineConfig((prev) => ({ ...prev, siteSettlementForLockedReal: e.target.checked }))
+                    }
+                    className="mt-0.5 accent-[#FF444F]"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-white block">DB Settlement for Admin-Adjusted Real Balances</span>
+                    <span className="text-[11px] text-slate-400">
+                      Allows Real-mode trades, bots, and SmartTrader orders to settle smoothly against Admin-managed Real balances in PostgreSQL.
+                    </span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-3 p-4 rounded-xl bg-[#111319] border border-[#2A2F3D] cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={engineConfig.liveMicroTickEnabled}
+                    onChange={(e) =>
+                      setEngineConfig((prev) => ({ ...prev, liveMicroTickEnabled: e.target.checked }))
+                    }
+                    className="mt-0.5 accent-[#00A878]"
+                  />
+                  <div>
+                    <span className="text-xs font-bold text-white block">Live Micro-Tick Continuity Feed</span>
+                    <span className="text-[11px] text-slate-400">
+                      Maintains continuous sub-second live market movement and P/L tracking across all charts and market lists.
+                    </span>
+                  </div>
+                </label>
+              </div>
+
+              <button type="submit" className="px-6 py-2.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-xs font-bold cursor-pointer">
+                Save Engine Configuration
+              </button>
+            </form>
+          )}
+
+          {/* 6c. Instruments & Pricing Overrides */}
+          {tab === 'markets' && (
+            <div className="space-y-4">
+              <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="font-display text-sm font-bold">Market Instruments &amp; Spot Overrides</h2>
+                  <p className="text-xs text-slate-400">
+                    Edit display names, spot price overrides, spreads, stake limits, or active market visibility across all trader screens.
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={loadAllAdminData}
+                  className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Sync Market Table
+                </button>
+              </div>
+
+              <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-[#2A2F3D] text-slate-400">
+                      <th className="text-left px-4 py-3">Symbol / Category</th>
+                      <th className="text-left px-4 py-3">Display Name</th>
+                      <th className="text-right px-4 py-3">Spot Price</th>
+                      <th className="text-right px-4 py-3">Spread</th>
+                      <th className="text-right px-4 py-3">Min / Max Stake</th>
+                      <th className="text-center px-4 py-3">Active</th>
+                      <th className="text-right px-4 py-3">Save</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#2A2F3D]">
+                    {instrumentsList.map((inst: any) => {
+                      const edit = instrumentEdits[inst.symbol] || {
+                        display_name: inst.display_name,
+                        price: String(inst.price ?? 0),
+                        spread: String(inst.spread ?? 0.5),
+                        min_stake: String(inst.min_stake ?? 0.35),
+                        max_stake: String(inst.max_stake ?? 50000),
+                        is_active: inst.is_active !== false,
+                      };
+                      const updateField = (field: string, val: any) =>
+                        setInstrumentEdits((prev) => ({
+                          ...prev,
+                          [inst.symbol]: { ...edit, [field]: val },
+                        }));
+
+                      return (
+                        <tr key={inst.symbol}>
+                          <td className="px-4 py-2.5">
+                            <p className="font-mono-num font-bold text-white">{inst.symbol}</p>
+                            <p className="text-[10px] text-slate-400 uppercase">{inst.category}</p>
+                          </td>
+                          <td className="px-4 py-2.5">
+                            <input
+                              type="text"
+                              value={edit.display_name}
+                              onChange={(e) => updateField('display_name', e.target.value)}
+                              className="w-40 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] text-xs"
+                            />
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <input
+                              type="number"
+                              step="any"
+                              value={edit.price}
+                              onChange={(e) => updateField('price', e.target.value)}
+                              className="w-28 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                            />
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <input
+                              type="number"
+                              step="any"
+                              value={edit.spread}
+                              onChange={(e) => updateField('spread', e.target.value)}
+                              className="w-20 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                            />
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <div className="inline-flex items-center gap-1">
+                              <input
+                                type="number"
+                                step="any"
+                                value={edit.min_stake}
+                                onChange={(e) => updateField('min_stake', e.target.value)}
+                                className="w-16 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                              />
+                              <span className="text-slate-500">/</span>
+                              <input
+                                type="number"
+                                step="any"
+                                value={edit.max_stake}
+                                onChange={(e) => updateField('max_stake', e.target.value)}
+                                className="w-20 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                              />
+                            </div>
+                          </td>
+                          <td className="px-4 py-2.5 text-center">
+                            <input
+                              type="checkbox"
+                              checked={edit.is_active}
+                              onChange={(e) => updateField('is_active', e.target.checked)}
+                              className="accent-[#00A878] cursor-pointer"
+                            />
+                          </td>
+                          <td className="px-4 py-2.5 text-right">
+                            <button
+                              type="button"
+                              disabled={busyAction === `inst-${inst.symbol}`}
+                              onClick={async () => {
+                                setBusyAction(`inst-${inst.symbol}`);
+                                try {
+                                  await adminFetch(`/api/admin/instruments/${encodeURIComponent(inst.symbol)}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({
+                                      display_name: edit.display_name,
+                                      price: Number(edit.price),
+                                      spread: Number(edit.spread),
+                                      min_stake: Number(edit.min_stake),
+                                      max_stake: Number(edit.max_stake),
+                                      is_active: edit.is_active,
+                                    }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Updated ${inst.symbol} pricing & settings`);
+                                } catch (err) {
+                                  flash(err instanceof Error ? err.message : 'Update failed', 'err');
+                                } finally {
+                                  setBusyAction(null);
+                                }
+                              }}
+                              className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
+                            >
+                              {busyAction === `inst-${inst.symbol}` ? '...' : 'Save'}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
             </div>
           )}
 
@@ -1609,46 +1956,136 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               <form
                 onSubmit={async (e) => {
                   e.preventDefault();
-                  await adminFetch('/api/admin/settings/branding', {
-                    method: 'PUT',
-                    body: JSON.stringify({ appName, supportEmail }),
-                  });
-                  await adminFetch('/api/admin/settings/global', {
-                    method: 'PUT',
-                    body: JSON.stringify({ kesRate: Number(kesRate), tickerText, adminPrivateSlug: adminSlug }),
-                  });
-                  flash('Branding & Global settings updated');
+                  try {
+                    await adminFetch('/api/admin/settings/branding', {
+                      method: 'PUT',
+                      body: JSON.stringify({
+                        appName,
+                        tagline,
+                        heroTitle,
+                        heroSubtitle,
+                        heroDescription,
+                        supportEmail,
+                        supportPhone,
+                      }),
+                    });
+                    await adminFetch('/api/admin/settings/global', {
+                      method: 'PUT',
+                      body: JSON.stringify({
+                        kesRate: Number(kesRate),
+                        tickerText,
+                        adminPrivateSlug: adminSlug,
+                        defaultVirtualBalance: Number(defaultVirtualBalance),
+                        allowRegistration,
+                        maintenanceMode,
+                      }),
+                    });
+                    await loadAllAdminData();
+                    flash('All Branding & Global platform settings saved');
+                  } catch (err) {
+                    flash(err instanceof Error ? err.message : 'Save failed', 'err');
+                  }
                 }}
                 className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-4"
               >
-                <h2 className="font-display text-sm font-bold">Platform Branding & Global Config</h2>
+                <h2 className="font-display text-sm font-bold">Platform Branding &amp; Global Config</h2>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Brand Name</label>
+                    <input
+                      type="text"
+                      value={appName}
+                      onChange={(e) => setAppName(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Support Email</label>
+                    <input
+                      type="email"
+                      value={supportEmail}
+                      onChange={(e) => setSupportEmail(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Support Phone</label>
+                    <input
+                      type="text"
+                      value={supportPhone}
+                      onChange={(e) => setSupportPhone(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Default Demo Balance (USD)</label>
+                    <input
+                      type="number"
+                      step="1"
+                      value={defaultVirtualBalance}
+                      onChange={(e) => setDefaultVirtualBalance(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
+                    />
+                  </div>
+                </div>
+
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Brand Name</label>
+                  <label className="block text-xs text-slate-400 mb-1">Brand Tagline</label>
                   <input
                     type="text"
-                    value={appName}
-                    onChange={(e) => setAppName(e.target.value)}
+                    value={tagline}
+                    onChange={(e) => setTagline(e.target.value)}
                     className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">USD → KSH Rate</label>
+                  <label className="block text-xs text-slate-400 mb-1">Landing Hero Title</label>
                   <input
-                    type="number"
-                    step="0.1"
-                    value={kesRate}
-                    onChange={(e) => setKesRate(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
+                    type="text"
+                    value={heroTitle}
+                    onChange={(e) => setHeroTitle(e.target.value)}
+                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
                   />
                 </div>
                 <div>
-                  <label className="block text-xs text-slate-400 mb-1">Private Admin Slug</label>
+                  <label className="block text-xs text-slate-400 mb-1">Landing Hero Subtitle</label>
                   <input
                     type="text"
-                    value={adminSlug}
-                    onChange={(e) => setAdminSlug(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
+                    value={heroSubtitle}
+                    onChange={(e) => setHeroSubtitle(e.target.value)}
+                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
                   />
+                </div>
+                <div>
+                  <label className="block text-xs text-slate-400 mb-1">Landing Hero Description</label>
+                  <textarea
+                    rows={2}
+                    value={heroDescription}
+                    onChange={(e) => setHeroDescription(e.target.value)}
+                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">USD → KSH Rate</label>
+                    <input
+                      type="number"
+                      step="0.1"
+                      value={kesRate}
+                      onChange={(e) => setKesRate(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">Private Admin Slug</label>
+                    <input
+                      type="text"
+                      value={adminSlug}
+                      onChange={(e) => setAdminSlug(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-sm"
+                    />
+                  </div>
                 </div>
                 <div>
                   <label className="block text-xs text-slate-400 mb-1">Top Marquee Ticker</label>
@@ -1659,8 +2096,28 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
                   />
                 </div>
+                <div className="flex flex-wrap gap-4 text-xs">
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={allowRegistration}
+                      onChange={(e) => setAllowRegistration(e.target.checked)}
+                      className="accent-[#00A878]"
+                    />
+                    <span>Allow New Registrations</span>
+                  </label>
+                  <label className="flex items-center gap-2 cursor-pointer">
+                    <input
+                      type="checkbox"
+                      checked={maintenanceMode}
+                      onChange={(e) => setMaintenanceMode(e.target.checked)}
+                      className="accent-[#FF444F]"
+                    />
+                    <span>Maintenance Mode</span>
+                  </label>
+                </div>
                 <button type="submit" className="px-6 py-2.5 rounded-full bg-[#FF444F] text-xs font-bold cursor-pointer">
-                  Save Settings
+                  Save All Branding &amp; Global Settings
                 </button>
               </form>
 
@@ -1790,130 +2247,6 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             </div>
           )}
 
-          {/* 10B. Ecosystem & Bots Oversight */}
-          {tab === 'ecosystem' && (
-            <div className="space-y-6">
-              <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D] flex flex-wrap items-center justify-between gap-4">
-                <div>
-                  <h2 className="font-display text-sm font-bold text-white">Automated Trading Engine &amp; Standalone Ecosystem Control</h2>
-                  <p className="text-xs text-slate-400 mt-0.5">
-                    Real-time oversight of active user bots, MT5 EA bridges, and the Independent AI Analyser feed.
-                  </p>
-                </div>
-                <div className="flex items-center gap-2.5">
-                  <button
-                    type="button"
-                    onClick={loadEcosystemHealth}
-                    disabled={ecosystemLoading}
-                    className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <RefreshCw className={`w-3.5 h-3.5 ${ecosystemLoading ? 'animate-spin' : ''}`} /> Refresh
-                  </button>
-                  <button
-                    type="button"
-                    onClick={async () => {
-                      await runWithReauth(async () => {
-                        await adminFetch('/api/admin/bots/kill-all', { method: 'POST' });
-                        flash('Global Bot Kill Switch executed — all active workers stopped');
-                        loadEcosystemHealth();
-                      });
-                    }}
-                    className="px-4 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <AlertTriangle className="w-3.5 h-3.5" /> Global Bot Kill Switch
-                  </button>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
-                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                  <p className="text-xs text-slate-400">Active Workers</p>
-                  <p className="font-mono tabular-nums text-2xl font-bold mt-1 text-[#00A878]">
-                    {ecosystemHealth?.activeWorkersCount ?? (ecosystemHealth?.activeBots || []).length ?? 0}
-                  </p>
-                </div>
-                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                  <p className="text-xs text-slate-400">Recent Bot Runs</p>
-                  <p className="font-mono tabular-nums text-2xl font-bold mt-1">
-                    {(ecosystemHealth?.botRuns || []).length}
-                  </p>
-                </div>
-                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                  <p className="text-xs text-slate-400">MT5 EA Bridges</p>
-                  <p className="font-mono tabular-nums text-2xl font-bold mt-1">
-                    {(ecosystemHealth?.mt5Bridges || []).length}
-                  </p>
-                </div>
-                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                  <p className="text-xs text-slate-400">Analyser Feed</p>
-                  <p className={`font-mono text-base font-bold mt-1 uppercase ${
-                    ecosystemHealth?.analyserHealth?.status === 'live' ? 'text-[#00A878]' : 'text-amber-400'
-                  }`}>
-                    {ecosystemHealth?.analyserHealth?.status || 'loading'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
-                  <h3 className="font-display text-sm font-bold mb-2">Bot Runs &amp; Active Workers</h3>
-                  <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D] text-xs">
-                    {(ecosystemHealth?.botRuns || []).length === 0 ? (
-                      <p className="text-slate-400 py-4 text-center">No bot runs recorded yet.</p>
-                    ) : (
-                      (ecosystemHealth?.botRuns || []).slice(0, 25).map((r: any) => (
-                        <div key={r.id} className="py-2 flex items-center justify-between gap-2">
-                          <div>
-                            <p className="font-bold">{r.strategy_name} <span className="text-slate-400 font-mono">({r.symbol})</span></p>
-                            <p className="text-[11px] text-slate-400">
-                              User #{r.user_id} · {r.account_mode?.toUpperCase()} · {r.trades_placed || 0} trades
-                            </p>
-                          </div>
-                          <div className="text-right font-mono tabular-nums">
-                            <span className={`font-bold uppercase ${r.status === 'running' ? 'text-[#00A878]' : 'text-slate-400'}`}>
-                              {r.status}
-                            </span>
-                            <p className={`text-[11px] ${Number(r.realized_pnl || 0) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
-                              ${Number(r.realized_pnl || 0).toFixed(2)}
-                            </p>
-                          </div>
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-
-                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
-                  <h3 className="font-display text-sm font-bold mb-2">MT5 EA Bridges &amp; Analyser Signals</h3>
-                  <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D] text-xs">
-                    {(ecosystemHealth?.mt5Bridges || []).map((b: any) => (
-                      <div key={`br-${b.id}`} className="py-2 flex items-center justify-between gap-2">
-                        <div>
-                          <p className="font-bold">{b.bridge_name} · {b.broker_name || 'Pending Terminal'}</p>
-                          <p className="text-[11px] text-slate-400">Login {b.account_login || '—'} · Status: {b.status}</p>
-                        </div>
-                        <span className="font-mono text-[11px] text-slate-400">
-                          {b.last_heartbeat_at ? new Date(b.last_heartbeat_at).toLocaleTimeString() : 'No heartbeat'}
-                        </span>
-                      </div>
-                    ))}
-                    {(ecosystemHealth?.analyserSignals || []).slice(0, 12).map((s: any) => (
-                      <div key={`sig-${s.id}`} className="py-2 flex items-center justify-between gap-2">
-                        <div>
-                          <p className="font-bold">{s.instrument} {s.direction} ({s.timeframe})</p>
-                          <p className="text-[11px] text-slate-400">Score {s.quality_score}/100 · {s.lifecycle_status}</p>
-                        </div>
-                        <span className="font-mono tabular-nums text-[11px] text-slate-300">
-                          Entry {s.entry_price}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              </div>
-            </div>
-          )}
-
           {/* 11. Security & Diagnostics */}
           {tab === 'security' && (
             <div className="space-y-6">
@@ -1964,32 +2297,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       </p>
                     </div>
                     <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
-                      <p className="text-xs text-slate-400">Runtime &amp; Deriv REST Health</p>
-                      <p className="font-mono text-sm font-bold mt-1">
-                        {diagnostics.environment?.nodeEnv || 'production'} ·{' '}
-                        <span className={diagnostics.derivRest?.ok ? 'text-[#00A878]' : 'text-amber-400'}>
-                          REST {diagnostics.derivRest?.ok ? 'OK' : 'WARN'} ({diagnostics.derivRest?.latencyMs ?? 0}ms)
-                        </span>
-                      </p>
+                      <p className="text-xs text-slate-400">Runtime Environment</p>
+                      <p className="font-mono text-sm font-bold mt-1">{diagnostics.environment?.nodeEnv || 'production'}</p>
                       <p className="text-[11px] text-slate-400 font-mono">Deriv App ID: {diagnostics.environment?.derivAppId}</p>
-                      <div className="flex flex-wrap gap-2 mt-2 text-[10px]">
-                        <a
-                          href={diagnostics.derivDocs?.llmsTxt || 'https://developers.deriv.com/llms.txt'}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sky-400 hover:underline inline-flex items-center gap-1"
-                        >
-                          llms.txt <ExternalLink className="w-2.5 h-2.5" />
-                        </a>
-                        <a
-                          href={diagnostics.derivDocs?.mcp || 'https://mcp-api.deriv.com/mcp'}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          className="text-sky-400 hover:underline inline-flex items-center gap-1"
-                        >
-                          Deriv MCP <ExternalLink className="w-2.5 h-2.5" />
-                        </a>
-                      </div>
                     </div>
                   </div>
 
@@ -2040,6 +2350,368 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
         </main>
       </div>
+
+      {/* Full User Profile & All-Wallets Edit Modal */}
+      {editingUser && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl max-h-[90vh] overflow-y-auto bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-5">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">Edit Trader Profile &amp; All Wallets</h3>
+                <p className="text-xs text-slate-400">#{editingUser.id} · {editingUser.email}</p>
+              </div>
+              <button type="button" onClick={() => setEditingUser(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setBusyAction('edit-user-modal');
+                await runWithReauth(async () => {
+                  await adminFetch(`/api/admin/users/${editingUser.id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                      full_name: editingUser.full_name,
+                      email: editingUser.email,
+                      phone: editingUser.phone || '',
+                      country: editingUser.country || '',
+                      role: editingUser.role || 'user',
+                      status: editingUser.status || 'active',
+                      password: editingUser.password?.trim().length >= 6 ? editingUser.password.trim() : undefined,
+                      virtual_workspace_balance: Number(editingUser.virtual_workspace_balance ?? 0),
+                      demo_wallets: {
+                        mt5_standard: Number(editingUser.demo_wallets?.mt5_standard ?? 0),
+                        mt5_gold: Number(editingUser.demo_wallets?.mt5_gold ?? 0),
+                        exchange_usdt: Number(editingUser.demo_wallets?.exchange_usdt ?? 0),
+                      },
+                      real_wallets: {
+                        options: Number(editingUser.real_wallets?.options ?? 0),
+                        mt5_standard: Number(editingUser.real_wallets?.mt5_standard ?? 0),
+                        mt5_gold: Number(editingUser.real_wallets?.mt5_gold ?? 0),
+                        exchange_usdt: Number(editingUser.real_wallets?.exchange_usdt ?? 0),
+                      },
+                      exchange_balances: editingUser.exchange_balances,
+                      real_exchange_balances: editingUser.real_exchange_balances,
+                    }),
+                  });
+                  setEditingUser(null);
+                  await loadAllAdminData();
+                  flash('Trader profile & all wallets synced to PostgreSQL');
+                });
+                setBusyAction(null);
+              }}
+              className="space-y-4 text-xs"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={editingUser.full_name || ''}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, full_name: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Email</label>
+                  <input
+                    type="email"
+                    required
+                    value={editingUser.email || ''}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, email: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Phone</label>
+                  <input
+                    type="text"
+                    value={editingUser.phone || ''}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, phone: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Country</label>
+                  <input
+                    type="text"
+                    value={editingUser.country || ''}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, country: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Status</label>
+                  <select
+                    value={editingUser.status || 'active'}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, status: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                    <option value="closed">Closed</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Reset Password (optional, min 6 chars)</label>
+                  <input
+                    type="password"
+                    placeholder="Leave blank to keep unchanged"
+                    value={editingUser.password || ''}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, password: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#111319] border border-[#00A878]/30 space-y-3">
+                <p className="font-bold text-[#00A878]">Demo Wallets (USD / Assets)</p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Demo</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.virtual_workspace_balance ?? 0}
+                      onChange={(e) => setEditingUser((p: any) => ({ ...p, virtual_workspace_balance: e.target.value }))}
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Standard Demo</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.demo_wallets?.mt5_standard ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          demo_wallets: { ...p.demo_wallets, mt5_standard: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Gold Demo</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.demo_wallets?.mt5_gold ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          demo_wallets: { ...p.demo_wallets, mt5_gold: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Exchange USDT Demo</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.demo_wallets?.exchange_usdt ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          demo_wallets: { ...p.demo_wallets, exchange_usdt: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="p-4 rounded-xl bg-[#111319] border border-[#FF444F]/30 space-y-3">
+                <p className="font-bold text-[#FF444F]">Real Wallets (USD / Assets)</p>
+                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Real</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.real_wallets?.options ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          real_wallets: { ...p.real_wallets, options: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Standard Real</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.real_wallets?.mt5_standard ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          real_wallets: { ...p.real_wallets, mt5_standard: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Gold Real</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.real_wallets?.mt5_gold ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          real_wallets: { ...p.real_wallets, mt5_gold: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] text-slate-400 mb-1">Exchange USDT Real</label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      value={editingUser.real_wallets?.exchange_usdt ?? 0}
+                      onChange={(e) =>
+                        setEditingUser((p: any) => ({
+                          ...p,
+                          real_wallets: { ...p.real_wallets, exchange_usdt: e.target.value },
+                        }))
+                      }
+                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="flex justify-end gap-2 pt-2">
+                <button
+                  type="button"
+                  onClick={() => setEditingUser(null)}
+                  className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 font-semibold cursor-pointer"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busyAction === 'edit-user-modal'}
+                  className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
+                >
+                  {busyAction === 'edit-user-modal' ? 'Saving...' : 'Save & Sync All Balances'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Order P/L & Status Edit Modal */}
+      {editingOrder && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">
+                  Edit Order #{editingOrder.id} ({editingOrder.symbol})
+                </h3>
+                <p className="text-xs text-slate-400">{editingOrder.user_email} · {editingOrder.side}</p>
+              </div>
+              <button type="button" onClick={() => setEditingOrder(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setBusyAction('edit-order-modal');
+                await runWithReauth(async () => {
+                  await adminFetch(`/api/admin/orders/${editingOrder.id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                      status: editingOrder.status,
+                      stake: Number(editingOrder.stake),
+                      exit_price: Number(editingOrder.exit_price),
+                      pnl: Number(editingOrder.pnl),
+                    }),
+                  });
+                  setEditingOrder(null);
+                  await loadAllAdminData();
+                  flash(`Order #${editingOrder.id} updated & trader balance synced`);
+                });
+                setBusyAction(null);
+              }}
+              className="space-y-3 text-xs"
+            >
+              <div>
+                <label className="block text-slate-400 mb-1">Status</label>
+                <select
+                  value={editingOrder.status}
+                  onChange={(e) => setEditingOrder((p: any) => ({ ...p, status: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                >
+                  <option value="OPEN">OPEN</option>
+                  <option value="CLOSED">CLOSED</option>
+                  <option value="CANCELLED">CANCELLED</option>
+                </select>
+              </div>
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="block text-slate-400 mb-1">Stake ($)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editingOrder.stake}
+                    onChange={(e) => setEditingOrder((p: any) => ({ ...p, stake: e.target.value }))}
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Exit Price</label>
+                  <input
+                    type="number"
+                    step="any"
+                    value={editingOrder.exit_price}
+                    onChange={(e) => setEditingOrder((p: any) => ({ ...p, exit_price: e.target.value }))}
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">P/L ($)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    value={editingOrder.pnl}
+                    onChange={(e) => setEditingOrder((p: any) => ({ ...p, pnl: e.target.value }))}
+                    className="w-full px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
+                  />
+                </div>
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setEditingOrder(null)} className="px-4 py-2 rounded-xl bg-white/5 cursor-pointer">
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busyAction === 'edit-order-modal'}
+                  className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
+                >
+                  {busyAction === 'edit-order-modal' ? 'Saving...' : 'Save Order & Sync Balance'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
 
       {/* Sensitive Admin Operation Re-Authentication Modal */}
       {reauthOpen && (

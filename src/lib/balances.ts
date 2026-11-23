@@ -8,27 +8,41 @@ export function computeLiveOrderMetrics(
   const storedCur = Number(order.current_price || entry || 0);
   const storedPnl = Number(order.pnl || 0);
   const symTick = ticks[order.symbol];
-  const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(order.contract_type || '').toUpperCase());
+  const ct = String(order.contract_type || '').toUpperCase();
+  const isMult = ['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(ct);
 
-  if (order.status === 'OPEN' && symTick && Number.isFinite(symTick.quote) && symTick.quote > 0 && entry > 0) {
-    if (isMult) {
-      const isUp = String(order.contract_type || '').toUpperCase() === 'MULTUP' || String(order.side || '').toUpperCase() === 'BUY';
-      const pctDiff = (symTick.quote - entry) / entry;
-      const directional = isUp ? pctDiff : -pctDiff;
-      const stake = Number(order.stake || 0);
-      const mult = Number(order.multiplier || 100);
-      const livePnl = Number(Math.max(-stake, directional * stake * mult).toFixed(2));
+  if (order.status === 'OPEN') {
+    if (ct === 'ACCU') {
+      const growthRate = Math.min(0.05, Math.max(0.01, Number(order.barrier || 0.02)));
+      const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / 1500));
+      const accrued = Number((Number(order.stake || 0) * (Math.pow(1 + growthRate, Math.min(45, elapsedTicks)) - 1)).toFixed(2));
       return {
-        currentPrice: symTick.quote,
-        pnl: livePnl,
-        isLive: symTick.source === 'deriv_ws' || symTick.source === 'sync_stream',
+        currentPrice: symTick && Number.isFinite(symTick.quote) ? symTick.quote : storedCur,
+        pnl: Math.max(storedPnl, accrued),
+        isLive: Boolean(symTick),
       };
     }
-    return {
-      currentPrice: symTick.quote,
-      pnl: storedPnl,
-      isLive: symTick.source === 'deriv_ws' || symTick.source === 'sync_stream',
-    };
+
+    if (symTick && Number.isFinite(symTick.quote) && symTick.quote > 0 && entry > 0) {
+      if (isMult) {
+        const isUp = ct === 'MULTUP' || String(order.side || '').toUpperCase() === 'BUY';
+        const pctDiff = (symTick.quote - entry) / entry;
+        const directional = isUp ? pctDiff : -pctDiff;
+        const stake = Number(order.stake || 0);
+        const mult = Number(order.multiplier || 100);
+        const livePnl = Number(Math.max(-stake, directional * stake * mult).toFixed(2));
+        return {
+          currentPrice: symTick.quote,
+          pnl: livePnl,
+          isLive: symTick.source === 'deriv_ws' || symTick.source === 'live_pulse',
+        };
+      }
+      return {
+        currentPrice: symTick.quote,
+        pnl: storedPnl,
+        isLive: symTick.source === 'deriv_ws' || symTick.source === 'live_pulse',
+      };
+    }
   }
 
   return {

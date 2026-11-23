@@ -21,11 +21,9 @@ import {
   verifyAdminReauthToken,
   type AuthRequest,
 } from '../middleware/auth.ts';
-import { derivWs, derivRestRequest, getActiveDerivAppId, checkDerivRestHealth } from '../deriv-client.ts';
+import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
 import { isVirtualDerivAccount } from './deriv.ts';
-import { closeOrderById } from '../trade-execution.ts';
-import { emergencyKillAllBots, getAllActiveBotSessions } from '../bot-engine-service.ts';
-import { independentFeed } from '../independent-feed.ts';
+import { closeOrderById, creditSettledPayoutToUser } from '../trade-execution.ts';
 
 const router = Router();
 
@@ -178,9 +176,8 @@ router.post('/admin/reauth', requireDb, requireAdmin, async (req: AuthRequest, r
 });
 
 router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
-  const [database, derivRest, loginAttempts, errorLogs, securityLogs] = await Promise.all([
+  const [database, loginAttempts, errorLogs, securityLogs] = await Promise.all([
     checkDatabaseHealth(),
-    checkDerivRestHealth().catch(() => ({ ok: false, status: 0, latencyMs: 0 })),
     query('SELECT id, email, ip_address, success, reason, created_at FROM admin_login_attempts ORDER BY id DESC LIMIT 50'),
     query('SELECT id, source, severity, message, details_json, created_at FROM system_error_logs ORDER BY id DESC LIMIT 50'),
     query('SELECT id, user_id, event_type, ip_address, details_json, created_at FROM security_logs ORDER BY id DESC LIMIT 50'),
@@ -188,11 +185,6 @@ router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
   res.json({
     database,
     deriv: derivWs.getDiagnostics(),
-    derivRest,
-    derivDocs: {
-      llmsTxt: 'https://developers.deriv.com/llms.txt',
-      mcp: 'https://mcp-api.deriv.com/mcp',
-    },
     environment: {
       nodeEnv: config.nodeEnv,
       geminiConfigured: Boolean(process.env.GEMINI_API_KEY),
@@ -244,7 +236,8 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
 
   const users = await query(
     `SELECT id, email, full_name, phone, country, role, status, email_verified, preferred_currency,
-            virtual_workspace_balance, real_wallets_json, deriv_client_id, created_at
+            virtual_workspace_balance, demo_wallets_json, real_wallets_json,
+            exchange_balances_json, real_exchange_balances_json, deriv_nickname, deriv_client_id, created_at
      FROM users
      WHERE role NOT IN ('owner', 'admin')
      ORDER BY id DESC LIMIT 200`
@@ -268,10 +261,31 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
      WHERE u.role NOT IN ('owner', 'admin')
      ORDER BY vo.id DESC LIMIT 200`
   );
+  const rawInstruments = await query(
+    `SELECT m.*, c.price, c.change_pct
+     FROM market_instruments m
+     LEFT JOIN market_data_cache c ON m.symbol = c.symbol
+     ORDER BY m.category, m.display_name`
+  );
+  const latestTicks = derivWs.getAllLatestTicks();
+  const instruments = rawInstruments.map((inst: any) => ({
+    ...inst,
+    price: latestTicks[inst.symbol]?.quote ?? inst.price ?? 0,
+    change_pct: derivWs.getChangePct(inst.symbol),
+  }));
   const auditLogs = await query('SELECT * FROM administrator_audit_logs ORDER BY id DESC LIMIT 100');
   const emailLogs = await query('SELECT * FROM email_logs ORDER BY id DESC LIMIT 100');
   const branding = await getSetting('branding', {});
   const global = await getSetting('global', {});
+  const commissions = await getSetting('commissions', {});
+  const tradingEngine = await getSetting('trading_engine', {
+    botWinRatePct: 76,
+    analyserWinRatePct: 82,
+    accuWinRatePct: 78,
+    manualOptionsWinRatePct: 68,
+    siteSettlementForLockedReal: true,
+    liveMicroTickEnabled: true,
+  });
   const announcements = await getSetting<{ items?: any[] }>('announcements', { items: [] });
 
   res.json({
@@ -292,10 +306,13 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
     connectedAccounts,
     strategies,
     orders,
+    instruments,
     auditLogs,
     emailLogs,
     branding,
     global,
+    commissions,
+    tradingEngine,
     announcements: announcements.items || [],
   });
 });
@@ -347,6 +364,39 @@ router.put('/admin/settings/global', requireDb, requireAdmin, async (req: AuthRe
   await setSetting('global', updated);
   await logAdminAction(req.user!.id, 'update_global_settings', 'application_settings', 'global', updated);
   res.json({ global: updated });
+});
+
+router.get('/admin/settings/trading-engine', requireDb, requireAdmin, async (_req, res) => {
+  const tradingEngine = await getSetting('trading_engine', {
+    botWinRatePct: 76,
+    analyserWinRatePct: 82,
+    accuWinRatePct: 78,
+    manualOptionsWinRatePct: 68,
+    siteSettlementForLockedReal: true,
+    liveMicroTickEnabled: true,
+  });
+  res.json({ tradingEngine });
+});
+
+router.put('/admin/settings/trading-engine', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  const b = req.body || {};
+  const current = await getSetting<any>('trading_engine', {});
+  const clamp = (v: unknown, def: number) => Math.max(5, Math.min(96, Number(v ?? def)));
+  const updated = {
+    botWinRatePct: clamp(b.botWinRatePct, current.botWinRatePct ?? 76),
+    analyserWinRatePct: clamp(b.analyserWinRatePct, current.analyserWinRatePct ?? 82),
+    accuWinRatePct: clamp(b.accuWinRatePct, current.accuWinRatePct ?? 78),
+    manualOptionsWinRatePct: clamp(b.manualOptionsWinRatePct, current.manualOptionsWinRatePct ?? 68),
+    siteSettlementForLockedReal:
+      b.siteSettlementForLockedReal !== undefined
+        ? Boolean(b.siteSettlementForLockedReal)
+        : current.siteSettlementForLockedReal ?? true,
+    liveMicroTickEnabled:
+      b.liveMicroTickEnabled !== undefined ? Boolean(b.liveMicroTickEnabled) : current.liveMicroTickEnabled ?? true,
+  };
+  await setSetting('trading_engine', updated);
+  await logAdminAction(req.user!.id, 'update_trading_engine', 'application_settings', 'trading_engine', updated);
+  res.json({ tradingEngine: updated });
 });
 
 // Deriv Commissions & App Markup — powered by real Deriv Partners REST GET /applications/v1/markup-statistics
@@ -556,20 +606,105 @@ router.post('/admin/users', requireDb, requireAdmin, async (req: AuthRequest, re
 
 router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
-  const { full_name, phone, country, role, status, virtual_workspace_balance } = req.body || {};
+  const {
+    email,
+    full_name,
+    phone,
+    country,
+    role,
+    status,
+    password,
+    virtual_workspace_balance,
+    demo_wallets,
+    real_wallets,
+    exchange_balances,
+    real_exchange_balances,
+  } = req.body || {};
+
+  const touchesSensitive =
+    password !== undefined ||
+    virtual_workspace_balance !== undefined ||
+    demo_wallets !== undefined ||
+    real_wallets !== undefined ||
+    exchange_balances !== undefined ||
+    real_exchange_balances !== undefined ||
+    status === 'suspended' ||
+    status === 'closed';
+
+  if (touchesSensitive && !checkReauthHeader(req, res)) return;
+
+  const existing = await queryOne<any>('SELECT * FROM users WHERE id = $1', [id]);
+  if (!existing) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  let passwordHash: string | null = null;
+  if (password && String(password).trim().length >= 6) {
+    passwordHash = await hashPasswordArgon2id(String(password).trim());
+  }
+
+  const nextEmail = email ? String(email).trim().toLowerCase() : null;
+  const nextDemoBal =
+    virtual_workspace_balance !== undefined ? Math.max(0, Number(virtual_workspace_balance)) : null;
+
   const user = await queryOne<any>(
     `UPDATE users SET
-      full_name = COALESCE($1, full_name),
-      phone = COALESCE($2, phone),
-      country = COALESCE($3, country),
-      role = COALESCE($4, role),
-      status = COALESCE($5, status),
-      virtual_workspace_balance = COALESCE($6, virtual_workspace_balance),
+      email = COALESCE($1, email),
+      full_name = COALESCE($2, full_name),
+      phone = COALESCE($3, phone),
+      country = COALESCE($4, country),
+      role = COALESCE($5, role),
+      status = COALESCE($6, status),
+      password_hash = COALESCE($7, password_hash),
+      virtual_workspace_balance = COALESCE($8, virtual_workspace_balance),
+      demo_wallets_json = COALESCE($9, demo_wallets_json),
+      real_wallets_json = COALESCE($10, real_wallets_json),
+      exchange_balances_json = COALESCE($11, exchange_balances_json),
+      real_exchange_balances_json = COALESCE($12, real_exchange_balances_json),
       updated_at = NOW()
-     WHERE id = $7
-     RETURNING id, email, full_name, phone, country, role, status, email_verified, preferred_currency, virtual_workspace_balance, deriv_client_id, created_at`,
-    [full_name ?? null, phone ?? null, country ?? null, role ?? null, status ?? null, virtual_workspace_balance ?? null, id]
+     WHERE id = $13
+     RETURNING id, email, full_name, phone, country, role, status, email_verified, preferred_currency,
+               virtual_workspace_balance, demo_wallets_json, real_wallets_json,
+               exchange_balances_json, real_exchange_balances_json, deriv_client_id, created_at`,
+    [
+      nextEmail,
+      full_name ?? null,
+      phone ?? null,
+      country ?? null,
+      role ?? null,
+      status ?? null,
+      passwordHash,
+      nextDemoBal,
+      demo_wallets ? JSON.stringify(demo_wallets) : null,
+      real_wallets ? JSON.stringify(real_wallets) : null,
+      exchange_balances ? JSON.stringify(exchange_balances) : null,
+      real_exchange_balances ? JSON.stringify(real_exchange_balances) : null,
+      id,
+    ]
   );
+
+  if (nextDemoBal !== null) {
+    await execute(
+      `UPDATE connected_accounts
+       SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+       WHERE user_id = $2 AND is_virtual = TRUE`,
+      [nextDemoBal, id]
+    );
+    derivWs.emitUserEvent(id, 'balance_updated', { virtual_workspace_balance: nextDemoBal });
+  }
+
+  if (real_wallets && typeof real_wallets === 'object') {
+    const rwOptions = Number((real_wallets as any).options ?? 0);
+    await execute(
+      `UPDATE connected_accounts
+       SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+       WHERE user_id = $2 AND is_virtual = FALSE AND platform = 'deriv'`,
+      [rwOptions, id]
+    );
+    derivWs.emitUserEvent(id, 'balance_updated', { real_wallets, realWallets: real_wallets });
+  }
+
   await logAdminAction(req.user!.id, 'update_user', 'users', String(id));
   res.json({ user });
 });
@@ -966,7 +1101,145 @@ router.delete('/admin/strategies/:id', requireDb, requireAdmin, async (req: Auth
   res.json({ ok: true });
 });
 
+// Instruments Management
+router.get('/admin/instruments', requireDb, requireAdmin, async (_req, res) => {
+  const rows = await query(
+    `SELECT m.*, c.price, c.change_pct
+     FROM market_instruments m
+     LEFT JOIN market_data_cache c ON m.symbol = c.symbol
+     ORDER BY m.category, m.display_name`
+  );
+  const ticks = derivWs.getAllLatestTicks();
+  res.json({
+    instruments: rows.map((r: any) => ({
+      ...r,
+      price: ticks[r.symbol]?.quote ?? r.price ?? 0,
+      change_pct: derivWs.getChangePct(r.symbol),
+    })),
+  });
+});
+
+router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  const symbol = String(req.params.symbol || '').trim();
+  const { display_name, price, spread, min_stake, max_stake, is_active } = req.body || {};
+  const inst = await queryOne<any>(
+    `UPDATE market_instruments SET
+      display_name = COALESCE($1, display_name),
+      spread = COALESCE($2, spread),
+      min_stake = COALESCE($3, min_stake),
+      max_stake = COALESCE($4, max_stake),
+      is_active = COALESCE($5, is_active),
+      updated_at = NOW()
+     WHERE symbol = $6
+     RETURNING *`,
+    [
+      display_name ?? null,
+      spread !== undefined ? Number(spread) : null,
+      min_stake !== undefined ? Number(min_stake) : null,
+      max_stake !== undefined ? Number(max_stake) : null,
+      is_active !== undefined ? Boolean(is_active) : null,
+      symbol,
+    ]
+  );
+  if (!inst) {
+    res.status(404).json({ error: 'Instrument not found' });
+    return;
+  }
+  if (price !== undefined && Number.isFinite(Number(price)) && Number(price) > 0) {
+    const p = Number(price);
+    await execute(
+      'UPDATE market_data_cache SET price = $1, updated_at = NOW() WHERE symbol = $2',
+      [p, symbol]
+    );
+    derivWs.setInstrumentSpotOverride(symbol, p);
+  }
+  await logAdminAction(req.user!.id, 'update_instrument', 'market_instruments', symbol, req.body || {});
+  res.json({ instrument: { ...inst, price: derivWs.getLatestTick(symbol)?.quote ?? Number(price || 0) } });
+});
+
 // Orders Management
+router.patch('/admin/orders/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  if (!checkReauthHeader(req, res)) return;
+  const id = Number(req.params.id);
+  const { status, exit_price, pnl, stake } = req.body || {};
+  const existing = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1', [id]);
+  if (!existing) {
+    res.status(404).json({ error: 'Order not found' });
+    return;
+  }
+
+  const nextStatus = status ? String(status).toUpperCase() : existing.status;
+  const nextPnl = pnl !== undefined ? Number(pnl) : Number(existing.pnl || 0);
+  const nextStake = stake !== undefined ? Math.max(0.1, Number(stake)) : Number(existing.stake);
+  const nextExitPrice =
+    exit_price !== undefined ? Number(exit_price) : existing.exit_price ?? existing.current_price;
+
+  // Compute balance adjustment when transitioning OPEN->CLOSED or updating CLOSED pnl
+  let creditDelta = 0;
+  if (existing.status === 'OPEN' && nextStatus === 'CLOSED') {
+    creditDelta = Math.max(0, Number((nextStake + nextPnl).toFixed(2)));
+  } else if (existing.status === 'CLOSED' && nextStatus === 'CLOSED' && pnl !== undefined) {
+    creditDelta = Number((nextPnl - Number(existing.pnl || 0)).toFixed(2));
+  }
+
+  const updated = await queryOne<any>(
+    `UPDATE virtual_orders SET
+      status = $1,
+      exit_price = $2,
+      current_price = $2,
+      pnl = $3,
+      stake = $4,
+      closed_at = CASE WHEN $1 = 'CLOSED' AND closed_at IS NULL THEN NOW() ELSE closed_at END
+     WHERE id = $5
+     RETURNING *`,
+    [nextStatus, nextExitPrice, nextPnl, nextStake, id]
+  );
+
+  if (creditDelta > 0) {
+    await creditSettledPayoutToUser(
+      existing.user_id,
+      existing.account_mode || 'demo',
+      creditDelta,
+      existing.connected_account_id
+    );
+  } else if (creditDelta < 0) {
+    // Debit difference if admin lowered closed PnL
+    const absDebit = Math.abs(creditDelta);
+    if (existing.account_mode === 'real') {
+      const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
+        existing.user_id,
+      ]);
+      const rw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      rw.options = Math.max(0, Number((Number(rw.options || 0) - absDebit).toFixed(2)));
+      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(rw),
+        existing.user_id,
+      ]);
+      derivWs.emitUserEvent(existing.user_id, 'balance_updated', { real_wallets: rw, realWallets: rw });
+    } else {
+      await execute(
+        'UPDATE users SET virtual_workspace_balance = GREATEST(0, ROUND((virtual_workspace_balance - $1)::numeric, 2)::double precision), updated_at = NOW() WHERE id = $2',
+        [absDebit, existing.user_id]
+      );
+      const u = await queryOne<{ virtual_workspace_balance: number }>(
+        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+        [existing.user_id]
+      );
+      if (u) derivWs.emitUserEvent(existing.user_id, 'balance_updated', { virtual_workspace_balance: u.virtual_workspace_balance });
+    }
+  }
+
+  derivWs.emitUserEvent(existing.user_id, nextStatus === 'CLOSED' ? 'order_closed' : 'order_updated', updated);
+  await logAdminAction(req.user!.id, 'edit_order', 'virtual_orders', String(id), { nextStatus, nextPnl });
+  res.json({ order: updated });
+});
+
 router.post('/admin/orders/:id/close', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   try {
     const order = await closeOrderById(Number(req.params.id), undefined, true);
@@ -1025,30 +1298,6 @@ router.delete('/admin/announcements/:id', requireDb, requireAdmin, async (req: A
   await setSetting('announcements', updated);
   await logAdminAction(req.user!.id, 'delete_announcement', 'application_settings', String(req.params.id));
   res.json({ announcements: updated.items });
-});
-
-// Ecosystem Health & Global Bot Kill Switch
-router.get('/admin/ecosystem-health', requireDb, requireAdmin, async (_req, res) => {
-  const [botRuns, mt5Bridges, analyserSignals] = await Promise.all([
-    query('SELECT * FROM bot_runs ORDER BY id DESC LIMIT 60').catch(() => []),
-    query(
-      'SELECT id, user_id, bridge_name, account_login, broker_name, status, last_heartbeat_at, account_balance, account_equity FROM mt5_bridge_connections ORDER BY id DESC LIMIT 50'
-    ).catch(() => []),
-    query('SELECT * FROM analyser_signals ORDER BY id DESC LIMIT 40').catch(() => []),
-  ]);
-  res.json({
-    activeBots: getAllActiveBotSessions(),
-    botRuns,
-    mt5Bridges,
-    analyserSignals,
-    analyserHealth: independentFeed.getHealthStatus(),
-  });
-});
-
-router.post('/admin/bots/kill-all', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  const result = await emergencyKillAllBots(`Global Kill Switch Activated by Admin (${req.user!.email})`);
-  await logAdminAction(req.user!.id, 'global_bot_kill_switch', 'bot_runs', 'all', result);
-  res.json({ ok: true, ...result });
 });
 
 export default router;

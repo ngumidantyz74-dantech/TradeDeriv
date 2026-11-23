@@ -1,17 +1,27 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useMemo } from 'react';
 import { RefreshCw, Plus, Send, ArrowUpDown, ChevronRight, Search, X, ExternalLink } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
-import type { ExchangePair } from '../types';
 import { SparklineSvg } from '../components/SparklineSvg';
 
 export const ExchangeHub: React.FC = () => {
-  const { user, accounts, accountMode, setAccountMode, refreshAll, showToast, setActiveTab, hideBalances, publicSettings } = useApp();
+  const {
+    user,
+    accounts,
+    accountMode,
+    setAccountMode,
+    exchangePairs,
+    refreshAll,
+    showToast,
+    setActiveTab,
+    hideBalances,
+    publicSettings,
+  } = useApp();
   const partnerLink = publicSettings.partner?.referralLink || 'https://t.deriv.link?t=FSDRTFVTSKPA';
   const partnerCode = publicSettings.partner?.referralCode || 'VNMH2VHBRTFN';
   const partnerTier = Number(publicSettings.partner?.affiliateTierRate ?? 30);
-  const [pairs, setPairs] = useState<ExchangePair[]>([]);
+
   const [filter, setFilter] = useState<'trending' | 'gainers' | 'losers'>('trending');
   const [search, setSearch] = useState('');
   const [baseCoin, setBaseCoin] = useState<'ETH' | 'BTC' | 'USDC' | 'USDT'>('ETH');
@@ -24,20 +34,21 @@ export const ExchangeHub: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
 
-  const loadPairs = async (f = filter, q = search) => {
-    try {
-      const res = await apiFetch<{ pairs: ExchangePair[] }>(
-        `/api/exchange/pairs?filter=${f}&q=${encodeURIComponent(q)}`
-      );
-      setPairs(res.pairs || []);
-    } catch {
-      // ignore
+  const pairs = useMemo(() => {
+    let list = [...exchangePairs];
+    const q = search.trim().toLowerCase();
+    if (q) {
+      list = list.filter((i) => i.pair.toLowerCase().includes(q) || i.base.toLowerCase().includes(q));
     }
-  };
-
-  useEffect(() => {
-    loadPairs(filter, search);
-  }, [filter, search]);
+    if (filter === 'gainers') {
+      list.sort((a, b) => b.change24h - a.change24h);
+    } else if (filter === 'losers') {
+      list.sort((a, b) => a.change24h - b.change24h);
+    } else {
+      list.sort((a, b) => b.volume24hM - a.volume24hM);
+    }
+    return list;
+  }, [exchangePairs, filter, search]);
 
   const spotBalances =
     accountMode === 'real'
@@ -45,16 +56,17 @@ export const ExchangeHub: React.FC = () => {
       : user?.exchange_balances || { USDT: Number(user?.demo_wallets?.exchange_usdt ?? 0), USDC: 0, BTC: 0, ETH: 0 };
   const { exchangeUsdt: totalUsdt } = getCanonicalBalances(user, accounts, accountMode, null);
 
-  const activePairObj = pairs.find((p) => p.pair === selectedPair) || {
-    pair: selectedPair,
-    base: selectedPair.split('/')[0] || 'LTC',
-    quote: selectedPair.split('/')[1] || 'ETH',
-    price: 0.02454,
-    change24h: -1.2,
-    volume24hM: 28.4,
-    color: '#345D9D',
-    sparkline: [0.024, 0.0245, 0.0242, 0.02454],
-  };
+  const activePairObj = pairs.find((p) => p.pair === selectedPair) ||
+    exchangePairs.find((p) => p.pair === selectedPair) || {
+      pair: selectedPair,
+      base: selectedPair.split('/')[0] || 'LTC',
+      quote: selectedPair.split('/')[1] || 'ETH',
+      price: 0.02454,
+      change24h: -1.2,
+      volume24hM: 28.4,
+      color: '#345D9D',
+      sparkline: [0.024, 0.0245, 0.0242, 0.02454],
+    };
 
   const quoteBalance = Number(spotBalances[activePairObj.quote] || 0);
   const amtNum = Number(amount || 0);
@@ -338,9 +350,9 @@ export const ExchangeHub: React.FC = () => {
           </div>
         </section>
 
-        {/* Markets Table */}
+        {/* Markets Table — Live Ticking via WS exchange_ticks */}
         <section className="lg:col-span-7 pb-6">
-          <h2 className="font-display text-lg font-bold mb-3.5">Markets</h2>
+          <h2 className="font-display text-lg font-bold mb-3.5">Markets (38 Live Pairs)</h2>
 
           <div className="relative mb-3.5">
             <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
@@ -377,7 +389,7 @@ export const ExchangeHub: React.FC = () => {
               <div className="col-span-3 text-right">24H price</div>
             </div>
 
-            {pairs.slice(0, 15).map((p) => {
+            {pairs.map((p) => {
               const pos = p.change24h >= 0;
               return (
                 <button

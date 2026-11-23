@@ -9,6 +9,7 @@ import { OptionsHub } from './pages/OptionsHub';
 import { PortfolioHub } from './pages/PortfolioHub';
 import { ProfileHub } from './pages/ProfileHub';
 import { MT5TradingView } from './components/mt5/MT5TradingView';
+import { SmartTraderPage } from './pages/SmartTraderPage';
 import { BotBuilderPage } from './pages/BotBuilderPage';
 import { TradingBotsPage } from './pages/TradingBotsPage';
 import { AnalysisToolPage } from './pages/AnalysisToolPage';
@@ -29,7 +30,7 @@ const MainRouter: React.FC = () => {
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
     const p = window.location.pathname.replace(/^\/+|\/+$/g, '');
     const h = window.location.hash.replace(/^#\/?|\/+$/g, '');
-    return p === envSlug || h === envSlug || p === 'pf-ops-9482' || h === 'pf-ops-9482';
+    return p === envSlug || h === envSlug || p === 'pf-ops-9482' || h === 'pf-ops-9482' || p === 'admin' || h === 'admin';
   });
 
   useEffect(() => {
@@ -42,7 +43,9 @@ const MainRouter: React.FC = () => {
           p === envSlug ||
           h === envSlug ||
           p === 'pf-ops-9482' ||
-          h === 'pf-ops-9482'
+          h === 'pf-ops-9482' ||
+          p === 'admin' ||
+          h === 'admin'
       );
     };
     checkRoute();
@@ -103,6 +106,8 @@ const MainRouter: React.FC = () => {
         return <ProfileHub />;
       case 'mt5-tv':
         return <MT5TradingView />;
+      case 'smart-trader':
+        return <SmartTraderPage />;
       case 'bot-builder':
         return <BotBuilderPage />;
       case 'trading-bots':

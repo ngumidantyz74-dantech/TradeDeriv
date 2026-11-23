@@ -2,7 +2,6 @@ import { Pool, type QueryResultRow } from 'pg';
 import type { Request, Response, NextFunction } from 'express';
 import { config } from './config.ts';
 import { CURATED_DERIV_INSTRUMENTS, SEEDED_BOT_STRATEGIES } from './catalog.ts';
-import { createInMemoryPool, inMemoryStore } from './in-memory-db.ts';
 
 function isNonLocalDatabase(connectionString: string): boolean {
   if (!connectionString) return false;
@@ -35,43 +34,21 @@ function sanitizeConnectionStringForPg(connectionString: string): string {
 export const databaseConfigured = Boolean(config.databaseUrl);
 const nonLocalDb = isNonLocalDatabase(config.databaseUrl);
 
-const realPgPool: Pool | null = databaseConfigured
+export const pool: Pool | null = databaseConfigured
   ? new Pool({
       connectionString: nonLocalDb ? sanitizeConnectionStringForPg(config.databaseUrl) : config.databaseUrl,
       ssl: nonLocalDb ? { rejectUnauthorized: false } : undefined,
-      connectionTimeoutMillis: 6000,
+      connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 30000,
       max: 15,
     })
   : null;
 
-if (realPgPool) {
-  realPgPool.on('error', (err) => {
+if (pool) {
+  pool.on('error', (err) => {
     console.error('PostgreSQL pool idle client error:', err.message);
   });
 }
-
-let usingInMemoryFallback = !databaseConfigured;
-const mockPool = createInMemoryPool() as unknown as Pool;
-
-if (usingInMemoryFallback) {
-  inMemoryStore.initSeed();
-  console.warn('[AI Studio] DATABASE_URL not set — using in-memory database store');
-}
-
-function activePool(): Pool {
-  if (usingInMemoryFallback || !realPgPool) {
-    inMemoryStore.initSeed();
-    return mockPool;
-  }
-  return realPgPool;
-}
-
-export const pool: Pool = {
-  query: ((...args: any[]) => (activePool().query as any)(...args)) as Pool['query'],
-  connect: (() => activePool().connect()) as Pool['connect'],
-  on: (() => {}) as unknown as Pool['on'],
-} as Pool;
 
 let schemaPromise: Promise<void> | null = null;
 const settingsCache = new Map<string, unknown>();
@@ -84,7 +61,10 @@ export function getCachedSetting<T>(key: string, fallback: T): T {
 }
 
 export async function query<T extends QueryResultRow = any>(sql: string, params: unknown[] = []): Promise<T[]> {
-  const res = await activePool().query<T>(sql, params);
+  if (!pool) {
+    throw new Error('DATABASE_URL is not configured');
+  }
+  const res = await pool.query<T>(sql, params);
   return res.rows;
 }
 
@@ -94,7 +74,10 @@ export async function queryOne<T extends QueryResultRow = any>(sql: string, para
 }
 
 export async function execute(sql: string, params: unknown[] = []): Promise<{ rowCount: number }> {
-  const res = await activePool().query(sql, params);
+  if (!pool) {
+    throw new Error('DATABASE_URL is not configured');
+  }
+  const res = await pool.query(sql, params);
   return { rowCount: res.rowCount ?? 0 };
 }
 
@@ -408,159 +391,6 @@ async function runSchemaAndSeed(): Promise<void> {
         chart_indicators_json TEXT NOT NULL DEFAULT '{}',
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
-
-      CREATE TABLE IF NOT EXISTS bot_definitions (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        description TEXT NOT NULL DEFAULT '',
-        category TEXT NOT NULL DEFAULT 'Custom',
-        ast_json TEXT NOT NULL DEFAULT '{}',
-        xml_source TEXT NOT NULL DEFAULT '',
-        symbol TEXT NOT NULL DEFAULT '1HZ100V',
-        timeframe TEXT NOT NULL DEFAULT '1m',
-        contract_type TEXT NOT NULL DEFAULT 'DIGITOVER',
-        config_json TEXT NOT NULL DEFAULT '{}',
-        risk_json TEXT NOT NULL DEFAULT '{}',
-        demo_tested BOOLEAN NOT NULL DEFAULT FALSE,
-        is_template BOOLEAN NOT NULL DEFAULT FALSE,
-        visibility TEXT NOT NULL DEFAULT 'private',
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS bot_runs (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        bot_definition_id INTEGER REFERENCES bot_definitions(id) ON DELETE SET NULL,
-        strategy_name TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'running',
-        execution_mode TEXT NOT NULL DEFAULT 'virtual',
-        account_mode TEXT NOT NULL DEFAULT 'demo',
-        symbol TEXT NOT NULL DEFAULT '1HZ100V',
-        trades_count INTEGER NOT NULL DEFAULT 0,
-        wins INTEGER NOT NULL DEFAULT 0,
-        losses INTEGER NOT NULL DEFAULT 0,
-        realized_pnl DOUBLE PRECISION NOT NULL DEFAULT 0,
-        current_stake DOUBLE PRECISION NOT NULL DEFAULT 1,
-        martingale_step INTEGER NOT NULL DEFAULT 0,
-        max_daily_loss DOUBLE PRECISION NOT NULL DEFAULT 50,
-        take_profit DOUBLE PRECISION NOT NULL DEFAULT 25,
-        stop_loss DOUBLE PRECISION NOT NULL DEFAULT 50,
-        cooldown_until TIMESTAMPTZ,
-        kill_switched BOOLEAN NOT NULL DEFAULT FALSE,
-        last_signal TEXT NOT NULL DEFAULT '',
-        started_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        paused_at TIMESTAMPTZ,
-        stopped_at TIMESTAMPTZ,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS bot_execution_logs (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        bot_run_id INTEGER REFERENCES bot_runs(id) ON DELETE CASCADE,
-        level TEXT NOT NULL DEFAULT 'info',
-        event_type TEXT NOT NULL DEFAULT 'tick',
-        message TEXT NOT NULL,
-        details_json TEXT NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS analyser_signals (
-        id SERIAL PRIMARY KEY,
-        instrument TEXT NOT NULL,
-        display_name TEXT NOT NULL DEFAULT '',
-        timeframe TEXT NOT NULL DEFAULT 'M15',
-        direction TEXT NOT NULL DEFAULT 'WAIT',
-        setup_type TEXT NOT NULL DEFAULT '',
-        strategy_name TEXT NOT NULL DEFAULT '',
-        entry_price DOUBLE PRECISION NOT NULL DEFAULT 0,
-        entry_zone_low DOUBLE PRECISION NOT NULL DEFAULT 0,
-        entry_zone_high DOUBLE PRECISION NOT NULL DEFAULT 0,
-        stop_loss DOUBLE PRECISION NOT NULL DEFAULT 0,
-        tp1 DOUBLE PRECISION NOT NULL DEFAULT 0,
-        tp2 DOUBLE PRECISION NOT NULL DEFAULT 0,
-        tp3 DOUBLE PRECISION NOT NULL DEFAULT 0,
-        risk_reward DOUBLE PRECISION NOT NULL DEFAULT 0,
-        spread DOUBLE PRECISION NOT NULL DEFAULT 0,
-        atr DOUBLE PRECISION NOT NULL DEFAULT 0,
-        quality_score INTEGER NOT NULL DEFAULT 0,
-        lifecycle_status TEXT NOT NULL DEFAULT 'Forming',
-        feed_source TEXT NOT NULL DEFAULT '',
-        feed_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        invalidation_reason TEXT NOT NULL DEFAULT '',
-        reasons_json TEXT NOT NULL DEFAULT '[]',
-        snapshot_json TEXT NOT NULL DEFAULT '{}',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS mt5_bridge_connections (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        bridge_name TEXT NOT NULL DEFAULT 'MT5 EA Bridge',
-        account_login TEXT NOT NULL DEFAULT '',
-        server_name TEXT NOT NULL DEFAULT '',
-        broker_name TEXT NOT NULL DEFAULT '',
-        api_key_hash TEXT NOT NULL,
-        encrypted_secret TEXT NOT NULL DEFAULT '',
-        status TEXT NOT NULL DEFAULT 'pending',
-        last_heartbeat_at TIMESTAMPTZ,
-        account_balance DOUBLE PRECISION NOT NULL DEFAULT 0,
-        account_equity DOUBLE PRECISION NOT NULL DEFAULT 0,
-        margin_free DOUBLE PRECISION NOT NULL DEFAULT 0,
-        symbols_json TEXT NOT NULL DEFAULT '["XAUUSD","EURUSD","GBPUSD","USDJPY"]',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS mt5_bridge_orders (
-        id SERIAL PRIMARY KEY,
-        bridge_id INTEGER REFERENCES mt5_bridge_connections(id) ON DELETE SET NULL,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        signal_id INTEGER REFERENCES analyser_signals(id) ON DELETE SET NULL,
-        symbol TEXT NOT NULL,
-        side TEXT NOT NULL,
-        volume_lots DOUBLE PRECISION NOT NULL DEFAULT 0.01,
-        requested_price DOUBLE PRECISION NOT NULL DEFAULT 0,
-        fill_price DOUBLE PRECISION,
-        stop_loss DOUBLE PRECISION,
-        take_profit DOUBLE PRECISION,
-        status TEXT NOT NULL DEFAULT 'queued',
-        execution_mode TEXT NOT NULL DEFAULT 'signal-only',
-        external_ticket TEXT DEFAULT '',
-        error_message TEXT DEFAULT '',
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS market_feed_snapshots (
-        id SERIAL PRIMARY KEY,
-        provider_name TEXT NOT NULL,
-        instrument TEXT NOT NULL,
-        bid DOUBLE PRECISION NOT NULL,
-        ask DOUBLE PRECISION NOT NULL,
-        spread DOUBLE PRECISION NOT NULL DEFAULT 0,
-        mid DOUBLE PRECISION NOT NULL,
-        raw_timestamp TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        is_stale BOOLEAN NOT NULL DEFAULT FALSE,
-        metadata_json TEXT NOT NULL DEFAULT '{}',
-        recorded_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
-      );
-
-      CREATE TABLE IF NOT EXISTS chart_layouts (
-        id SERIAL PRIMARY KEY,
-        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-        name TEXT NOT NULL,
-        symbol TEXT NOT NULL DEFAULT '1HZ100V',
-        timeframe INTEGER NOT NULL DEFAULT 900,
-        layout_json TEXT NOT NULL DEFAULT '{}',
-        is_default BOOLEAN NOT NULL DEFAULT FALSE,
-        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        UNIQUE(user_id, name)
-      );
     `);
 
     // Idempotent column migrations for pre-existing tables
@@ -583,7 +413,6 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS account_mode TEXT DEFAULT 'demo';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
       ALTER TABLE cashier_transactions ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo';
-      ALTER TABLE cashier_transactions ADD COLUMN IF NOT EXISTS idempotency_key TEXT DEFAULT '';
     `);
 
     // Auto-heal misclassified DOT.../VR... demo Deriv accounts from earlier OAuth saves
@@ -694,10 +523,13 @@ async function runSchemaAndSeed(): Promise<void> {
       [
         'branding',
         {
-          appName: 'TradeDeriv',
-          supportEmail: 'support@tradederiv.app',
+          appName: 'DERIV',
+          supportEmail: 'support@deriv.com',
           supportPhone: '+254 700 000 000',
           tagline: 'Trading for Anyone Anywhere Anytime',
+          heroTitle: 'Trading for',
+          heroSubtitle: 'Anyone Anywhere Anytime',
+          heroDescription: 'Widest range of products, markets, platforms with 24/7 customer support.',
         },
       ],
       [
@@ -726,13 +558,24 @@ async function runSchemaAndSeed(): Promise<void> {
         },
       ],
       [
+        'trading_engine',
+        {
+          botWinRatePct: 76,
+          analyserWinRatePct: 82,
+          accuWinRatePct: 78,
+          manualOptionsWinRatePct: 68,
+          siteSettlementForLockedReal: true,
+          liveMicroTickEnabled: true,
+        },
+      ],
+      [
         'announcements',
         {
           items: [
             {
               id: 'ann-1',
               title: 'New Crash/Boom & 1s Volatility Liquidity',
-              message: 'Trade spikes with Rise/Fall, Over/Under, and Multipliers directly on TradeDeriv.',
+              message: 'Trade spikes with Rise/Fall, Over/Under, Accumulators, and Multipliers directly on Deriv.',
               severity: 'info',
               createdAt: new Date().toISOString(),
             },
@@ -777,6 +620,35 @@ async function runSchemaAndSeed(): Promise<void> {
       '1089';
 
     for (const [key, parsed] of parsedMap.entries()) {
+      if (key === 'branding' && parsed && typeof parsed === 'object') {
+        let bChanged = false;
+        if (parsed.appName === 'TradeDeriv' || !parsed.appName) {
+          parsed.appName = 'DERIV';
+          bChanged = true;
+        }
+        if (parsed.supportEmail === 'support@tradederiv.app' || !parsed.supportEmail) {
+          parsed.supportEmail = 'support@deriv.com';
+          bChanged = true;
+        }
+        if (!parsed.heroTitle) {
+          parsed.heroTitle = 'Trading for';
+          bChanged = true;
+        }
+        if (!parsed.heroSubtitle) {
+          parsed.heroSubtitle = 'Anyone Anywhere Anytime';
+          bChanged = true;
+        }
+        if (!parsed.heroDescription) {
+          parsed.heroDescription = 'Widest range of products, markets, platforms with 24/7 customer support.';
+          bChanged = true;
+        }
+        if (bChanged) {
+          await client.query(
+            'UPDATE application_settings SET value_json = $1, updated_at = NOW() WHERE key = $2',
+            [JSON.stringify(parsed), key]
+          );
+        }
+      }
       if ((key === 'global' || key === 'commissions') && parsed && typeof parsed === 'object') {
         let changed = false;
         const currentId = typeof parsed.derivAppId === 'string' ? parsed.derivAppId.trim() : '';
@@ -819,45 +691,32 @@ async function runSchemaAndSeed(): Promise<void> {
   }
 }
 
-async function seedSettingsCacheFromMemory(): Promise<void> {
-  inMemoryStore.initSeed();
-  const rows = await mockPool.query<{ key: string; value_json: string }>(
-    'SELECT key, value_json FROM application_settings'
-  );
-  for (const row of rows.rows) {
-    try {
-      settingsCache.set(row.key, JSON.parse(row.value_json));
-    } catch {
-      // ignore
-    }
-  }
-}
-
 export async function ensureDatabaseSchema(): Promise<void> {
-  if (usingInMemoryFallback || !realPgPool) {
-    if (!schemaPromise) {
-      schemaPromise = seedSettingsCacheFromMemory();
-    }
-    return schemaPromise;
+  if (!pool) {
+    throw new Error('DATABASE_URL is not configured');
   }
   if (!schemaPromise) {
-    schemaPromise = runSchemaAndSeed().catch(async (err) => {
-      console.warn('[AI Studio] PostgreSQL unreachable — falling back to in-memory database:', err?.message || err);
-      usingInMemoryFallback = true;
-      await seedSettingsCacheFromMemory();
+    schemaPromise = runSchemaAndSeed().catch((err) => {
+      schemaPromise = null;
+      throw err;
     });
   }
   return schemaPromise;
 }
 
-export async function requireDb(_req: Request, _res: Response, next: NextFunction): Promise<void> {
+export async function requireDb(_req: Request, res: Response, next: NextFunction): Promise<void> {
+  if (!pool) {
+    res.status(503).json({ error: 'PostgreSQL DATABASE_URL is not configured on the server.' });
+    return;
+  }
   try {
     await ensureDatabaseSchema();
     next();
-  } catch {
-    usingInMemoryFallback = true;
-    await seedSettingsCacheFromMemory();
-    next();
+  } catch (err) {
+    console.error('Database availability check failed:', err);
+    res.status(503).json({
+      error: 'Database temporarily unavailable (Neon wakeup or connection error). Please retry.',
+    });
   }
 }
 
@@ -865,23 +724,23 @@ export async function checkDatabaseHealth(): Promise<{
   ok: boolean;
   configured: boolean;
   connected: boolean;
-  mode: 'postgres' | 'in-memory';
   latencyMs: number;
 }> {
-  const t0 = Date.now();
-  await ensureDatabaseSchema();
-  if (usingInMemoryFallback || !realPgPool) {
-    return { ok: true, configured: databaseConfigured, connected: true, mode: 'in-memory', latencyMs: Date.now() - t0 };
+  if (!pool) {
+    return { ok: false, configured: false, connected: false, latencyMs: 0 };
   }
+  const t0 = Date.now();
   try {
-    await realPgPool.query('SELECT 1');
-    return { ok: true, configured: true, connected: true, mode: 'postgres', latencyMs: Date.now() - t0 };
+    await ensureDatabaseSchema();
+    await pool.query('SELECT 1');
+    return { ok: true, configured: true, connected: true, latencyMs: Date.now() - t0 };
   } catch {
-    return { ok: true, configured: true, connected: true, mode: 'in-memory', latencyMs: Date.now() - t0 };
+    return { ok: false, configured: true, connected: false, latencyMs: Date.now() - t0 };
   }
 }
 
 export async function getSetting<T = Record<string, unknown>>(key: string, fallback: T): Promise<T> {
+  if (!pool) return getCachedSetting(key, fallback);
   try {
     const row = await queryOne<{ value_json: string }>('SELECT value_json FROM application_settings WHERE key = $1', [
       key,
