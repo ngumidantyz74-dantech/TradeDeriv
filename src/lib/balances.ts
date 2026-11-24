@@ -105,6 +105,30 @@ export interface CanonicalBalances {
   activeTradingBalance: number;
 }
 
+export function isTradingModeDbLocked(
+  user: UserProfile | null,
+  accounts: ConnectedAccount[],
+  accountMode: 'real' | 'demo',
+  activeConnectedAccount?: ConnectedAccount | null
+): boolean {
+  const modeWalletLocked =
+    accountMode === 'real'
+      ? Boolean(user?.real_wallets?.db_locked)
+      : Boolean(user?.demo_wallets?.db_locked);
+  if (modeWalletLocked) return true;
+  if (
+    activeConnectedAccount &&
+    (accountMode === 'demo' ? Boolean(activeConnectedAccount.is_virtual) : !activeConnectedAccount.is_virtual) &&
+    activeConnectedAccount.balance_locked_by_admin
+  ) {
+    return true;
+  }
+  const modeAccounts = accounts.filter(
+    (a) => a.status === 'active' && (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
+  );
+  return modeAccounts.length > 0 && modeAccounts.every((a) => Boolean(a.balance_locked_by_admin));
+}
+
 export function getCanonicalBalances(
   user: UserProfile | null,
   accounts: ConnectedAccount[],
@@ -121,6 +145,7 @@ export function getCanonicalBalances(
   const cfdModeAccounts = modeAccounts.filter((a) => isCfdConnectedAccount(a));
   const stdAccs = cfdModeAccounts.filter((a) => getCfdAccountBucket(a) === 'mt5_standard');
   const goldAccs = cfdModeAccounts.filter((a) => getCfdAccountBucket(a) === 'mt5_gold');
+  const modeLocked = isTradingModeDbLocked(user, accounts, accountMode, activeConnectedAccount);
 
   // Main USD Wallet: strictly separate from Options/CFDs/Exchange; Admin edits ONLY this wallet
   const mainUsdBal =
@@ -131,10 +156,10 @@ export function getCanonicalBalances(
   // Options & Bot Trading Account: completely independent from Main USD Wallet (moves only via Transfer or trade settlement)
   const optionsBal =
     accountMode === 'real'
-      ? optionsAcc?.balance_locked_by_admin || !optionsAcc
+      ? modeLocked || optionsAcc?.balance_locked_by_admin || !optionsAcc
         ? Number(user?.real_wallets?.options ?? optionsAcc?.balance ?? 0)
         : Number(optionsAcc.balance ?? user?.real_wallets?.options ?? 0)
-      : optionsAcc?.balance_locked_by_admin || !optionsAcc
+      : modeLocked || optionsAcc?.balance_locked_by_admin || !optionsAcc
         ? Number(user?.demo_wallets?.options ?? optionsAcc?.balance ?? 0)
         : Number(optionsAcc.balance ?? user?.demo_wallets?.options ?? 0);
 

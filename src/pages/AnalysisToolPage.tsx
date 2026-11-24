@@ -119,6 +119,7 @@ export const AnalysisToolPage: React.FC = () => {
     analyserSignal,
     accountMode,
     activeConnectedAccount,
+    isDbLocked,
     refreshOrders,
     refreshAll,
     showToast,
@@ -163,25 +164,29 @@ export const AnalysisToolPage: React.FC = () => {
   const decimals = (activeInst?.pip_size ?? 0.01) < 0.0001 ? 5 : (activeInst?.pip_size ?? 0.01) < 0.001 ? 4 : 2;
   const isDigitStreamTab = tab === 'dcircles' || tab === 'signals' || tab === 'over-under' || tab === 'rise-fall';
 
-  // Tick stream subscription for live spot & digit tabs
+  // Tick stream subscription for live spot & digit tabs (switches to mock feed when DB is locked)
   useEffect(() => {
     let active = true;
-    fetchDerivTickHistoryDirect(selectedSymbol, tickCount)
+    fetchDerivTickHistoryDirect(selectedSymbol, tickCount, isDbLocked)
       .then((list) => {
         if (active && list.length) setPrices(list);
       })
       .catch(() => {});
 
-    const unsub = subscribeDerivTicksDirect(selectedSymbol, (quote) => {
-      if (!active) return;
-      setPrices((prev) => [...prev.slice(-(tickCount - 1)), quote]);
-    });
+    const unsub = subscribeDerivTicksDirect(
+      selectedSymbol,
+      (quote) => {
+        if (!active) return;
+        setPrices((prev) => [...prev.slice(-(tickCount - 1)), quote]);
+      },
+      isDbLocked
+    );
 
     return () => {
       active = false;
       unsub();
     };
-  }, [selectedSymbol, tickCount]);
+  }, [selectedSymbol, tickCount, isDbLocked]);
 
   // Live UTC clock for Sessions tab
   useEffect(() => {
@@ -365,8 +370,7 @@ export const AnalysisToolPage: React.FC = () => {
           tpPrice: extra?.tpPrice ?? undefined,
           timeframe: GRANULARITY_OPTIONS.find((g) => g.value === granularity)?.label || '15m',
           accountMode,
-          executionMode:
-            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
+          executionMode: activeConnectedAccount && !isDbLocked ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });

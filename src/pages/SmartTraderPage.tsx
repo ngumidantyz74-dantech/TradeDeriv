@@ -119,6 +119,7 @@ export const SmartTraderPage: React.FC = () => {
     accountMode,
     setAccountMode,
     activeConnectedAccount,
+    isDbLocked,
     instruments,
     selectedSymbol,
     setSelectedSymbol,
@@ -209,7 +210,7 @@ export const SmartTraderPage: React.FC = () => {
     const rid = ++reqIdRef.current;
     try {
       const res = await apiFetch<{ candles: CandleData[] }>(
-        `/api/market/candles?symbol=${encodeURIComponent(selectedSymbol)}&granularity=60&count=120&_t=${Date.now()}`,
+        `/api/market/candles?symbol=${encodeURIComponent(selectedSymbol)}&granularity=60&count=120&mock=${isDbLocked ? '1' : '0'}&_t=${Date.now()}`,
         { skipAuth: true, cache: 'no-store' }
       );
       if (reqIdRef.current !== rid) return;
@@ -219,7 +220,7 @@ export const SmartTraderPage: React.FC = () => {
     } catch {
       // ignore transient poll failure
     }
-  }, [selectedSymbol]);
+  }, [selectedSymbol, isDbLocked]);
 
   useEffect(() => {
     setCandles([]);
@@ -419,7 +420,7 @@ export const SmartTraderPage: React.FC = () => {
           tpUsd: activeGroup.isAccu ? tpUsd : undefined,
           accountMode,
           executionMode:
-            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
+            activeConnectedAccount && !isDbLocked ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || undefined,
           strategyKey: analyserSynced ? 'analyser_synced_smarttrader' : 'smart_trader',
           isAnalyserSynced: analyserSynced,

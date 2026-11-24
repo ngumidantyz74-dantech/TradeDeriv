@@ -37,6 +37,7 @@ export interface UserProfile {
     mt5_standard: number;
     mt5_gold: number;
     exchange_usdt: number;
+    db_locked?: boolean;
   };
   demo_wallets?: {
     main_usd?: number;
@@ -44,6 +45,7 @@ export interface UserProfile {
     mt5_standard: number;
     mt5_gold: number;
     exchange_usdt: number;
+    db_locked?: boolean;
   };
   exchange_balances: Record<string, number>;
   real_exchange_balances?: Record<string, number>;

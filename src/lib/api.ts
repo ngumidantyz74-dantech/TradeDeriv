@@ -87,8 +87,14 @@ export function getClientDerivAppId(): string {
   return activeClientDerivAppId;
 }
 
-// Direct Browser Deriv WebSocket Helper (with automatic backend fallback in Market Analyser)
-export async function fetchDerivTickHistoryDirect(symbol: string, count = 100): Promise<number[]> {
+// Direct Browser Deriv WebSocket Helper (with automatic backend fallback or mock simulation when DB locked)
+export async function fetchDerivTickHistoryDirect(symbol: string, count = 100, useMock = false): Promise<number[]> {
+  if (useMock) {
+    const res = await apiFetch<{ latestPrice: number; recentDigits: number[] }>(
+      `/api/market/digit-analysis?symbol=${encodeURIComponent(symbol)}&count=${count}&mock=1`
+    );
+    return res.recentDigits.map((d) => Number(`${Math.floor(res.latestPrice)}.${String(d)}`));
+  }
   try {
     return await new Promise<number[]>((resolve, reject) => {
       const ws = new WebSocket(
@@ -133,8 +139,26 @@ export async function fetchDerivTickHistoryDirect(symbol: string, count = 100): 
 
 export function subscribeDerivTicksDirect(
   symbol: string,
-  onTick: (price: number, epoch: number) => void
+  onTick: (price: number, epoch: number) => void,
+  useMock = false
 ): () => void {
+  if (useMock) {
+    let lastPrice = 1000;
+    const timer = setInterval(async () => {
+      try {
+        const res = await apiFetch<{ latestPrice: number }>(
+          `/api/market/digit-analysis?symbol=${encodeURIComponent(symbol)}&count=20&mock=1`
+        );
+        if (res?.latestPrice) {
+          lastPrice = Number(res.latestPrice);
+        }
+      } catch {
+        lastPrice = Number((lastPrice + (Math.random() - 0.5) * 0.4).toFixed(2));
+      }
+      onTick(lastPrice, Math.floor(Date.now() / 1000));
+    }, 1400);
+    return () => clearInterval(timer);
+  }
   let closed = false;
   let ws: WebSocket | null = null;
   try {

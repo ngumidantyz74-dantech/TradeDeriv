@@ -21,6 +21,7 @@ import {
   AlertTriangle,
   Shield,
   Lock,
+  Unlock,
   ExternalLink,
   Copy,
   Sliders,
@@ -2406,6 +2407,89 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   );
                 });
 
+              const parseWalletJson = (raw: any, fallbackMain = 0) => {
+                const def = {
+                  main_usd: fallbackMain,
+                  options: 0,
+                  mt5_standard: 0,
+                  mt5_gold: 0,
+                  exchange_usdt: 0,
+                  db_locked: false,
+                };
+                try {
+                  const parsed = typeof raw === 'string' ? JSON.parse(raw || '{}') : raw || {};
+                  return {
+                    ...def,
+                    ...parsed,
+                    main_usd: Number(parsed.main_usd ?? fallbackMain),
+                    options: Number(parsed.options ?? 0),
+                    mt5_standard: Number(parsed.mt5_standard ?? 0),
+                    mt5_gold: Number(parsed.mt5_gold ?? 0),
+                    exchange_usdt: Number(parsed.exchange_usdt ?? 0),
+                    db_locked: Boolean(parsed.db_locked),
+                  };
+                } catch {
+                  return def;
+                }
+              };
+
+              const clearUserBalanceInputs = (userId: number, mode: 'all' | 'real' | 'demo') => {
+                if (mode === 'all' || mode === 'real') {
+                  setRealBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[userId];
+                    return next;
+                  });
+                }
+                if (mode === 'all' || mode === 'demo') {
+                  setUserBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[userId];
+                    return next;
+                  });
+                }
+                setAccountBalances((prev) => {
+                  const next = { ...prev };
+                  for (const a of (overview?.connectedAccounts || []).filter((x: any) => x.user_id === userId)) {
+                    if (
+                      mode === 'all' ||
+                      (mode === 'real' && !a.is_virtual) ||
+                      (mode === 'demo' && Boolean(a.is_virtual))
+                    ) {
+                      delete next[a.id];
+                    }
+                  }
+                  return next;
+                });
+              };
+
+              const handleToggleTradingModeLock = async (
+                userId: number,
+                mode: 'real' | 'demo',
+                nextLocked: boolean,
+                emailLabel: string
+              ) => {
+                const key = `modelock-${mode}-${userId}`;
+                setBusyAction(key);
+                try {
+                  await adminFetch(`/api/admin/users/${userId}/trading-mode-lock`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ mode, locked: nextLocked }),
+                  });
+                  clearUserBalanceInputs(userId, mode);
+                  await loadAllAdminData();
+                  flash(
+                    nextLocked
+                      ? `${mode.toUpperCase()} DB Locked for ${emailLabel} — Mock trades & simulated market active`
+                      : `${mode.toUpperCase()} unlocked & synced from live Deriv for ${emailLabel}`
+                  );
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Mode toggle failed', 'err');
+                } finally {
+                  setBusyAction(null);
+                }
+              };
+
               const handleSyncUserDeriv = async (
                 userId: number,
                 mode: 'all' | 'real' | 'demo',
@@ -2424,30 +2508,10 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     method: 'POST',
                     body: JSON.stringify({ mode }),
                   });
-                  if (mode === 'all' || mode === 'real') {
-                    setRealBalances((prev) => {
-                      const next = { ...prev };
-                      delete next[userId];
-                      return next;
-                    });
-                  }
-                  if (mode === 'all' || mode === 'demo') {
-                    setUserBalances((prev) => {
-                      const next = { ...prev };
-                      delete next[userId];
-                      return next;
-                    });
-                  }
-                  setAccountBalances((prev) => {
-                    const next = { ...prev };
-                    for (const a of (overview?.connectedAccounts || []).filter((x: any) => x.user_id === userId)) {
-                      delete next[a.id];
-                    }
-                    return next;
-                  });
+                  clearUserBalanceInputs(userId, mode);
                   await loadAllAdminData();
                   flash(
-                    `Synced ${mode.toUpperCase()} for ${emailLabel} (${res.liveSynced}/${res.accountsProcessed} live from Deriv, DB lock reset)`
+                    `Synced ${mode.toUpperCase()} for ${emailLabel} (${res.liveSynced}/${res.accountsProcessed} live Deriv, stale caches cleared)`
                   );
                 } catch (err) {
                   flash(err instanceof Error ? err.message : 'Deriv sync failed', 'err');
@@ -2461,23 +2525,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 setBusyAction(key);
                 try {
                   await adminFetch(`/api/admin/connected-accounts/${acc.id}/sync`, { method: 'POST' });
-                  setRealBalances((prev) => {
-                    const next = { ...prev };
-                    delete next[acc.user_id];
-                    return next;
-                  });
-                  setUserBalances((prev) => {
-                    const next = { ...prev };
-                    delete next[acc.user_id];
-                    return next;
-                  });
-                  setAccountBalances((prev) => {
-                    const next = { ...prev };
-                    delete next[acc.id];
-                    return next;
-                  });
+                  clearUserBalanceInputs(acc.user_id, acc.is_virtual ? 'demo' : 'real');
                   await loadAllAdminData();
-                  flash(`Reset & synced ${acc.deriv_login_id || acc.deriv_account_id} from live Deriv`);
+                  flash(`Unlocked & synced ${acc.deriv_login_id || acc.deriv_account_id} from live Deriv`);
                 } catch (err) {
                   flash(err instanceof Error ? err.message : 'Account sync failed', 'err');
                 } finally {
@@ -2538,84 +2588,108 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           flash(err instanceof Error ? err.message : 'Failed', 'err');
                         }
                       }}
-                      className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-4 gap-3"
+                      className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-3"
                     >
-                      <input
-                        type="email"
-                        required
-                        placeholder="Email"
-                        value={newUserEmail}
-                        onChange={(e) => setNewUserEmail(e.target.value)}
-                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                      />
-                      <input
-                        type="text"
-                        required
-                        placeholder="Full Name"
-                        value={newUserName}
-                        onChange={(e) => setNewUserName(e.target.value)}
-                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                      />
-                      <input
-                        type="number"
-                        placeholder="Virtual Balance"
-                        value={newUserBal}
-                        onChange={(e) => setNewUserBal(e.target.value)}
-                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-xs"
-                      />
-                      <button type="submit" className="px-4 py-2 rounded-full bg-[#FF444F] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
-                        <Plus className="w-3.5 h-3.5" /> Add User
-                      </button>
+                      <div className="flex items-center justify-between">
+                        <p className="text-xs font-bold text-white">Create Trader Account</p>
+                        <span className="text-[11px] text-slate-400">Scoped to active admin &amp; device</span>
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-4 gap-3 items-end">
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Trader Email</label>
+                          <input
+                            type="email"
+                            required
+                            placeholder="trader@example.com"
+                            value={newUserEmail}
+                            onChange={(e) => setNewUserEmail(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Full Name</label>
+                          <input
+                            type="text"
+                            required
+                            placeholder="Full Name"
+                            value={newUserName}
+                            onChange={(e) => setNewUserName(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs text-white"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] font-medium text-slate-400 mb-1">Initial Demo USD (Mock)</label>
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            placeholder="10000"
+                            value={newUserBal}
+                            onChange={(e) => setNewUserBal(e.target.value)}
+                            className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-xs text-white"
+                          />
+                        </div>
+                        <button
+                          type="submit"
+                          className="w-full px-4 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-xs font-bold text-white flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        >
+                          <Plus className="w-3.5 h-3.5" /> Add User
+                        </button>
+                      </div>
                     </form>
                   )}
 
                   {/* Search, Filter & Export Bar */}
-                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-3 flex flex-wrap items-center gap-3 text-xs">
-                    {hasPerm('users.search') && (
-                      <div className="relative flex-1 min-w-[200px]">
-                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
-                        <input
-                          type="text"
-                          placeholder="Search by trader name, email, or client ID..."
-                          value={userSearch}
-                          onChange={(e) => setUserSearch(e.target.value)}
-                          className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                        />
-                      </div>
-                    )}
-                    <select
-                      value={userStatusFilter}
-                      onChange={(e) => setUserStatusFilter(e.target.value as any)}
-                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                    >
-                      <option value="all">All Statuses</option>
-                      <option value="active">Active Only</option>
-                      <option value="suspended">Suspended Only</option>
-                      <option value="trading_frozen">Trading Frozen</option>
-                    </select>
-                    {hasPerm('users.edit') && (
-                      <button
-                        type="button"
-                        disabled={busyAction === 'bulk-sync-deriv' || filteredUsers.length === 0}
-                        onClick={handleBulkSyncDeriv}
-                        className="px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-3 flex flex-wrap items-center justify-between gap-2.5 text-xs">
+                    <div className="flex flex-wrap items-center gap-2 flex-1 min-w-[220px]">
+                      {hasPerm('users.search') && (
+                        <div className="relative flex-1 min-w-[190px]">
+                          <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                          <input
+                            type="text"
+                            placeholder="Search by trader name, email, or client ID..."
+                            value={userSearch}
+                            onChange={(e) => setUserSearch(e.target.value)}
+                            className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                          />
+                        </div>
+                      )}
+                      <select
+                        value={userStatusFilter}
+                        onChange={(e) => setUserStatusFilter(e.target.value as any)}
+                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
                       >
-                        <RefreshCw className={`w-3.5 h-3.5 ${busyAction === 'bulk-sync-deriv' ? 'animate-spin' : ''}`} />
-                        {busyAction === 'bulk-sync-deriv' ? 'Bulk Syncing...' : 'Bulk Sync Deriv'}
-                      </button>
-                    )}
-                    {hasPerm('users.export') && (
-                      <button
-                        type="button"
-                        onClick={() => handleDownloadExport('/api/admin/users/export?format=csv', 'deriv-scoped-users.csv')}
-                        className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1.5 cursor-pointer"
-                      >
-                        <Download className="w-3.5 h-3.5" /> Export Scoped CSV
-                      </button>
-                    )}
-                    <span className="text-slate-400 font-mono-num">
-                      {filteredUsers.length} trader{filteredUsers.length === 1 ? '' : 's'}
-                    </span>
+                        <option value="all">All Statuses</option>
+                        <option value="active">Active Only</option>
+                        <option value="suspended">Suspended Only</option>
+                        <option value="trading_frozen">Trading Frozen</option>
+                      </select>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      {hasPerm('users.edit') && (
+                        <button
+                          type="button"
+                          disabled={busyAction === 'bulk-sync-deriv' || filteredUsers.length === 0}
+                          onClick={handleBulkSyncDeriv}
+                          className="px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
+                        >
+                          <RefreshCw className={`w-3.5 h-3.5 ${busyAction === 'bulk-sync-deriv' ? 'animate-spin' : ''}`} />
+                          {busyAction === 'bulk-sync-deriv' ? 'Bulk Syncing...' : 'Bulk Sync Live Deriv'}
+                        </button>
+                      )}
+                      {hasPerm('users.export') && (
+                        <button
+                          type="button"
+                          onClick={() => handleDownloadExport('/api/admin/users/export?format=csv', 'deriv-scoped-users.csv')}
+                          className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                        >
+                          <Download className="w-3.5 h-3.5" /> Export CSV
+                        </button>
+                      )}
+                      <span className="text-slate-400 font-mono-num whitespace-nowrap px-1">
+                        {filteredUsers.length} trader{filteredUsers.length === 1 ? '' : 's'}
+                      </span>
+                    </div>
                   </div>
 
                   {/* Mobile Responsive Cards for Users CRUD */}
@@ -2626,19 +2700,36 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       </div>
                     ) : (
                       filteredUsers.map((u: any) => {
-                        let parsedRw = 0;
-                        try {
-                          parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').main_usd ?? 0);
-                        } catch {
-                          parsedRw = 0;
-                        }
+                        const rwParsed = parseWalletJson(u.real_wallets_json, 0);
+                        const dwParsed = parseWalletJson(u.demo_wallets_json, Number(u.virtual_workspace_balance ?? 0));
                         const matchedAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === u.id);
                         const matchedReal = matchedAccounts.filter((a: any) => !a.is_virtual);
                         const matchedDemo = matchedAccounts.filter((a: any) => Boolean(a.is_virtual));
 
+                        const realIsLocked =
+                          Boolean(rwParsed.db_locked) ||
+                          (matchedReal.length === 0
+                            ? true
+                            : matchedReal.every((a: any) => Boolean(a.balance_locked_by_admin)));
+                        const demoIsLocked =
+                          Boolean(dwParsed.db_locked) ||
+                          (matchedDemo.length === 0
+                            ? true
+                            : matchedDemo.every((a: any) => Boolean(a.balance_locked_by_admin)));
+
+                        const realDerivSum = matchedReal.reduce(
+                          (s: number, a: any) => s + Number(a.last_known_balance ?? a.balance ?? 0),
+                          0
+                        );
+                        const demoDerivSum = matchedDemo.reduce(
+                          (s: number, a: any) => s + Number(a.last_known_balance ?? a.balance ?? 0),
+                          0
+                        );
+
                         return (
                           <div key={u.id} className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] space-y-3 text-xs">
-                            <div className="flex items-start justify-between gap-2">
+                            {/* Top Identity + Status */}
+                            <div className="flex items-start justify-between gap-2 pb-3 border-b border-[#2A2F3D]">
                               <div className="min-w-0 flex-1 space-y-1.5">
                                 {hasPerm('users.edit') ? (
                                   <div className="flex items-center gap-1.5">
@@ -2647,7 +2738,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                       value={userNames[u.id] ?? u.full_name ?? ''}
                                       onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
                                       placeholder="Display Profile Name"
-                                      className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
+                                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
                                     />
                                     <button
                                       type="button"
@@ -2672,7 +2763,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                           setBusyAction(null);
                                         }
                                       }}
-                                      className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                                      className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0 whitespace-nowrap"
                                     >
                                       {busyAction === `uname-${u.id}` ? '...' : 'Save Name'}
                                     </button>
@@ -2680,72 +2771,89 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 ) : (
                                   <p className="font-bold text-sm text-white truncate">{u.full_name}</p>
                                 )}
-                                <p className="text-slate-400 truncate">
+                                <p className="text-slate-300 truncate">
                                   {u.email} · {u.preferred_currency || 'USD'}
                                 </p>
-                                <p className="text-[11px] text-slate-500 font-mono-num">
+                                <p className="text-[11px] text-slate-400 font-mono-num">
                                   Last login: {formatLoginTime(u.last_login_at || u.updated_at || u.created_at)}
                                   {u.deriv_client_id ? ` · ${u.deriv_client_id}` : ''}
                                 </p>
-                                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded font-bold ${
-                                      u.ownership_verification_status === 'verified'
-                                        ? 'bg-[#00A878]/15 text-[#00A878]'
-                                        : 'bg-amber-500/15 text-amber-300'
-                                    }`}
-                                  >
-                                    {u.ownership_verification_status === 'verified' ? 'Verified Scope' : 'Pending Verification'}
-                                  </span>
-                                  {u.originating_device_uid && (
-                                    <span className="px-1.5 py-0.5 rounded bg-white/5 text-slate-300 font-mono-num">
-                                      {u.originating_device_uid}
-                                    </span>
-                                  )}
-                                  {u.assigned_admin_email && (
-                                    <span className="text-slate-400 truncate">Admin: {u.assigned_admin_email}</span>
-                                  )}
-                                </div>
+                                <p className="text-[11px] text-slate-500 truncate">
+                                  {u.ownership_verification_status === 'verified' ? 'Verified Scope' : 'Pending Verification'}
+                                  {u.originating_device_uid ? ` · ${u.originating_device_uid}` : ''}
+                                  {u.assigned_admin_email ? ` · ${u.assigned_admin_email}` : ''}
+                                </p>
                               </div>
                               <div className="flex flex-col items-end gap-1 shrink-0">
                                 <span
-                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
-                                    u.status === 'active' ? 'bg-[#00A878]/20 text-[#00A878]' : 'bg-[#FF444F]/20 text-[#FF444F]'
+                                  className={`px-2 py-0.5 rounded-md text-[10px] font-bold uppercase ${
+                                    u.status === 'active' ? 'bg-[#00A878]/15 text-[#00A878]' : 'bg-[#FF444F]/15 text-[#FF444F]'
                                   }`}
                                 >
                                   {u.status}
                                 </span>
                                 {u.trading_suspended && (
-                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300">
-                                    TRADING FROZEN
+                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/20 text-amber-300">
+                                    FROZEN
                                   </span>
                                 )}
                               </div>
                             </div>
 
-                            {/* Separated Real & Demo Matched Accounts */}
-                            <div className="grid grid-cols-1 gap-2">
-                              <div className="p-2.5 rounded-xl bg-[#111319] border border-[#FF444F]/25 space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF444F]">
-                                    Real Account ({matchedReal.length})
+                            {/* Real Account Section */}
+                            <div className="p-3 rounded-xl bg-[#111319] border border-[#FF444F]/25 space-y-2.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF444F] block">
+                                    Real Mode ({matchedReal.length} Deriv)
                                   </span>
-                                  {matchedReal.length > 0 && (
-                                    <span className="text-[10px] font-mono-num text-slate-400">
-                                      {matchedReal.map((a: any) => `${a.deriv_login_id || a.deriv_account_id} (${a.account_type})`).join(', ')}
-                                    </span>
+                                  <span className="text-[10px] font-mono-num text-slate-400">
+                                    {matchedReal.length > 0
+                                      ? `Deriv Total: $${realDerivSum.toFixed(2)}`
+                                      : 'No Real Deriv linked'}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${
+                                      !realIsLocked && matchedReal.length > 0
+                                        ? 'bg-sky-500/15 text-sky-300'
+                                        : 'bg-amber-500/15 text-amber-300'
+                                    }`}
+                                  >
+                                    {!realIsLocked && matchedReal.length > 0 ? 'Live Deriv' : 'DB Locked · Mock'}
+                                  </span>
+                                  {hasPerm('users.edit') && (
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `modelock-real-${u.id}`}
+                                      onClick={() => handleToggleTradingModeLock(u.id, 'real', !realIsLocked, u.email)}
+                                      className={`px-2 py-0.5 rounded text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                                        realIsLocked
+                                          ? 'bg-sky-500/20 hover:bg-sky-500/30 text-sky-300'
+                                          : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300'
+                                      }`}
+                                    >
+                                      {realIsLocked ? <Unlock className="w-2.5 h-2.5" /> : <Lock className="w-2.5 h-2.5" />}
+                                      {realIsLocked ? 'Unlock Live' : 'Lock Mock'}
+                                    </button>
                                   )}
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[11px] text-[#FF444F] font-bold w-16">Real ($):</span>
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="block text-[10px] text-slate-400">
+                                  Main USD Wallet (DB Mock Override)
+                                </label>
+                                <div className="flex items-center gap-1.5">
                                   <input
                                     type="number"
                                     step="0.01"
                                     min="0"
                                     disabled={!hasPerm('users.edit')}
-                                    value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                    value={realBalances[u.id] ?? rwParsed.main_usd.toFixed(2)}
                                     onChange={(e) => setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
+                                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs text-white disabled:opacity-70"
                                   />
                                   {hasPerm('users.edit') && (
                                     <>
@@ -2753,7 +2861,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                         type="button"
                                         disabled={busyAction === `real-${u.id}`}
                                         onClick={async () => {
-                                          const val = Number(realBalances[u.id] ?? parsedRw);
+                                          const val = Number(realBalances[u.id] ?? rwParsed.main_usd);
                                           if (Number.isNaN(val) || val < 0) {
                                             flash('Enter a valid non-negative Real balance', 'err');
                                             return;
@@ -2765,67 +2873,102 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                               body: JSON.stringify({ balance: val }),
                                             });
                                             await loadAllAdminData();
-                                            flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
+                                            flash(`Saved Real Main USD ($${val.toFixed(2)}) & activated Mock mode for ${u.email}`);
                                           });
                                           setBusyAction(null);
                                         }}
-                                        className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
+                                        className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
                                       >
-                                        {busyAction === `real-${u.id}` ? '...' : 'Save'}
+                                        {busyAction === `real-${u.id}` ? '...' : 'Save & Lock'}
                                       </button>
                                       <button
                                         type="button"
                                         disabled={busyAction === `usync-real-${u.id}`}
                                         onClick={() => handleSyncUserDeriv(u.id, 'real', u.email)}
-                                        title="Reset & sync Real account(s) from actual Deriv"
-                                        className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                        title="Unlock DB lock, preload live Deriv balance, and clear cached overrides"
+                                        className="px-2.5 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                                       >
                                         <RefreshCw className={`w-3 h-3 ${busyAction === `usync-real-${u.id}` ? 'animate-spin' : ''}`} />
-                                        Sync
+                                        Sync Live
                                       </button>
                                     </>
                                   )}
                                 </div>
-                                {matchedReal.length > 0 && (
-                                  <div className="flex flex-wrap gap-1 pt-0.5">
-                                    {matchedReal.map((a: any) => (
-                                      <button
-                                        key={a.id}
-                                        type="button"
-                                        disabled={busyAction === `accsync-${a.id}`}
-                                        onClick={() => handleSyncSingleConnectedAcc(a)}
-                                        title="Tap to reset & sync this Real account from Deriv"
-                                        className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 hover:bg-[#FF444F]/20 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
-                                      >
-                                        <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
-                                        {a.deriv_login_id || a.deriv_account_id} (${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)})
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
                               </div>
 
-                              <div className="p-2.5 rounded-xl bg-[#111319] border border-[#00A878]/25 space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#00A878]">
-                                    Demo Account ({matchedDemo.length})
+                              {matchedReal.length > 0 && (
+                                <div className="flex flex-wrap gap-1 pt-0.5">
+                                  {matchedReal.map((a: any) => (
+                                    <button
+                                      key={a.id}
+                                      type="button"
+                                      disabled={busyAction === `accsync-${a.id}`}
+                                      onClick={() => handleSyncSingleConnectedAcc(a)}
+                                      title="Tap to unlock & sync this Real account from live Deriv"
+                                      className="px-2 py-0.5 rounded bg-[#FF444F]/10 hover:bg-[#FF444F]/20 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                    >
+                                      <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
+                                      {a.deriv_login_id || a.deriv_account_id} · ${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
+
+                            {/* Demo Account Section */}
+                            <div className="p-3 rounded-xl bg-[#111319] border border-[#00A878]/25 space-y-2.5">
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="min-w-0">
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#00A878] block">
+                                    Demo Mode ({matchedDemo.length} Deriv)
                                   </span>
-                                  {matchedDemo.length > 0 && (
-                                    <span className="text-[10px] font-mono-num text-slate-400">
-                                      {matchedDemo.map((a: any) => `${a.deriv_login_id || a.deriv_account_id} (${a.account_type})`).join(', ')}
-                                    </span>
+                                  <span className="text-[10px] font-mono-num text-slate-400">
+                                    {matchedDemo.length > 0
+                                      ? `Deriv Total: $${demoDerivSum.toFixed(2)}`
+                                      : 'Local Demo Workspace'}
+                                  </span>
+                                </div>
+                                <div className="flex items-center gap-1.5 shrink-0">
+                                  <span
+                                    className={`px-2 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${
+                                      !demoIsLocked && matchedDemo.length > 0
+                                        ? 'bg-sky-500/15 text-sky-300'
+                                        : 'bg-amber-500/15 text-amber-300'
+                                    }`}
+                                  >
+                                    {!demoIsLocked && matchedDemo.length > 0 ? 'Live Deriv' : 'DB Locked · Mock'}
+                                  </span>
+                                  {hasPerm('users.edit') && (
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `modelock-demo-${u.id}`}
+                                      onClick={() => handleToggleTradingModeLock(u.id, 'demo', !demoIsLocked, u.email)}
+                                      className={`px-2 py-0.5 rounded text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap disabled:opacity-50 ${
+                                        demoIsLocked
+                                          ? 'bg-sky-500/20 hover:bg-sky-500/30 text-sky-300'
+                                          : 'bg-amber-500/15 hover:bg-amber-500/25 text-amber-300'
+                                      }`}
+                                    >
+                                      {demoIsLocked ? <Unlock className="w-2.5 h-2.5" /> : <Lock className="w-2.5 h-2.5" />}
+                                      {demoIsLocked ? 'Unlock Live' : 'Lock Mock'}
+                                    </button>
                                   )}
                                 </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
+                              </div>
+
+                              <div className="space-y-1">
+                                <label className="block text-[10px] text-slate-400">
+                                  Main USD Wallet (DB Mock Override)
+                                </label>
+                                <div className="flex items-center gap-1.5">
                                   <input
                                     type="number"
                                     step="0.01"
                                     min="0"
                                     disabled={!hasPerm('users.edit')}
-                                    value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                    value={userBalances[u.id] ?? Number(u.virtual_workspace_balance ?? 0).toFixed(2)}
                                     onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
+                                    className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs text-white disabled:opacity-70"
                                   />
                                   {hasPerm('users.edit') && (
                                     <>
@@ -2845,108 +2988,114 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                               body: JSON.stringify({ balance: val }),
                                             });
                                             await loadAllAdminData();
-                                            flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
+                                            flash(`Saved Demo Main USD ($${val.toFixed(2)}) & activated Mock mode for ${u.email}`);
                                           });
                                           setBusyAction(null);
                                         }}
-                                        className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
+                                        className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
                                       >
-                                        {busyAction === `user-${u.id}` ? '...' : 'Save'}
+                                        {busyAction === `user-${u.id}` ? '...' : 'Save & Lock'}
                                       </button>
                                       <button
                                         type="button"
                                         disabled={busyAction === `usync-demo-${u.id}`}
                                         onClick={() => handleSyncUserDeriv(u.id, 'demo', u.email)}
-                                        title="Reset & sync Demo account(s) from actual Deriv"
-                                        className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                        title="Unlock DB lock, preload live Demo Deriv balance, and clear cached overrides"
+                                        className="px-2.5 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                                       >
                                         <RefreshCw className={`w-3 h-3 ${busyAction === `usync-demo-${u.id}` ? 'animate-spin' : ''}`} />
-                                        Sync
+                                        Sync Live
                                       </button>
                                     </>
                                   )}
                                 </div>
-                                {matchedDemo.length > 0 && (
-                                  <div className="flex flex-wrap gap-1 pt-0.5">
-                                    {matchedDemo.map((a: any) => (
-                                      <button
-                                        key={a.id}
-                                        type="button"
-                                        disabled={busyAction === `accsync-${a.id}`}
-                                        onClick={() => handleSyncSingleConnectedAcc(a)}
-                                        title="Tap to reset & sync this Demo account from Deriv"
-                                        className="px-1.5 py-0.5 rounded bg-[#00A878]/10 hover:bg-[#00A878]/20 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
-                                      >
-                                        <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
-                                        {a.deriv_login_id || a.deriv_account_id} (${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)})
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
                               </div>
+
+                              {matchedDemo.length > 0 && (
+                                <div className="flex flex-wrap gap-1 pt-0.5">
+                                  {matchedDemo.map((a: any) => (
+                                    <button
+                                      key={a.id}
+                                      type="button"
+                                      disabled={busyAction === `accsync-${a.id}`}
+                                      onClick={() => handleSyncSingleConnectedAcc(a)}
+                                      title="Tap to unlock & sync this Demo account from live Deriv"
+                                      className="px-2 py-0.5 rounded bg-[#00A878]/10 hover:bg-[#00A878]/20 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                    >
+                                      <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
+                                      {a.deriv_login_id || a.deriv_account_id} · ${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
                             </div>
 
-                            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[#2A2F3D]">
+                            {/* Symmetrical Card Actions Grid */}
+                            <div className="pt-2 border-t border-[#2A2F3D] grid grid-cols-2 gap-2">
                               {hasPerm('users.edit') && (
                                 <button
                                   type="button"
                                   disabled={busyAction === `usync-all-${u.id}`}
                                   onClick={() => handleSyncUserDeriv(u.id, 'all', u.email)}
-                                  className="px-2.5 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                  className="px-3 py-2 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                                 >
                                   <RefreshCw className={`w-3 h-3 ${busyAction === `usync-all-${u.id}` ? 'animate-spin' : ''}`} />
-                                  Sync Deriv
+                                  Sync All Live
                                 </button>
                               )}
                               {hasPerm('users.edit') && (
                                 <button
                                   type="button"
                                   onClick={() => openAdjustModal(u)}
-                                  className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/15 text-[#00A878] font-semibold cursor-pointer"
+                                  className="px-3 py-2 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
                                 >
-                                  Adjust +/-
+                                  <Sliders className="w-3 h-3" /> Adjust +/-
                                 </button>
                               )}
                               <button
                                 type="button"
                                 onClick={() => openUserActivity(u.id)}
-                                className="px-2.5 py-1.5 rounded-lg bg-white/5 text-slate-200 font-semibold flex items-center gap-1 cursor-pointer"
+                                className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
                               >
                                 <Eye className="w-3 h-3" /> Activity
                               </button>
                               {hasPerm('users.edit') && (
-                                <>
-                                  <button
-                                    type="button"
-                                    onClick={() => openFullEditModal(u)}
-                                    className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] font-semibold flex items-center gap-1 cursor-pointer"
-                                  >
-                                    <Edit3 className="w-3 h-3" /> Edit All
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() => toggleTradingFreeze(u)}
-                                    className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 font-semibold cursor-pointer"
-                                  >
-                                    {u.trading_suspended ? 'Unfreeze Trade' : 'Freeze Trade'}
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      runWithReauth(async () => {
-                                        await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                                        });
-                                        await loadAllAdminData();
-                                        flash(`Updated user status for ${u.email}`);
-                                      })
-                                    }
-                                    className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                                  >
-                                    {u.status === 'active' ? 'Suspend' : 'Activate'}
-                                  </button>
-                                </>
+                                <button
+                                  type="button"
+                                  onClick={() => openFullEditModal(u)}
+                                  className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-white font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                                >
+                                  <Edit3 className="w-3 h-3" /> Edit Wallets
+                                </button>
+                              )}
+                              {hasPerm('users.edit') && (
+                                <button
+                                  type="button"
+                                  onClick={() => toggleTradingFreeze(u)}
+                                  className="px-3 py-2 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                                >
+                                  {u.trading_suspended ? <PlayCircle className="w-3 h-3" /> : <PauseCircle className="w-3 h-3" />}
+                                  {u.trading_suspended ? 'Unfreeze Trade' : 'Freeze Trade'}
+                                </button>
+                              )}
+                              {hasPerm('users.edit') && (
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    runWithReauth(async () => {
+                                      await adminFetch(`/api/admin/users/${u.id}/status`, {
+                                        method: 'PATCH',
+                                        body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Updated user status for ${u.email}`);
+                                    })
+                                  }
+                                  className="px-3 py-2 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
+                                >
+                                  {u.status === 'active' ? <Ban className="w-3 h-3" /> : <UserCheck className="w-3 h-3" />}
+                                  {u.status === 'active' ? 'Suspend' : 'Activate'}
+                                </button>
                               )}
                               {hasPerm('users.delete') && (
                                 <button
@@ -2959,9 +3108,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                       flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
                                     }
                                   }}
-                                  className="p-1.5 text-[#FF444F] cursor-pointer"
+                                  className="col-span-2 px-3 py-2 rounded-lg bg-[#FF444F]/10 hover:bg-[#FF444F]/20 text-[#FF444F] font-semibold inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap"
                                 >
-                                  <Trash2 className="w-3.5 h-3.5 inline" />
+                                  <Trash2 className="w-3.5 h-3.5" /> Delete Trader
                                 </button>
                               )}
                             </div>
@@ -2976,27 +3125,43 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="border-b border-[#2A2F3D] text-slate-400">
-                          <th className="text-left px-4 py-3">Display Profile Name &amp; Trader</th>
+                          <th className="text-left px-4 py-3">Trader Identity</th>
                           <th className="text-left px-4 py-3">Status &amp; Scope</th>
-                          <th className="text-right px-4 py-3 text-[#FF444F]">Real Account &amp; Bal (DB)</th>
-                          <th className="text-right px-4 py-3 text-[#00A878]">Demo Account &amp; Bal (DB)</th>
+                          <th className="text-right px-4 py-3 text-[#FF444F]">Real Mode · Main USD / Live</th>
+                          <th className="text-right px-4 py-3 text-[#00A878]">Demo Mode · Main USD / Live</th>
                           <th className="text-right px-4 py-3">Actions</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#2A2F3D]">
                         {filteredUsers.map((u: any) => {
-                          let parsedRw = 0;
-                          try {
-                            parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').main_usd ?? 0);
-                          } catch {
-                            parsedRw = 0;
-                          }
+                          const rwParsed = parseWalletJson(u.real_wallets_json, 0);
+                          const dwParsed = parseWalletJson(u.demo_wallets_json, Number(u.virtual_workspace_balance ?? 0));
                           const matchedAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === u.id);
                           const matchedReal = matchedAccounts.filter((a: any) => !a.is_virtual);
                           const matchedDemo = matchedAccounts.filter((a: any) => Boolean(a.is_virtual));
 
+                          const realIsLocked =
+                            Boolean(rwParsed.db_locked) ||
+                            (matchedReal.length === 0
+                              ? true
+                              : matchedReal.every((a: any) => Boolean(a.balance_locked_by_admin)));
+                          const demoIsLocked =
+                            Boolean(dwParsed.db_locked) ||
+                            (matchedDemo.length === 0
+                              ? true
+                              : matchedDemo.every((a: any) => Boolean(a.balance_locked_by_admin)));
+
+                          const realDerivSum = matchedReal.reduce(
+                            (s: number, a: any) => s + Number(a.last_known_balance ?? a.balance ?? 0),
+                            0
+                          );
+                          const demoDerivSum = matchedDemo.reduce(
+                            (s: number, a: any) => s + Number(a.last_known_balance ?? a.balance ?? 0),
+                            0
+                          );
+
                           return (
-                            <tr key={u.id}>
+                            <tr key={u.id} className="align-top">
                               <td className="px-4 py-3 min-w-[230px]">
                                 {hasPerm('users.edit') ? (
                                   <div className="flex items-center gap-1.5 mb-1">
@@ -3038,7 +3203,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 ) : (
                                   <p className="font-bold text-white mb-0.5">{u.full_name}</p>
                                 )}
-                                <p className="text-slate-400">
+                                <p className="text-slate-300">
                                   {u.email}
                                   {u.deriv_nickname ? ` · @${u.deriv_nickname}` : ''}
                                 </p>
@@ -3049,16 +3214,10 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                               </td>
                               <td className="px-4 py-3">
                                 <div className="flex flex-col gap-1 items-start">
-                                  <span className={u.status === 'active' ? 'text-[#00A878] font-semibold' : 'text-[#FF444F] font-semibold'}>
+                                  <span className={u.status === 'active' ? 'text-[#00A878] font-semibold uppercase text-[11px]' : 'text-[#FF444F] font-semibold uppercase text-[11px]'}>
                                     {u.status}
                                   </span>
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
-                                      u.ownership_verification_status === 'verified'
-                                        ? 'bg-[#00A878]/15 text-[#00A878]'
-                                        : 'bg-amber-500/15 text-amber-300'
-                                    }`}
-                                  >
+                                  <span className="text-[10px] text-slate-400">
                                     {u.ownership_verification_status === 'verified' ? 'Verified Scope' : 'Pending Verification'}
                                   </span>
                                   {u.originating_device_uid && (
@@ -3079,14 +3238,39 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right">
-                                <div className="inline-flex flex-col items-end gap-1">
+                                <div className="inline-flex flex-col items-end gap-1.5">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${
+                                        !realIsLocked && matchedReal.length > 0
+                                          ? 'bg-sky-500/15 text-sky-300'
+                                          : 'bg-amber-500/15 text-amber-300'
+                                      }`}
+                                    >
+                                      {!realIsLocked && matchedReal.length > 0
+                                        ? `Live Deriv · $${realDerivSum.toFixed(2)}`
+                                        : 'DB Locked · Mock'}
+                                    </span>
+                                    {hasPerm('users.edit') && (
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `modelock-real-${u.id}`}
+                                        onClick={() => handleToggleTradingModeLock(u.id, 'real', !realIsLocked, u.email)}
+                                        className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-slate-300 text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                      >
+                                        {realIsLocked ? <Unlock className="w-2.5 h-2.5" /> : <Lock className="w-2.5 h-2.5" />}
+                                        {realIsLocked ? 'Unlock' : 'Lock'}
+                                      </button>
+                                    )}
+                                  </div>
                                   <div className="inline-flex items-center justify-end gap-1.5">
                                     <input
                                       type="number"
                                       step="0.01"
                                       min="0"
                                       disabled={!hasPerm('users.edit')}
-                                      value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                      title="Main USD Wallet (DB Mock Override)"
+                                      value={realBalances[u.id] ?? rwParsed.main_usd.toFixed(2)}
                                       onChange={(e) =>
                                         setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
                                       }
@@ -3098,7 +3282,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                           type="button"
                                           disabled={busyAction === `real-${u.id}`}
                                           onClick={async () => {
-                                            const val = Number(realBalances[u.id] ?? parsedRw);
+                                            const val = Number(realBalances[u.id] ?? rwParsed.main_usd);
                                             if (Number.isNaN(val) || val < 0) {
                                               flash('Enter a valid non-negative Real balance', 'err');
                                               return;
@@ -3110,20 +3294,20 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                                 body: JSON.stringify({ balance: val }),
                                               });
                                               await loadAllAdminData();
-                                              flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
+                                              flash(`Saved Real Main USD ($${val.toFixed(2)}) & activated Mock mode for ${u.email}`);
                                             });
                                             setBusyAction(null);
                                           }}
                                           className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
                                         >
-                                          {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                          {busyAction === `real-${u.id}` ? '...' : 'Save Mock'}
                                         </button>
                                         <button
                                           type="button"
                                           disabled={busyAction === `usync-real-${u.id}`}
                                           onClick={() => handleSyncUserDeriv(u.id, 'real', u.email)}
-                                          title="Reset & sync Real account(s) from actual Deriv"
-                                          className="px-2 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                          title="Unlock DB lock, sync live Real Deriv, clear cached Main USD"
+                                          className="px-2 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                                         >
                                           <RefreshCw className={`w-3 h-3 ${busyAction === `usync-real-${u.id}` ? 'animate-spin' : ''}`} />
                                           Sync
@@ -3139,11 +3323,11 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                           type="button"
                                           disabled={busyAction === `accsync-${a.id}`}
                                           onClick={() => handleSyncSingleConnectedAcc(a)}
-                                          title="Reset & sync this Real account from Deriv"
-                                          className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 hover:bg-[#FF444F]/20 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
+                                          title="Unlock & sync this Real account from Deriv"
+                                          className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 hover:bg-[#FF444F]/20 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                         >
                                           <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
-                                          {a.deriv_login_id || a.deriv_account_id} · {a.account_type}
+                                          {a.deriv_login_id || a.deriv_account_id} · ${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)}
                                         </button>
                                       ))}
                                     </div>
@@ -3151,14 +3335,39 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right">
-                                <div className="inline-flex flex-col items-end gap-1">
+                                <div className="inline-flex flex-col items-end gap-1.5">
+                                  <div className="inline-flex items-center gap-1.5">
+                                    <span
+                                      className={`px-1.5 py-0.5 rounded text-[10px] font-bold whitespace-nowrap ${
+                                        !demoIsLocked && matchedDemo.length > 0
+                                          ? 'bg-sky-500/15 text-sky-300'
+                                          : 'bg-amber-500/15 text-amber-300'
+                                      }`}
+                                    >
+                                      {!demoIsLocked && matchedDemo.length > 0
+                                        ? `Live Deriv · $${demoDerivSum.toFixed(2)}`
+                                        : 'DB Locked · Mock'}
+                                    </span>
+                                    {hasPerm('users.edit') && (
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `modelock-demo-${u.id}`}
+                                        onClick={() => handleToggleTradingModeLock(u.id, 'demo', !demoIsLocked, u.email)}
+                                        className="px-1.5 py-0.5 rounded bg-white/5 hover:bg-white/10 text-slate-300 text-[10px] font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                      >
+                                        {demoIsLocked ? <Unlock className="w-2.5 h-2.5" /> : <Lock className="w-2.5 h-2.5" />}
+                                        {demoIsLocked ? 'Unlock' : 'Lock'}
+                                      </button>
+                                    )}
+                                  </div>
                                   <div className="inline-flex items-center justify-end gap-1.5">
                                     <input
                                       type="number"
                                       step="0.01"
                                       min="0"
                                       disabled={!hasPerm('users.edit')}
-                                      value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                      title="Main USD Wallet (DB Mock Override)"
+                                      value={userBalances[u.id] ?? Number(u.virtual_workspace_balance ?? 0).toFixed(2)}
                                       onChange={(e) =>
                                         setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
                                       }
@@ -3182,20 +3391,20 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                                 body: JSON.stringify({ balance: val }),
                                               });
                                               await loadAllAdminData();
-                                              flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
+                                              flash(`Saved Demo Main USD ($${val.toFixed(2)}) & activated Mock mode for ${u.email}`);
                                             });
                                             setBusyAction(null);
                                           }}
                                           className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
                                         >
-                                          {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
+                                          {busyAction === `user-${u.id}` ? '...' : 'Save Mock'}
                                         </button>
                                         <button
                                           type="button"
                                           disabled={busyAction === `usync-demo-${u.id}`}
                                           onClick={() => handleSyncUserDeriv(u.id, 'demo', u.email)}
-                                          title="Reset & sync Demo account(s) from actual Deriv"
-                                          className="px-2 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                          title="Unlock DB lock, sync live Demo Deriv, clear cached Main USD"
+                                          className="px-2 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                                         >
                                           <RefreshCw className={`w-3 h-3 ${busyAction === `usync-demo-${u.id}` ? 'animate-spin' : ''}`} />
                                           Sync
@@ -3211,97 +3420,100 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                           type="button"
                                           disabled={busyAction === `accsync-${a.id}`}
                                           onClick={() => handleSyncSingleConnectedAcc(a)}
-                                          title="Reset & sync this Demo account from Deriv"
-                                          className="px-1.5 py-0.5 rounded bg-[#00A878]/10 hover:bg-[#00A878]/20 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
+                                          title="Unlock & sync this Demo account from Deriv"
+                                          className="px-1.5 py-0.5 rounded bg-[#00A878]/10 hover:bg-[#00A878]/20 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                         >
                                           <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
-                                          {a.deriv_login_id || a.deriv_account_id} · {a.account_type}
+                                          {a.deriv_login_id || a.deriv_account_id} · ${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)}
                                         </button>
                                       ))}
                                     </div>
                                   )}
                                 </div>
                               </td>
-                              <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
-                                {hasPerm('users.edit') && (
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `usync-all-${u.id}`}
-                                    onClick={() => handleSyncUserDeriv(u.id, 'all', u.email)}
-                                    className="px-2 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
-                                  >
-                                    <RefreshCw className={`w-3 h-3 ${busyAction === `usync-all-${u.id}` ? 'animate-spin' : ''}`} />
-                                    Sync Deriv
-                                  </button>
-                                )}
-                                {hasPerm('users.edit') && (
-                                  <button
-                                    type="button"
-                                    onClick={() => openAdjustModal(u)}
-                                    className="px-2 py-1 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold cursor-pointer"
-                                  >
-                                    Credit/Debit
-                                  </button>
-                                )}
-                                <button
-                                  type="button"
-                                  onClick={() => openUserActivity(u.id)}
-                                  className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Eye className="w-3 h-3" /> Activity
-                                </button>
-                                {hasPerm('users.edit') && (
-                                  <>
+                              <td className="px-4 py-3 text-right">
+                                <div className="inline-flex flex-wrap justify-end gap-1.5 max-w-[260px]">
+                                  {hasPerm('users.edit') && (
                                     <button
                                       type="button"
-                                      onClick={() => openFullEditModal(u)}
-                                      className="px-2 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                      disabled={busyAction === `usync-all-${u.id}`}
+                                      onClick={() => handleSyncUserDeriv(u.id, 'all', u.email)}
+                                      className="px-2 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50 whitespace-nowrap"
                                     >
-                                      <Edit3 className="w-3 h-3" /> Wallets
+                                      <RefreshCw className={`w-3 h-3 ${busyAction === `usync-all-${u.id}` ? 'animate-spin' : ''}`} />
+                                      Sync Live
                                     </button>
+                                  )}
+                                  {hasPerm('users.edit') && (
                                     <button
                                       type="button"
-                                      onClick={() => toggleTradingFreeze(u)}
-                                      title={u.trading_suspended ? 'Restore Trading Access' : 'Freeze Trading Access'}
-                                      className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                      onClick={() => openAdjustModal(u)}
+                                      className="px-2 py-1 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
                                     >
-                                      {u.trading_suspended ? <PlayCircle className="w-3 h-3" /> : <PauseCircle className="w-3 h-3" />}
-                                      {u.trading_suspended ? 'Unfreeze' : 'Freeze'}
+                                      Adjust +/-
                                     </button>
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        runWithReauth(async () => {
-                                          await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                            method: 'PATCH',
-                                            body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                                          });
-                                          await loadAllAdminData();
-                                          flash(`Updated user status for ${u.email}`);
-                                        })
-                                      }
-                                      className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                                    >
-                                      {u.status === 'active' ? 'Suspend' : 'Activate'}
-                                    </button>
-                                  </>
-                                )}
-                                {hasPerm('users.delete') && (
+                                  )}
                                   <button
                                     type="button"
-                                    onClick={async () => {
-                                      try {
-                                        await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
-                                        loadAllAdminData();
-                                      } catch (err) {
-                                        flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
-                                      }
-                                    }}
-                                    className="p-1 text-[#FF444F] cursor-pointer"
+                                    onClick={() => openUserActivity(u.id)}
+                                    className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
                                   >
-                                    <Trash2 className="w-3.5 h-3.5 inline" />
+                                    <Eye className="w-3 h-3" /> Activity
                                   </button>
-                                )}
+                                  {hasPerm('users.edit') && (
+                                    <>
+                                      <button
+                                        type="button"
+                                        onClick={() => openFullEditModal(u)}
+                                        className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                      >
+                                        <Edit3 className="w-3 h-3" /> Wallets
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() => toggleTradingFreeze(u)}
+                                        title={u.trading_suspended ? 'Restore Trading Access' : 'Freeze Trading Access'}
+                                        className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                      >
+                                        {u.trading_suspended ? <PlayCircle className="w-3 h-3" /> : <PauseCircle className="w-3 h-3" />}
+                                        {u.trading_suspended ? 'Unfreeze' : 'Freeze'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          runWithReauth(async () => {
+                                            await adminFetch(`/api/admin/users/${u.id}/status`, {
+                                              method: 'PATCH',
+                                              body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
+                                            });
+                                            await loadAllAdminData();
+                                            flash(`Updated user status for ${u.email}`);
+                                          })
+                                        }
+                                        className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer whitespace-nowrap"
+                                      >
+                                        {u.status === 'active' ? 'Suspend' : 'Activate'}
+                                      </button>
+                                    </>
+                                  )}
+                                  {hasPerm('users.delete') && (
+                                    <button
+                                      type="button"
+                                      title="Delete Trader"
+                                      onClick={async () => {
+                                        try {
+                                          await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+                                          loadAllAdminData();
+                                        } catch (err) {
+                                          flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
+                                        }
+                                      }}
+                                      className="px-2 py-1 rounded-lg bg-[#FF444F]/10 hover:bg-[#FF444F]/20 text-[#FF444F] inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                                    >
+                                      <Trash2 className="w-3 h-3" /> Delete
+                                    </button>
+                                  )}
+                                </div>
                               </td>
                             </tr>
                           );
@@ -3379,28 +3591,28 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   }`}
                 >
                   <div className="flex items-center justify-between gap-2">
-                    <div className="flex items-center gap-2 min-w-0">
+                    <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
                       <span className="font-mono-num font-bold text-white truncate">
                         {a.deriv_login_id || a.deriv_account_id}
                       </span>
                       <span
-                        className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                        className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
                           a.is_virtual ? 'bg-[#00A878]/20 text-[#00A878]' : 'bg-[#FF444F]/20 text-[#FF444F]'
                         }`}
                       >
                         {a.is_virtual ? 'DEMO' : 'REAL'}
                       </span>
                       {a.balance_locked_by_admin ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
-                          DB Locked
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300 whitespace-nowrap">
+                          DB Locked · Mock
                         </span>
-                      ) : !a.is_virtual ? (
-                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#00A878]/20 text-[#00A878]">
-                          Live Real Deriv
+                      ) : (
+                        <span className="px-1.5 py-0.5 rounded text-[10px] font-bold bg-sky-500/20 text-sky-300 whitespace-nowrap">
+                          {a.is_virtual ? 'Live Demo Deriv' : 'Live Real Deriv'}
                         </span>
-                      ) : null}
+                      )}
                     </div>
-                    <span className="text-[11px] text-slate-400 shrink-0">{a.status}</span>
+                    <span className="text-[11px] text-slate-400 shrink-0 uppercase">{a.status}</span>
                   </div>
 
                   <div className="flex items-center gap-1.5">
@@ -3436,7 +3648,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                             setBusyAction(null);
                           }
                         }}
-                        className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                        className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0 whitespace-nowrap"
                       >
                         {busyAction === `aname-${a.id}` ? '...' : 'Save Name'}
                       </button>
@@ -3457,7 +3669,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   </div>
 
                   {hasPerm('clients.manage') && (
-                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                    <div className="grid grid-cols-2 gap-1.5 pt-1">
                       <button
                         type="button"
                         disabled={busyAction === `save-${a.id}`}
@@ -3475,14 +3687,14 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                             });
                             await loadAllAdminData();
                             flash(
-                              `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency})`
+                              `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency}) — Mock mode active`
                             );
                           });
                           setBusyAction(null);
                         }}
-                        className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
+                        className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
                       >
-                        {busyAction === `save-${a.id}` ? 'Saving...' : 'Save DB Bal'}
+                        {busyAction === `save-${a.id}` ? 'Saving...' : 'Save & Lock Mock'}
                       </button>
                       <button
                         type="button"
@@ -3491,24 +3703,42 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           setBusyAction(`sync-${a.id}`);
                           try {
                             await adminFetch(`/api/admin/connected-accounts/${a.id}/sync`, { method: 'POST' });
+                            if (a.is_virtual) {
+                              setUserBalances((prev) => {
+                                const next = { ...prev };
+                                delete next[a.user_id];
+                                return next;
+                              });
+                            } else {
+                              setRealBalances((prev) => {
+                                const next = { ...prev };
+                                delete next[a.user_id];
+                                return next;
+                              });
+                            }
+                            setAccountBalances((prev) => {
+                              const next = { ...prev };
+                              delete next[a.id];
+                              return next;
+                            });
                             await loadAllAdminData();
-                            flash(`Unlocked & synced live balance for ${a.deriv_login_id || a.deriv_account_id}`);
+                            flash(`Unlocked & synced live Deriv balance for ${a.deriv_login_id || a.deriv_account_id}`);
                           } catch (err) {
                             flash(err instanceof Error ? err.message : 'Sync failed', 'err');
                           } finally {
                             setBusyAction(null);
                           }
                         }}
-                        className={`px-2.5 py-1.5 rounded-lg cursor-pointer font-semibold ${
-                          !a.is_virtual && a.balance_locked_by_admin
-                            ? 'bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878]'
-                            : 'bg-white/5 hover:bg-white/10'
+                        className={`px-2.5 py-1.5 rounded-lg cursor-pointer font-semibold whitespace-nowrap ${
+                          a.balance_locked_by_admin
+                            ? 'bg-sky-500/20 hover:bg-sky-500/30 text-sky-300'
+                            : 'bg-white/5 hover:bg-white/10 text-slate-200'
                         }`}
                       >
                         {busyAction === `sync-${a.id}`
                           ? 'Syncing...'
-                          : !a.is_virtual && a.balance_locked_by_admin
-                            ? 'Unlock -> Real Deriv'
+                          : a.balance_locked_by_admin
+                            ? 'Unlock -> Live Deriv'
                             : 'Sync Live'}
                       </button>
                       <button
@@ -3522,7 +3752,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           await loadAllAdminData();
                           flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
                         }}
-                        className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
+                        className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer whitespace-nowrap"
                       >
                         {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
                       </button>
@@ -3532,7 +3762,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           await adminFetch(`/api/admin/connected-accounts/${a.id}/revoke`, { method: 'POST' });
                           loadAllAdminData();
                         }}
-                        className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] cursor-pointer"
+                        className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
                       >
                         Revoke
                       </button>
@@ -4709,9 +4939,20 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       },
                     }),
                   });
+                  const updatedId = editingUser.id;
                   setEditingUser(null);
+                  setRealBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[updatedId];
+                    return next;
+                  });
+                  setUserBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[updatedId];
+                    return next;
+                  });
                   await loadAllAdminData();
-                  flash('Trader profile & Main USD Wallet updated in PostgreSQL');
+                  flash('Trader profile & Main USD Wallet updated (DB locked in Mock mode)');
                 });
                 setBusyAction(null);
               }}
@@ -5023,21 +5264,26 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 );
               })()}
 
-              <div className="flex justify-end gap-2 pt-2">
-                <button
-                  type="button"
-                  onClick={() => setEditingUser(null)}
-                  className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 font-semibold cursor-pointer"
-                >
-                  Cancel
-                </button>
-                <button
-                  type="submit"
-                  disabled={busyAction === 'edit-user-modal'}
-                  className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
-                >
-                  {busyAction === 'edit-user-modal' ? 'Saving...' : 'Save & Sync All Balances'}
-                </button>
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-2">
+                <span className="text-[11px] text-amber-300">
+                  Saving Main USD locks DB into Mock trades &amp; data until synced from Deriv.
+                </span>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => setEditingUser(null)}
+                    className="px-4 py-2 rounded-xl bg-white/5 hover:bg-white/10 font-semibold cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="submit"
+                    disabled={busyAction === 'edit-user-modal'}
+                    className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer whitespace-nowrap"
+                  >
+                    {busyAction === 'edit-user-modal' ? 'Saving...' : 'Save & Lock DB (Mock Mode)'}
+                  </button>
+                </div>
               </div>
             </form>
           </div>
@@ -5164,9 +5410,20 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       reason: adjustTarget.reason,
                     }),
                   });
+                  const adjustedUserId = adjustTarget.user.id;
                   setAdjustTarget(null);
+                  setRealBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[adjustedUserId];
+                    return next;
+                  });
+                  setUserBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[adjustedUserId];
+                    return next;
+                  });
                   await loadAllAdminData();
-                  flash('Atomic balance adjustment committed & recorded in ledger');
+                  flash('Atomic balance adjustment committed (DB locked in Mock mode)');
                 });
                 setBusyAction(null);
               }}

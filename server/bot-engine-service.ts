@@ -580,8 +580,14 @@ function serializeTelemetry(s: InternalBotSession): BotTelemetry {
 }
 
 export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemetry> {
-  const userRow = await queryOne<{ status: string; trading_suspended: boolean; role: string }>(
-    'SELECT role, status, COALESCE(trading_suspended, FALSE) as trading_suspended FROM users WHERE id = $1',
+  const userRow = await queryOne<{
+    status: string;
+    trading_suspended: boolean;
+    role: string;
+    real_wallets_json: string | null;
+    demo_wallets_json: string | null;
+  }>(
+    'SELECT role, status, COALESCE(trading_suspended, FALSE) as trading_suspended, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
     [cfg.userId]
   );
   if (!userRow || userRow.status !== 'active') {
@@ -611,9 +617,19 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
 
   const targetMode: 'real' | 'demo' = cfg.accountMode === 'real' ? 'real' : 'demo';
   const targetIsVirtual = targetMode === 'demo';
+  let modeDbLocked = false;
+  try {
+    const parsedWallet = JSON.parse(
+      (targetMode === 'real' ? userRow.real_wallets_json : userRow.demo_wallets_json) || '{}'
+    );
+    modeDbLocked = Boolean(parsedWallet?.db_locked);
+  } catch {
+    modeDbLocked = false;
+  }
+
   let resolvedConnectedAccountId: number | null = cfg.connectedAccountId || null;
   let resolvedDerivLoginId: string | null = null;
-  let resolvedIsDbLocked = false;
+  let resolvedIsDbLocked = modeDbLocked;
 
   const matchingAcc = resolvedConnectedAccountId
     ? await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
@@ -634,7 +650,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   if (matchingAcc) {
     resolvedConnectedAccountId = matchingAcc.id;
     resolvedDerivLoginId = matchingAcc.deriv_login_id;
-    resolvedIsDbLocked = Boolean(matchingAcc.balance_locked_by_admin);
+    resolvedIsDbLocked = modeDbLocked || Boolean(matchingAcc.balance_locked_by_admin);
   }
 
   const resolvedExecutionMode: 'virtual' | 'deriv' =

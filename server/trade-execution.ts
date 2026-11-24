@@ -412,7 +412,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const effectiveBucket: WalletBucket = accDerivedBucket !== 'options' ? accDerivedBucket : requestedBucket;
 
   const isRealMode = accountMode === 'real';
-  const isDbLocked = Boolean(matchingAcc?.balance_locked_by_admin);
+  const isModeDbLocked = isRealMode ? Boolean(userRealWallets.db_locked) : Boolean(userDemoWallets.db_locked);
+  const isDbLocked = isModeDbLocked || Boolean(matchingAcc?.balance_locked_by_admin);
   // Active unlocked Deriv Options accounts (Demo OR Real) execute via live Deriv API;
   // Admin-locked or altered balances execute purely on mock/DB settlement.
   const hasUnlockedDerivAcc =
@@ -780,7 +781,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
           );
 
       const availDemoOptions =
-        demoAccRow && !demoAccRow.balance_locked_by_admin
+        demoAccRow && demoAccRow.balance_locked_by_admin
           ? Math.max(Number(demoAccRow.last_known_balance || 0), Number(dw.options || 0))
           : Number(dw.options || 0);
       if (availDemoOptions < stake) {

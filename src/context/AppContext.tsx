@@ -16,6 +16,7 @@ import { apiFetch, getStoredToken, setStoredToken, getClientDerivAppId, setClien
 import {
   getCfdAccountBucket,
   isCfdConnectedAccount,
+  isTradingModeDbLocked,
   type CfdBucket,
   type TradingScope,
 } from '../lib/balances';
@@ -44,6 +45,7 @@ interface AppContextValue {
   openCfdTrade: (opts?: { bucket?: CfdBucket; accountId?: number | null; symbol?: string }) => void;
   activeConnectedAccount: ConnectedAccount | null;
   setActiveConnectedAccountId: (id: number | null) => void;
+  isDbLocked: boolean;
   currencyDisplay: 'USD' | 'KSH';
   setCurrencyDisplay: (c: 'USD' | 'KSH') => void;
   hideBalances: boolean;
@@ -481,6 +483,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     .filter((v, idx, arr) => arr.indexOf(v) === idx)
     .sort()
     .join(',');
+  const activeSymbolsRef = useRef(activeSymbolsSignature);
+  activeSymbolsRef.current = activeSymbolsSignature;
+  const instrumentsRef = useRef(instruments);
+  instrumentsRef.current = instruments;
 
   // Connect to /ws with auto-reconnect & heartbeat for realtime ticks, exchange_ticks & order/balance/alert events
   useEffect(() => {
@@ -652,8 +658,87 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     };
   }, [token, refreshAccounts, showToast]);
 
-  // Direct multiplexed browser Deriv WS live feed for selectedSymbol, open order symbols & top synthetics
+  const modeAccounts = accounts.filter((a) =>
+    accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual
+  );
+  const activeConnectedAccount =
+    tradingScope === 'cfd'
+      ? (() => {
+          const cfdModeAccs = modeAccounts.filter(
+            (a) => a.status === 'active' && isCfdConnectedAccount(a)
+          );
+          const byId = activeConnectedAccountId
+            ? cfdModeAccs.find((a) => a.id === activeConnectedAccountId)
+            : undefined;
+          if (byId) return byId;
+          const bucketMatches = cfdModeAccs.filter(
+            (a) => getCfdAccountBucket(a) === activeCfdBucket
+          );
+          const pool = bucketMatches.length > 0 ? bucketMatches : cfdModeAccs;
+          return (
+            pool.find((a) => Number(a.balance || 0) > 0) ||
+            pool.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
+            pool[0] ||
+            null
+          );
+        })()
+      : (() => {
+          const optModeAccs = modeAccounts.filter(
+            (a) => a.status === 'active' && !isCfdConnectedAccount(a)
+          );
+          const byId = activeConnectedAccountId
+            ? optModeAccs.find((a) => a.id === activeConnectedAccountId)
+            : undefined;
+          return byId || optModeAccs[0] || null;
+        })();
+
+  const isDbLocked = isTradingModeDbLocked(user, accounts, accountMode, activeConnectedAccount);
+
+  // Direct multiplexed browser Deriv WS live feed when synced/unlocked,
+  // OR simulated mock tick generator when DB is locked by Admin
   useEffect(() => {
+    if (isDbLocked) {
+      try {
+        directWsRef.current?.close();
+      } catch {
+        // ignore
+      }
+      directWsRef.current = null;
+      directSubscribedRef.current.clear();
+
+      const mockTimer = setInterval(() => {
+        const syms = activeSymbolsRef.current.split(',').filter(Boolean);
+        if (syms.length === 0) return;
+        const nowEpoch = Math.floor(Date.now() / 1000);
+        const instList = instrumentsRef.current;
+        setTicks((prev) => {
+          const next = { ...prev };
+          for (const sym of syms) {
+            const inst = instList.find((i) => i.symbol === sym);
+            const cur = next[sym]?.quote ?? inst?.price ?? 1000;
+            const pip = next[sym]?.pipSize ?? inst?.pip_size ?? 0.01;
+            const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
+            const step = Math.max(pip * 3, cur * 0.00018);
+            const nextQuote = Number(Math.max(pip * 10, cur + (Math.random() - 0.5) * 2 * step).toFixed(dec));
+            const spread = inst?.spread ?? pip * 10;
+            next[sym] = {
+              symbol: sym,
+              quote: nextQuote,
+              bid: Number((nextQuote - spread / 2).toFixed(dec)),
+              ask: Number((nextQuote + spread / 2).toFixed(dec)),
+              epoch: nowEpoch,
+              pipSize: pip,
+              source: 'live_pulse',
+            };
+          }
+          return next;
+        });
+        setLastDerivTickAt(Date.now());
+      }, 900);
+
+      return () => clearInterval(mockTimer);
+    }
+
     let disposed = false;
     let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
     let pingTimer: ReturnType<typeof setInterval> | null = null;
@@ -750,7 +835,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         // ignore
       }
     };
-  }, []);
+  }, [isDbLocked]);
 
   useEffect(() => {
     const syms = activeSymbolsSignature.split(',').filter(Boolean);
@@ -840,40 +925,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     [hideBalances, currencyDisplay, kesRate]
   );
 
-  const modeAccounts = accounts.filter((a) =>
-    accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual
-  );
-  const activeConnectedAccount =
-    tradingScope === 'cfd'
-      ? (() => {
-          const cfdModeAccs = modeAccounts.filter(
-            (a) => a.status === 'active' && isCfdConnectedAccount(a)
-          );
-          const byId = activeConnectedAccountId
-            ? cfdModeAccs.find((a) => a.id === activeConnectedAccountId)
-            : undefined;
-          if (byId) return byId;
-          const bucketMatches = cfdModeAccs.filter(
-            (a) => getCfdAccountBucket(a) === activeCfdBucket
-          );
-          const pool = bucketMatches.length > 0 ? bucketMatches : cfdModeAccs;
-          return (
-            pool.find((a) => Number(a.balance || 0) > 0) ||
-            pool.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
-            pool[0] ||
-            null
-          );
-        })()
-      : (() => {
-          const optModeAccs = modeAccounts.filter(
-            (a) => a.status === 'active' && !isCfdConnectedAccount(a)
-          );
-          const byId = activeConnectedAccountId
-            ? optModeAccs.find((a) => a.id === activeConnectedAccountId)
-            : undefined;
-          return byId || optModeAccs[0] || null;
-        })();
-
   const unreadCount = notifications.filter((n) => !n.is_read).length;
 
   return (
@@ -891,6 +942,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         openCfdTrade,
         activeConnectedAccount,
         setActiveConnectedAccountId,
+        isDbLocked,
         currencyDisplay,
         setCurrencyDisplay,
         hideBalances,

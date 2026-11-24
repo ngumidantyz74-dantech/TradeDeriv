@@ -150,10 +150,84 @@ router.get('/market/instruments', async (_req, res) => {
   res.json({ instruments });
 });
 
+function buildSimulatedCandles(symbol: string, granularity: number, count: number) {
+  const inst = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+  const cachedTick = derivWs.getLatestTick(symbol);
+  const pip = cachedTick?.pipSize ?? inst?.pip_size ?? 0.01;
+  const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
+  const anchor = Number(cachedTick?.quote || inst?.base_price || 1000);
+  const stepSec = Math.max(1, granularity);
+  const nowSec = Math.floor(Date.now() / 1000);
+  const startSec = Math.floor(nowSec / stepSec) * stepSec - (count - 1) * stepSec;
+  const volScale = anchor * (symbol.startsWith('BOOM') || symbol.startsWith('CRASH') ? 0.0018 : 0.00055);
+
+  const candles: Array<{ time: number; open: number; high: number; low: number; close: number }> = [];
+  let cursor = anchor * (1 - 0.0015);
+  for (let i = 0; i < count; i++) {
+    const t = startSec + i * stepSec;
+    const wave = Math.sin(i * 0.37) * 0.45 + Math.cos(i * 0.19) * 0.35 + (Math.random() - 0.48) * 1.1;
+    const open = Number(cursor.toFixed(dec));
+    const close = Number(Math.max(pip * 10, open + wave * volScale).toFixed(dec));
+    const wickUp = Math.abs(Math.random() * volScale * 0.9);
+    const wickDn = Math.abs(Math.random() * volScale * 0.9);
+    const high = Number((Math.max(open, close) + wickUp).toFixed(dec));
+    const low = Number(Math.max(pip * 5, Math.min(open, close) - wickDn).toFixed(dec));
+    candles.push({ time: t, open, high, low, close });
+    cursor = close;
+  }
+  return candles;
+}
+
+function buildSimulatedTickPrices(symbol: string, count: number): number[] {
+  const inst = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+  const cachedTick = derivWs.getLatestTick(symbol);
+  const pip = cachedTick?.pipSize ?? inst?.pip_size ?? 0.01;
+  const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
+  let price = Number(cachedTick?.quote || inst?.base_price || 1000);
+  const volScale = price * 0.00025;
+  const out: number[] = [];
+  for (let i = 0; i < count; i++) {
+    price = Math.max(pip * 10, price + (Math.random() - 0.5) * volScale * 2);
+    out.push(Number(price.toFixed(dec)));
+  }
+  return out;
+}
+
 router.get('/market/candles', async (req, res) => {
   const symbol = String(req.query.symbol || '1HZ100V');
   const granularity = Number(req.query.granularity || 60);
   const count = Math.min(500, Math.max(20, Number(req.query.count || 120)));
+  const useMock = req.query.mock === '1' || req.query.mock === 'true';
+
+  if (useMock) {
+    const candles = buildSimulatedCandles(symbol, granularity, count);
+    const lastCandle = candles[candles.length - 1];
+    const cachedTick = derivWs.getLatestTick(symbol);
+    const inst = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+    const spread = inst?.spread ?? 0.2;
+    const pip = cachedTick?.pipSize ?? inst?.pip_size ?? 0.01;
+    const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;
+    const spot = lastCandle?.close ?? cachedTick?.quote ?? inst?.base_price ?? 1000;
+    res.json({
+      symbol,
+      granularity,
+      candles,
+      source: 'mock_sim',
+      error: null,
+      marketClosed: false,
+      lastUpdated: Date.now(),
+      latestTick: {
+        symbol,
+        quote: spot,
+        bid: Number((spot - spread / 2).toFixed(dec)),
+        ask: Number((spot + spread / 2).toFixed(dec)),
+        epoch: Math.floor(Date.now() / 1000),
+        pipSize: pip,
+        source: 'live_pulse',
+      },
+    });
+    return;
+  }
 
   const detailed = await derivWs.fetchCandlesDetailed(symbol, granularity, count);
   const tick = derivWs.getLatestTick(symbol);
@@ -172,10 +246,15 @@ router.get('/market/candles', async (req, res) => {
 router.get('/market/digit-analysis', async (req, res) => {
   const symbol = String(req.query.symbol || '1HZ100V');
   const count = Math.min(500, Math.max(20, Number(req.query.count || 100)));
+  const useMock = req.query.mock === '1' || req.query.mock === 'true';
 
-  const prices = await derivWs.fetchTickHistory(symbol, count);
+  const prices = useMock
+    ? buildSimulatedTickPrices(symbol, count)
+    : await derivWs.fetchTickHistory(symbol, count);
   const tick = derivWs.getLatestTick(symbol);
-  const decimals = tick && tick.pipSize < 0.0001 ? 5 : tick && tick.pipSize < 0.001 ? 4 : 2;
+  const inst = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+  const pipSize = tick?.pipSize ?? inst?.pip_size ?? 0.01;
+  const decimals = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : 2;
 
   const digitCounts = Array(10).fill(0);
   const digits: number[] = [];
@@ -218,6 +297,7 @@ router.get('/market/digit-analysis', async (req, res) => {
   res.json({
     symbol,
     count: digits.length,
+    source: useMock ? 'mock_sim' : 'deriv_ws',
     latestPrice: prices[prices.length - 1],
     lastDigit: digits[digits.length - 1],
     recentDigits: digits.slice(-25),

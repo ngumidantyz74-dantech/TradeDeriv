@@ -131,6 +131,7 @@ export const MT5TradingView: React.FC = () => {
     tradingScope,
     activeCfdBucket,
     activeConnectedAccount,
+    isDbLocked,
     selectedSymbol,
     setSelectedSymbol,
     tradePreset,
@@ -362,7 +363,7 @@ export const MT5TradingView: React.FC = () => {
         marketClosed?: boolean;
         lastUpdated?: string;
       }>(
-        `/api/market/candles?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${timeframe}&count=180&_t=${Date.now()}`,
+        `/api/market/candles?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${timeframe}&count=180&mock=${isDbLocked ? '1' : '0'}&_t=${Date.now()}`,
         {
           skipAuth: true,
           cache: 'no-store',
@@ -386,7 +387,7 @@ export const MT5TradingView: React.FC = () => {
       setMarketClosedReason(null);
       setCandleError(sanitizeUiError(err, 'Unable to load live candles from Deriv'));
     }
-  }, [selectedSymbol, timeframe]);
+  }, [selectedSymbol, timeframe, isDbLocked]);
 
   useEffect(() => {
     // Reset stale symbol/timeframe bars immediately on switch so old data never lingers
@@ -1192,7 +1193,7 @@ export const MT5TradingView: React.FC = () => {
           executionMode:
             tradingScope === 'cfd'
               ? 'virtual'
-              : activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin
+              : activeConnectedAccount && !isDbLocked
                 ? 'deriv'
                 : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,

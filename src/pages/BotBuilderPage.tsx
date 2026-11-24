@@ -171,6 +171,7 @@ export const BotBuilderPage: React.FC = () => {
     accountMode,
     setAccountMode,
     activeConnectedAccount,
+    isDbLocked,
     setActiveTab,
     setSelectedSymbol,
     tradePreset,
@@ -444,7 +445,7 @@ export const BotBuilderPage: React.FC = () => {
     let active = true;
     const load = () => {
       apiFetch<{ candles: CandleData[] }>(
-        `/api/market/candles?symbol=${encodeURIComponent(symbol)}&granularity=60&count=120&_t=${Date.now()}`,
+        `/api/market/candles?symbol=${encodeURIComponent(symbol)}&granularity=60&count=120&mock=${isDbLocked ? '1' : '0'}&_t=${Date.now()}`,
         { skipAuth: true, cache: 'no-store' }
       )
         .then((res) => {
@@ -458,7 +459,7 @@ export const BotBuilderPage: React.FC = () => {
       active = false;
       clearInterval(id);
     };
-  }, [botView, symbol]);
+  }, [botView, symbol, isDbLocked]);
 
   useEffect(() => {
     if (botView !== 'chart') return;
@@ -550,8 +551,7 @@ export const BotBuilderPage: React.FC = () => {
     setSubmitting(true);
     try {
       // Trade with REAL Deriv account balances (Demo OR Real) when connected & NOT altered/locked by admin
-      const isLiveDerivUnlocked =
-        Boolean(activeConnectedAccount) && !activeConnectedAccount?.balance_locked_by_admin;
+      const isLiveDerivUnlocked = Boolean(activeConnectedAccount) && !isDbLocked;
 
       const payload = {
         strategyName: overrides?.strategyName ?? xmlState.strategyName,
@@ -887,9 +887,9 @@ export const BotBuilderPage: React.FC = () => {
           id: 'init-acct',
           time: new Date().toISOString(),
           type: 'info',
-          text: activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin
+          text: activeConnectedAccount && !isDbLocked
             ? `You are using your live ${accountMode === 'demo' ? 'Demo' : 'Real'} Deriv account (${activeConnectedAccount.deriv_account_id}).`
-            : 'You are using your USD account.',
+            : 'You are using your USD account (Mock Mode).',
         },
       ];
     }
@@ -900,7 +900,7 @@ export const BotBuilderPage: React.FC = () => {
       if (journalFilter === 'bought') return j.type === 'bought' || j.type === 'stake';
       return true;
     });
-  }, [telemetry?.journal, journalFilter, activeConnectedAccount, accountMode]);
+  }, [telemetry?.journal, journalFilter, activeConnectedAccount, accountMode, isDbLocked]);
 
   const handleDownloadTransactions = () => {
     const rows = [

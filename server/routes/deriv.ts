@@ -180,18 +180,48 @@ async function upsertDerivAccountForUser(params: {
   return accountId;
 }
 
+function classifyDerivWalletBucket(accountType?: string | null, platform?: string | null): 'options' | 'mt5_standard' | 'mt5_gold' {
+  const s = `${accountType || ''} ${platform || ''}`.toLowerCase();
+  if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
+  if (s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')) {
+    return 'mt5_standard';
+  }
+  return 'options';
+}
+
+async function getUserModeDbLocks(userId: number): Promise<{ realDbLocked: boolean; demoDbLocked: boolean }> {
+  const u = await queryOne<{ real_wallets_json: string | null; demo_wallets_json: string | null }>(
+    'SELECT real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
+    [userId]
+  );
+  let realDbLocked = false;
+  let demoDbLocked = false;
+  try {
+    realDbLocked = Boolean(JSON.parse(u?.real_wallets_json || '{}')?.db_locked);
+  } catch {
+    realDbLocked = false;
+  }
+  try {
+    demoDbLocked = Boolean(JSON.parse(u?.demo_wallets_json || '{}')?.db_locked);
+  } catch {
+    demoDbLocked = false;
+  }
+  return { realDbLocked, demoDbLocked };
+}
+
 async function syncRealDerivWalletForUser(userId: number): Promise<void> {
   const realRows = await query<{
     id: number;
+    account_type: string;
+    platform: string;
     last_known_balance: number;
     balance_locked_by_admin: boolean;
   }>(
-    `SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+    `SELECT id, account_type, platform, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
      FROM connected_accounts
      WHERE user_id = $1
        AND is_virtual = FALSE
        AND status = 'active'
-       AND (platform = 'deriv' OR platform IS NULL)
      ORDER BY id ASC`,
     [userId]
   );
@@ -199,28 +229,45 @@ async function syncRealDerivWalletForUser(userId: number): Promise<void> {
     return;
   }
 
-  const primaryBalance = Number(Number(realRows[0].last_known_balance || 0).toFixed(2));
   const userRow = await queryOne<{ real_wallets_json: string | null }>(
     'SELECT real_wallets_json FROM users WHERE id = $1',
     [userId]
   );
   if (!userRow) return;
 
-  let currentRw: Record<string, number> = {
+  let currentRw: Record<string, any> = {
     main_usd: 0,
     options: 0,
     mt5_standard: 0,
     mt5_gold: 0,
     exchange_usdt: 0,
+    db_locked: false,
   };
   try {
     currentRw = { ...currentRw, ...(JSON.parse(userRow.real_wallets_json || '{}') || {}) };
   } catch {
     // keep default shape
   }
+  if (currentRw.db_locked === true) return;
 
-  if (Number(currentRw.options ?? 0) === primaryBalance) return;
-  currentRw.options = primaryBalance;
+  const realOpts = realRows.filter((r) => classifyDerivWalletBucket(r.account_type, r.platform) === 'options');
+  const realStd = realRows.filter((r) => classifyDerivWalletBucket(r.account_type, r.platform) === 'mt5_standard');
+  const realGold = realRows.filter((r) => classifyDerivWalletBucket(r.account_type, r.platform) === 'mt5_gold');
+
+  const nextOpts = realOpts.length > 0 ? Number(realOpts.reduce((s, r) => s + Number(r.last_known_balance || 0), 0).toFixed(2)) : Number(currentRw.options ?? 0);
+  const nextStd = realStd.length > 0 ? Number(realStd.reduce((s, r) => s + Number(r.last_known_balance || 0), 0).toFixed(2)) : Number(currentRw.mt5_standard ?? 0);
+  const nextGold = realGold.length > 0 ? Number(realGold.reduce((s, r) => s + Number(r.last_known_balance || 0), 0).toFixed(2)) : Number(currentRw.mt5_gold ?? 0);
+
+  if (
+    Number(currentRw.options ?? 0) === nextOpts &&
+    Number(currentRw.mt5_standard ?? 0) === nextStd &&
+    Number(currentRw.mt5_gold ?? 0) === nextGold
+  ) {
+    return;
+  }
+  currentRw.options = nextOpts;
+  currentRw.mt5_standard = nextStd;
+  currentRw.mt5_gold = nextGold;
   await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
     JSON.stringify(currentRw),
     userId,
@@ -230,15 +277,16 @@ async function syncRealDerivWalletForUser(userId: number): Promise<void> {
 async function syncDemoDerivWalletForUser(userId: number): Promise<void> {
   const demoRows = await query<{
     id: number;
+    account_type: string;
+    platform: string;
     last_known_balance: number;
     balance_locked_by_admin: boolean;
   }>(
-    `SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+    `SELECT id, account_type, platform, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
      FROM connected_accounts
      WHERE user_id = $1
        AND is_virtual = TRUE
        AND status = 'active'
-       AND (platform = 'deriv' OR platform IS NULL)
      ORDER BY id ASC`,
     [userId]
   );
@@ -246,28 +294,45 @@ async function syncDemoDerivWalletForUser(userId: number): Promise<void> {
     return;
   }
 
-  const primaryBalance = Number(Number(demoRows[0].last_known_balance || 0).toFixed(2));
   const userRow = await queryOne<{ demo_wallets_json: string | null; virtual_workspace_balance: number }>(
     'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
     [userId]
   );
   if (!userRow) return;
 
-  let currentDw: Record<string, number> = {
+  let currentDw: Record<string, any> = {
     main_usd: Number(userRow.virtual_workspace_balance ?? 10000),
     options: 0,
     mt5_standard: 0,
     mt5_gold: 0,
     exchange_usdt: 0,
+    db_locked: false,
   };
   try {
     currentDw = { ...currentDw, ...(JSON.parse(userRow.demo_wallets_json || '{}') || {}) };
   } catch {
     // keep default shape
   }
+  if (currentDw.db_locked === true) return;
 
-  if (Number(currentDw.options ?? 0) === primaryBalance) return;
-  currentDw.options = primaryBalance;
+  const demoOpts = demoRows.filter((r) => classifyDerivWalletBucket(r.account_type, r.platform) === 'options');
+  const demoStd = demoRows.filter((r) => classifyDerivWalletBucket(r.account_type, r.platform) === 'mt5_standard');
+  const demoGold = demoRows.filter((r) => classifyDerivWalletBucket(r.account_type, r.platform) === 'mt5_gold');
+
+  const nextOpts = demoOpts.length > 0 ? Number(demoOpts.reduce((s, r) => s + Number(r.last_known_balance || 0), 0).toFixed(2)) : Number(currentDw.options ?? 0);
+  const nextStd = demoStd.length > 0 ? Number(demoStd.reduce((s, r) => s + Number(r.last_known_balance || 0), 0).toFixed(2)) : Number(currentDw.mt5_standard ?? 0);
+  const nextGold = demoGold.length > 0 ? Number(demoGold.reduce((s, r) => s + Number(r.last_known_balance || 0), 0).toFixed(2)) : Number(currentDw.mt5_gold ?? 0);
+
+  if (
+    Number(currentDw.options ?? 0) === nextOpts &&
+    Number(currentDw.mt5_standard ?? 0) === nextStd &&
+    Number(currentDw.mt5_gold ?? 0) === nextGold
+  ) {
+    return;
+  }
+  currentDw.options = nextOpts;
+  currentDw.mt5_standard = nextStd;
+  currentDw.mt5_gold = nextGold;
   await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
     JSON.stringify(currentDw),
     userId,
@@ -570,11 +635,12 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       const lockedLoginIds = new Set(
         existingAccRows.filter((r) => Boolean(r.balance_locked_by_admin)).map((r) => String(r.deriv_login_id))
       );
+      const { realDbLocked, demoDbLocked } = await getUserModeDbLocks(session.user.id);
 
       const syncedAccountsLog: Array<{ loginId: string; isVirtual: boolean; balance: number; locked: boolean }> = [];
       for (const e of entries) {
         const isVirtual = isVirtualDerivAccount(e.acct);
-        const isAdminLocked = lockedLoginIds.has(e.acct);
+        const isAdminLocked = lockedLoginIds.has(e.acct) || (isVirtual ? demoDbLocked : realDbLocked);
         let bal = isVirtual ? 10000 : 0;
         if (!isAdminLocked) {
           try {
@@ -854,10 +920,11 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
     const lockedLoginIds = new Set(
       lockedRows.filter((r) => Boolean(r.balance_locked_by_admin)).map((r) => String(r.deriv_login_id))
     );
+    const { realDbLocked, demoDbLocked } = await getUserModeDbLocks(session.user.id);
 
     const syncedAccountsLog: Array<{ loginId: string; isVirtual: boolean; balance: number; locked: boolean }> = [];
     for (const acc of derivAccounts) {
-      const isAdminLocked = lockedLoginIds.has(acc.account_id);
+      const isAdminLocked = lockedLoginIds.has(acc.account_id) || (Boolean(acc.is_virtual) ? demoDbLocked : realDbLocked);
       await upsertDerivAccountForUser({
         userId: session.user.id,
         derivLoginId: acc.account_id,
@@ -936,12 +1003,13 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
     const lockedLoginIds = new Set(
       existingAccRows.filter((r) => Boolean(r.balance_locked_by_admin)).map((r) => String(r.deriv_login_id))
     );
+    const { realDbLocked, demoDbLocked } = await getUserModeDbLocks(req.user!.id);
 
     for (const a of accounts) {
       if (!a.acct || !a.token) continue;
       const loginId = String(a.acct);
-      const isAdminLocked = lockedLoginIds.has(loginId);
       const isVirtual = isVirtualDerivAccount(loginId);
+      const isAdminLocked = lockedLoginIds.has(loginId) || (isVirtual ? demoDbLocked : realDbLocked);
       let bal = isVirtual ? 10000 : 0;
       if (!isAdminLocked) {
         try {
@@ -1106,10 +1174,12 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
   );
 
   if (sync) {
+    const { realDbLocked, demoDbLocked } = await getUserModeDbLocks(req.user!.id);
     let anyUpdated = false;
     for (const acc of rows) {
+      const modeLocked = acc.is_virtual ? demoDbLocked : realDbLocked;
       // Never overwrite admin-locked balances during user-triggered ?sync=1
-      if (acc.status !== 'active' || acc.balance_locked_by_admin) continue;
+      if (acc.status !== 'active' || acc.balance_locked_by_admin || modeLocked) continue;
 
       const auth = await queryOne<{ encrypted_token: string; token_iv: string; token_auth_tag: string }>(
         'SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE connected_account_id = $1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
@@ -1161,8 +1231,8 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
 
 router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const accId = Number(req.params.id);
-  const acc = await queryOne<{ id: number; balance_locked_by_admin: boolean }>(
-    'SELECT id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2',
+  const acc = await queryOne<{ id: number; is_virtual: boolean; balance_locked_by_admin: boolean }>(
+    'SELECT id, is_virtual, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2',
     [accId, req.user!.id]
   );
   if (!acc) {
@@ -1170,8 +1240,11 @@ router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: Auth
     return;
   }
 
+  const { realDbLocked, demoDbLocked } = await getUserModeDbLocks(req.user!.id);
+  const modeLocked = acc.is_virtual ? demoDbLocked : realDbLocked;
+
   // Preserve DB balance when locked by Admin
-  if (!acc.balance_locked_by_admin) {
+  if (!acc.balance_locked_by_admin && !modeLocked) {
     const auth = await queryOne<{ encrypted_token: string; token_iv: string; token_auth_tag: string }>(
       'SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE connected_account_id = $1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
       [acc.id]

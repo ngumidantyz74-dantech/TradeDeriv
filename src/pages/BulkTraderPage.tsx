@@ -11,6 +11,7 @@ export const BulkTraderPage: React.FC = () => {
     orders,
     accountMode,
     activeConnectedAccount,
+    isDbLocked,
     refreshOrders,
     refreshAll,
     showToast,
@@ -55,8 +56,7 @@ export const BulkTraderPage: React.FC = () => {
           slUsd: Number(slUsd) || null,
           tpUsd: Number(tpUsd) || null,
           accountMode,
-          executionMode:
-            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
+          executionMode: activeConnectedAccount && !isDbLocked ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });

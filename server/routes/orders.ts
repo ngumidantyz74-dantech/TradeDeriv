@@ -134,26 +134,43 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
     await derivWs.ensureSymbolSubscribed(symbol).catch(() => {});
     await derivWs.getLiveQuote(symbol).catch(() => null);
 
-    // Upfront batch balance check for wallet/demo modes (skip blocking when unlocked Demo Deriv account trades live)
-    let skipDemoLocalCheck = false;
-    if (acctMode === 'demo' && requestedBucket === 'options' && body.executionMode === 'deriv') {
-      const demoAcc = connectedAccId
+    // Upfront batch balance check for wallet/demo modes (skip blocking when unlocked Deriv account trades live)
+    const uWalletRow = await queryOne<{ virtual_workspace_balance: number; demo_wallets_json: string; real_wallets_json: string }>(
+      'SELECT virtual_workspace_balance, demo_wallets_json, real_wallets_json FROM users WHERE id = $1',
+      [req.user!.id]
+    );
+    const parseW = (raw: string | null | undefined) => {
+      try {
+        return JSON.parse(raw || '{}');
+      } catch {
+        return {};
+      }
+    };
+    const dwParsed = parseW(uWalletRow?.demo_wallets_json);
+    const rwParsed = parseW(uWalletRow?.real_wallets_json);
+    const isModeDbLocked = acctMode === 'real' ? Boolean(rwParsed?.db_locked) : Boolean(dwParsed?.db_locked);
+
+    let skipLocalCheck = false;
+    if (requestedBucket === 'options' && body.executionMode === 'deriv' && !isModeDbLocked) {
+      const targetIsVirt = acctMode === 'demo';
+      const optAcc = connectedAccId
         ? await queryOne<{ balance_locked_by_admin: boolean }>(
-            "SELECT COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2 AND is_virtual = TRUE AND status = 'active'",
-            [connectedAccId, req.user!.id]
+            "SELECT COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2 AND is_virtual = $3 AND status = 'active'",
+            [connectedAccId, req.user!.id, targetIsVirt]
           )
         : await queryOne<{ balance_locked_by_admin: boolean }>(
-            "SELECT COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active' ORDER BY COALESCE(balance_locked_by_admin, FALSE) ASC, id ASC LIMIT 1",
-            [req.user!.id]
+            "SELECT COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1 AND is_virtual = $2 AND (platform = 'deriv' OR platform IS NULL) AND status = 'active' ORDER BY COALESCE(balance_locked_by_admin, FALSE) ASC, id ASC LIMIT 1",
+            [req.user!.id, targetIsVirt]
           );
-      if (demoAcc && !demoAcc.balance_locked_by_admin) {
-        skipDemoLocalCheck = true;
+      if (optAcc && !optAcc.balance_locked_by_admin) {
+        skipLocalCheck = true;
       }
     }
 
-    if (acctMode === 'demo' && !skipDemoLocalCheck) {
+    if (acctMode === 'demo' && !skipLocalCheck) {
       let effectiveBucket: WalletBucket = requestedBucket;
       let accBal: number | null = null;
+      let accLocked = false;
       if (connectedAccId) {
         const acc = await queryOne<{
           account_type: string;
@@ -169,21 +186,12 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
           const derived = classifyConnectedAccountBucket(acc);
           if (derived !== 'options') effectiveBucket = derived;
           accBal = Number(acc.last_known_balance ?? acc.balance ?? 0);
+          accLocked = Boolean(acc.balance_locked_by_admin);
         }
       }
 
-      const u = await queryOne<{ virtual_workspace_balance: number; demo_wallets_json: string }>(
-        'SELECT virtual_workspace_balance, demo_wallets_json FROM users WHERE id = $1',
-        [req.user!.id]
-      );
       if (effectiveBucket !== 'options') {
-        let dwBal = 0;
-        try {
-          const dw = JSON.parse(u?.demo_wallets_json || '{}');
-          dwBal = Number(dw?.[effectiveBucket] || 0);
-        } catch {
-          dwBal = 0;
-        }
+        const dwBal = Number(dwParsed?.[effectiveBucket] || 0);
         const availDemoCfd = accBal !== null && (accBal > 0 || dwBal === 0) ? accBal : dwBal;
         if (availDemoCfd < totalBatchStake) {
           res.status(400).json({
@@ -191,11 +199,15 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
           });
           return;
         }
-      } else if (Number(u?.virtual_workspace_balance ?? 0) < totalBatchStake) {
-        res.status(400).json({
-          error: `Insufficient Demo balance ($${Number(u?.virtual_workspace_balance ?? 0).toFixed(2)}) for ${count}x $${unitStake.toFixed(2)} batch ($${totalBatchStake.toFixed(2)}).`,
-        });
-        return;
+      } else {
+        const dwOpts = Number(dwParsed?.options || 0);
+        const availDemoOptions = accLocked && accBal !== null ? Math.max(accBal, dwOpts) : dwOpts;
+        if (availDemoOptions < totalBatchStake) {
+          res.status(400).json({
+            error: `Insufficient Demo Options balance ($${availDemoOptions.toFixed(2)}) for ${count}x $${unitStake.toFixed(2)} batch ($${totalBatchStake.toFixed(2)}). Transfer funds from USD Wallet to Options first.`,
+          });
+          return;
+        }
       }
     }
 

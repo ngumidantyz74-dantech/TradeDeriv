@@ -43,6 +43,7 @@ export const TradingBotsPage: React.FC = () => {
     setActiveTab,
     accountMode,
     activeConnectedAccount,
+    isDbLocked,
     refreshOrders,
     refreshAll,
     showToast,
@@ -224,8 +225,7 @@ export const TradingBotsPage: React.FC = () => {
           stopLoss: s.config?.stopLoss ?? 3,
           maxTrades: s.config?.maxTrades ?? 15,
           accountMode,
-          executionMode:
-            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
+          executionMode: activeConnectedAccount && !isDbLocked ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });

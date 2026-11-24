@@ -49,6 +49,7 @@ export function formatPublicUser(u: any) {
       mt5_standard: 0,
       mt5_gold: 0,
       exchange_usdt: 0,
+      db_locked: false,
     }),
     demo_wallets: parseWalletJson(u.demo_wallets_json, {
       main_usd: Number(u.virtual_workspace_balance ?? 10000),
@@ -56,6 +57,7 @@ export function formatPublicUser(u: any) {
       mt5_standard: 0,
       mt5_gold: 0,
       exchange_usdt: 0,
+      db_locked: false,
     }),
     exchange_balances: parseWalletJson(u.exchange_balances_json, {
       USDT: 0,
