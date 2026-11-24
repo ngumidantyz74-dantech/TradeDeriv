@@ -25,7 +25,7 @@ import {
   invalidateAuthUserCache,
   type AuthRequest,
 } from '../middleware/auth.ts';
-import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
+import { derivWs, derivRestRequest, OtpDerivClient, getActiveDerivAppId } from '../deriv-client.ts';
 import { isVirtualDerivAccount } from './deriv.ts';
 import { closeOrderById } from '../trade-execution.ts';
 import { invalidateInstrumentsCache } from './market.ts';
@@ -1925,6 +1925,373 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
       error: err instanceof Error ? err.message : 'Failed to update Real balance',
     });
   }
+});
+
+function classifyAdminAccBucket(accountType?: string | null, platform?: string | null): 'options' | 'mt5_standard' | 'mt5_gold' {
+  const s = `${accountType || ''} ${platform || ''}`.toLowerCase();
+  if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
+  if (s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')) {
+    return 'mt5_standard';
+  }
+  return 'options';
+}
+
+async function syncUserAccountsFromActualDeriv(
+  userId: number,
+  modeFilter: 'all' | 'real' | 'demo' = 'all'
+): Promise<{
+  userId: number;
+  accountsProcessed: number;
+  liveSynced: number;
+  unlockedCount: number;
+  realOptionsBalance: number | null;
+  demoOptionsBalance: number | null;
+}> {
+  const accounts = await query<any>(
+    `SELECT id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+            last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin, status
+     FROM connected_accounts
+     WHERE user_id = $1 AND status IN ('active', 'frozen')
+     ORDER BY id ASC`,
+    [userId]
+  );
+
+  const scopedAccounts = accounts.filter((acc) => {
+    if (modeFilter === 'real') return !acc.is_virtual;
+    if (modeFilter === 'demo') return Boolean(acc.is_virtual);
+    return true;
+  });
+
+  const authRows = await query<{
+    connected_account_id: number;
+    encrypted_token: string;
+    token_iv: string;
+    token_auth_tag: string;
+  }>(
+    `SELECT connected_account_id, encrypted_token, token_iv, token_auth_tag
+     FROM account_authorizations
+     WHERE user_id = $1 AND revoked_at IS NULL
+     ORDER BY id DESC`,
+    [userId]
+  );
+
+  const tokenByAccId = new Map<number, string>();
+  let fallbackOAuthToken: string | null = null;
+  for (const row of authRows) {
+    try {
+      const raw = decryptToken(row.encrypted_token, row.token_iv, row.token_auth_tag);
+      if (raw && !tokenByAccId.has(Number(row.connected_account_id))) {
+        tokenByAccId.set(Number(row.connected_account_id), raw);
+      }
+      if (raw && raw.startsWith('ory_at_') && !fallbackOAuthToken) {
+        fallbackOAuthToken = raw;
+      }
+    } catch {
+      // ignore corrupted token
+    }
+  }
+
+  const oauthOptionsCache = new Map<string, any[]>();
+  const oauthMt5Cache = new Map<string, any[]>();
+  const legacyMt5Cache = new Map<string, any[]>();
+
+  let liveSynced = 0;
+  let unlockedCount = 0;
+
+  for (const acc of scopedAccounts) {
+    // Always clear DB lock override when admin triggers Reset / Sync from actual Deriv
+    await execute('UPDATE connected_accounts SET balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $1', [
+      acc.id,
+    ]);
+    acc.balance_locked_by_admin = false;
+    unlockedCount += 1;
+
+    const rawToken = tokenByAccId.get(Number(acc.id)) || fallbackOAuthToken;
+    if (!rawToken) continue;
+
+    const bucket = classifyAdminAccBucket(acc.account_type, acc.platform);
+    let syncedBalance: number | null = null;
+
+    try {
+      if (rawToken.startsWith('ory_at_')) {
+        if (!oauthOptionsCache.has(rawToken)) {
+          try {
+            const listResp = await derivRestRequest<any>('/trading/v1/options/accounts', rawToken);
+            const list = listResp?.data || listResp?.accounts || (Array.isArray(listResp) ? listResp : []);
+            oauthOptionsCache.set(rawToken, Array.isArray(list) ? list : []);
+          } catch {
+            oauthOptionsCache.set(rawToken, []);
+          }
+        }
+        const optList = oauthOptionsCache.get(rawToken) || [];
+        const matchedOpt = optList.find(
+          (item: any) =>
+            String(item.account_id || item.loginid || '') === String(acc.deriv_login_id) ||
+            String(item.account_id || item.loginid || '') === String(acc.deriv_account_id)
+        );
+        if (matchedOpt && matchedOpt.balance !== undefined) {
+          syncedBalance = Number(matchedOpt.balance);
+        } else if (bucket !== 'options' && optList.length > 0) {
+          if (!oauthMt5Cache.has(rawToken)) {
+            let mt5List: any[] = [];
+            try {
+              const seedId = String(optList[0].account_id || optList[0].loginid || '');
+              if (seedId) {
+                const otpResp = await derivRestRequest<any>(
+                  `/trading/v1/options/accounts/${seedId}/otp`,
+                  rawToken,
+                  { method: 'POST' }
+                );
+                const rawOtp = String(
+                  otpResp?.url ||
+                    otpResp?.ws_url ||
+                    otpResp?.data?.url ||
+                    otpResp?.data?.ws_url ||
+                    otpResp?.otp ||
+                    otpResp?.data?.otp ||
+                    ''
+                ).trim();
+                const otpUrl = rawOtp
+                  ? rawOtp.startsWith('ws://') || rawOtp.startsWith('wss://')
+                    ? rawOtp
+                    : `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(getActiveDerivAppId())}&otp=${encodeURIComponent(rawOtp)}`
+                  : '';
+                if (otpUrl) {
+                  const mt5Resp = await OtpDerivClient.requestOnOtpUrl<any>(otpUrl, { mt5_login_list: 1 }, 4500);
+                  if (Array.isArray(mt5Resp?.mt5_login_list)) {
+                    mt5List = mt5Resp.mt5_login_list;
+                  }
+                }
+              }
+            } catch {
+              // keep empty
+            }
+            oauthMt5Cache.set(rawToken, mt5List);
+          }
+          const mt5List = oauthMt5Cache.get(rawToken) || [];
+          const matchedMt5 = mt5List.find(
+            (m: any) =>
+              String(m.login || m.display_login || '') === String(acc.deriv_login_id) ||
+              String(m.login || m.display_login || '') === String(acc.deriv_account_id)
+          );
+          if (matchedMt5 && matchedMt5.balance !== undefined) {
+            syncedBalance = Number(matchedMt5.balance);
+          }
+        }
+      } else {
+        if (bucket === 'options') {
+          const resp = await derivWs.requestWithToken(rawToken, { balance: 1 }, 4500);
+          if (
+            resp?.balance?.balance !== undefined &&
+            (!resp.balance.loginid || String(resp.balance.loginid) === String(acc.deriv_login_id))
+          ) {
+            syncedBalance = Number(resp.balance.balance);
+          }
+        } else {
+          if (!legacyMt5Cache.has(rawToken)) {
+            let mt5List: any[] = [];
+            try {
+              const mt5Resp = await derivWs.requestWithToken(rawToken, { mt5_login_list: 1 }, 4500);
+              if (Array.isArray(mt5Resp?.mt5_login_list)) {
+                mt5List = mt5Resp.mt5_login_list;
+              }
+            } catch {
+              // ignore
+            }
+            legacyMt5Cache.set(rawToken, mt5List);
+          }
+          const matchedMt5 = (legacyMt5Cache.get(rawToken) || []).find(
+            (m: any) =>
+              String(m.login || m.display_login || '') === String(acc.deriv_login_id) ||
+              String(m.login || m.display_login || '') === String(acc.deriv_account_id)
+          );
+          if (matchedMt5 && matchedMt5.balance !== undefined) {
+            syncedBalance = Number(matchedMt5.balance);
+          }
+        }
+      }
+
+      if (syncedBalance !== null && Number.isFinite(syncedBalance) && syncedBalance >= 0) {
+        const cleanBal = Number(syncedBalance.toFixed(2));
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $2',
+          [cleanBal, acc.id]
+        );
+        acc.last_known_balance = cleanBal;
+        acc.balance = cleanBal;
+        liveSynced += 1;
+      }
+    } catch {
+      // keep existing unlocked balance if Deriv API temporarily unreachable for this account
+    }
+
+    derivWs.emitUserEvent(userId, 'account_updated', {
+      accountId: acc.id,
+      balance: Number(acc.last_known_balance ?? 0),
+    });
+  }
+
+  const userRow = await queryOne<{
+    virtual_workspace_balance: number;
+    real_wallets_json: string;
+    demo_wallets_json: string;
+  }>('SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1', [userId]);
+
+  let finalDemoOptions = Number(userRow?.virtual_workspace_balance ?? 10000);
+  const rw = (() => {
+    try {
+      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow?.real_wallets_json || '{}') };
+    } catch {
+      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+    }
+  })();
+  const dw = (() => {
+    try {
+      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow?.demo_wallets_json || '{}') };
+    } catch {
+      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+    }
+  })();
+
+  if (modeFilter === 'all' || modeFilter === 'real') {
+    const realOpts = accounts.filter((a) => !a.is_virtual && classifyAdminAccBucket(a.account_type, a.platform) === 'options');
+    const realStd = accounts.filter((a) => !a.is_virtual && classifyAdminAccBucket(a.account_type, a.platform) === 'mt5_standard');
+    const realGold = accounts.filter((a) => !a.is_virtual && classifyAdminAccBucket(a.account_type, a.platform) === 'mt5_gold');
+
+    if (realOpts.length > 0) {
+      rw.options = Number(Number(realOpts[0].last_known_balance ?? 0).toFixed(2));
+    }
+    if (realStd.length > 0) {
+      rw.mt5_standard = Number(realStd.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2));
+    }
+    if (realGold.length > 0) {
+      rw.mt5_gold = Number(realGold.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2));
+    }
+    await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+      JSON.stringify(rw),
+      userId,
+    ]);
+  }
+
+  if (modeFilter === 'all' || modeFilter === 'demo') {
+    const demoOpts = accounts.filter((a) => Boolean(a.is_virtual) && classifyAdminAccBucket(a.account_type, a.platform) === 'options');
+    const demoStd = accounts.filter((a) => Boolean(a.is_virtual) && classifyAdminAccBucket(a.account_type, a.platform) === 'mt5_standard');
+    const demoGold = accounts.filter((a) => Boolean(a.is_virtual) && classifyAdminAccBucket(a.account_type, a.platform) === 'mt5_gold');
+
+    if (demoOpts.length > 0) {
+      finalDemoOptions = Number(Number(demoOpts[0].last_known_balance ?? finalDemoOptions).toFixed(2));
+      await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+        finalDemoOptions,
+        userId,
+      ]);
+    }
+    if (demoStd.length > 0) {
+      dw.mt5_standard = Number(demoStd.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2));
+    }
+    if (demoGold.length > 0) {
+      dw.mt5_gold = Number(demoGold.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2));
+    }
+    if (demoStd.length > 0 || demoGold.length > 0) {
+      await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(dw),
+        userId,
+      ]);
+    }
+  }
+
+  invalidateAuthUserCache(userId);
+  derivWs.emitUserEvent(userId, 'balance_updated', {
+    virtual_workspace_balance: finalDemoOptions,
+    real_wallets: rw,
+    realWallets: rw,
+    demo_wallets: dw,
+    demoWallets: dw,
+  });
+  derivWs.emitUserEvent(userId, 'account_updated', { userId });
+
+  return {
+    userId,
+    accountsProcessed: scopedAccounts.length,
+    liveSynced,
+    unlockedCount,
+    realOptionsBalance: modeFilter === 'demo' ? null : Number(rw.options ?? 0),
+    demoOptionsBalance: modeFilter === 'real' ? null : finalDemoOptions,
+  };
+}
+
+router.post('/admin/users/bulk-sync-deriv', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
+  const rawMode = String(req.body?.mode || 'all').toLowerCase();
+  const modeFilter: 'all' | 'real' | 'demo' =
+    rawMode === 'real' || rawMode === 'demo' ? rawMode : 'all';
+  const requestedIds: number[] = Array.isArray(req.body?.userIds)
+    ? req.body.userIds.map((v: unknown) => Number(v)).filter((n: number) => Number.isFinite(n) && n > 0)
+    : [];
+
+  const params: unknown[] = [];
+  const where: string[] = [buildScopedClientCondition(ctx, 'u', params), "u.role = 'user'"];
+  if (requestedIds.length > 0) {
+    params.push(requestedIds);
+    where.push(`u.id = ANY($${params.length}::int[])`);
+  }
+
+  const users = await query<{ id: number; email: string }>(
+    `SELECT u.id, u.email FROM users u WHERE ${where.join(' AND ')} ORDER BY u.id DESC LIMIT 200`,
+    params
+  );
+
+  const results: Array<Awaited<ReturnType<typeof syncUserAccountsFromActualDeriv>>> = [];
+  const concurrency = 4;
+  for (let i = 0; i < users.length; i += concurrency) {
+    const batch = users.slice(i, i + concurrency);
+    const settled = await Promise.all(
+      batch.map((u) => syncUserAccountsFromActualDeriv(u.id, modeFilter))
+    );
+    results.push(...settled);
+  }
+
+  const totalAccounts = results.reduce((s, r) => s + r.accountsProcessed, 0);
+  const totalLive = results.reduce((s, r) => s + r.liveSynced, 0);
+  const totalUnlocked = results.reduce((s, r) => s + r.unlockedCount, 0);
+
+  await logAdminAction(req.user!.id, 'bulk_sync_deriv_accounts', 'users', String(results.length), {
+    modeFilter,
+    usersSynced: results.length,
+    totalAccounts,
+    totalLive,
+    totalUnlocked,
+  });
+
+  res.json({
+    ok: true,
+    usersSynced: results.length,
+    totalAccounts,
+    totalLive,
+    totalUnlocked,
+    results,
+  });
+});
+
+router.post('/admin/users/:id/sync-deriv', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
+  const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'sync_user_deriv_accounts'))) return;
+  const rawMode = String(req.body?.mode || 'all').toLowerCase();
+  const modeFilter: 'all' | 'real' | 'demo' =
+    rawMode === 'real' || rawMode === 'demo' ? rawMode : 'all';
+
+  const user = await queryOne<{ id: number; email: string }>('SELECT id, email FROM users WHERE id = $1', [id]);
+  if (!user) {
+    res.status(404).json({ error: 'User not found' });
+    return;
+  }
+
+  const summary = await syncUserAccountsFromActualDeriv(id, modeFilter);
+  await logAdminAction(req.user!.id, 'sync_user_deriv_accounts', 'users', String(id), {
+    email: user.email,
+    modeFilter,
+    ...summary,
+  });
+  res.json({ ok: true, ...summary });
 });
 
 router.delete('/admin/users/:id', requireDb, requireAdmin, requirePermission('users.delete'), async (req: AuthRequest, res) => {

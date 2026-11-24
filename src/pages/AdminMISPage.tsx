@@ -2406,6 +2406,115 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   );
                 });
 
+              const handleSyncUserDeriv = async (
+                userId: number,
+                mode: 'all' | 'real' | 'demo',
+                emailLabel: string
+              ) => {
+                const key = `usync-${mode}-${userId}`;
+                setBusyAction(key);
+                try {
+                  const res = await adminFetch<{
+                    liveSynced: number;
+                    accountsProcessed: number;
+                    unlockedCount: number;
+                    realOptionsBalance: number | null;
+                    demoOptionsBalance: number | null;
+                  }>(`/api/admin/users/${userId}/sync-deriv`, {
+                    method: 'POST',
+                    body: JSON.stringify({ mode }),
+                  });
+                  if (mode === 'all' || mode === 'real') {
+                    setRealBalances((prev) => {
+                      const next = { ...prev };
+                      delete next[userId];
+                      return next;
+                    });
+                  }
+                  if (mode === 'all' || mode === 'demo') {
+                    setUserBalances((prev) => {
+                      const next = { ...prev };
+                      delete next[userId];
+                      return next;
+                    });
+                  }
+                  setAccountBalances((prev) => {
+                    const next = { ...prev };
+                    for (const a of (overview?.connectedAccounts || []).filter((x: any) => x.user_id === userId)) {
+                      delete next[a.id];
+                    }
+                    return next;
+                  });
+                  await loadAllAdminData();
+                  flash(
+                    `Synced ${mode.toUpperCase()} for ${emailLabel} (${res.liveSynced}/${res.accountsProcessed} live from Deriv, DB lock reset)`
+                  );
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Deriv sync failed', 'err');
+                } finally {
+                  setBusyAction(null);
+                }
+              };
+
+              const handleSyncSingleConnectedAcc = async (acc: any) => {
+                const key = `accsync-${acc.id}`;
+                setBusyAction(key);
+                try {
+                  await adminFetch(`/api/admin/connected-accounts/${acc.id}/sync`, { method: 'POST' });
+                  setRealBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[acc.user_id];
+                    return next;
+                  });
+                  setUserBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[acc.user_id];
+                    return next;
+                  });
+                  setAccountBalances((prev) => {
+                    const next = { ...prev };
+                    delete next[acc.id];
+                    return next;
+                  });
+                  await loadAllAdminData();
+                  flash(`Reset & synced ${acc.deriv_login_id || acc.deriv_account_id} from live Deriv`);
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Account sync failed', 'err');
+                } finally {
+                  setBusyAction(null);
+                }
+              };
+
+              const handleBulkSyncDeriv = async () => {
+                if (filteredUsers.length === 0) return;
+                setBusyAction('bulk-sync-deriv');
+                try {
+                  const res = await adminFetch<{
+                    usersSynced: number;
+                    totalAccounts: number;
+                    totalLive: number;
+                    totalUnlocked: number;
+                  }>('/api/admin/users/bulk-sync-deriv', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      userIds: filteredUsers.map((u: any) => u.id),
+                      mode: 'all',
+                    }),
+                  });
+                  setRealBalances({});
+                  setUserBalances({});
+                  setAccountBalances({});
+                  await loadAllAdminData();
+                  flash(
+                    `Bulk synced ${res.usersSynced} trader(s) · ${res.totalLive}/${res.totalAccounts} accounts refreshed from live Deriv`
+                  );
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Bulk sync failed', 'err');
+                } finally {
+                  setBusyAction(null);
+                }
+              };
+
               return (
                 <div className="space-y-4">
                   {hasPerm('users.create') && (
@@ -2484,6 +2593,17 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       <option value="suspended">Suspended Only</option>
                       <option value="trading_frozen">Trading Frozen</option>
                     </select>
+                    {hasPerm('users.edit') && (
+                      <button
+                        type="button"
+                        disabled={busyAction === 'bulk-sync-deriv' || filteredUsers.length === 0}
+                        onClick={handleBulkSyncDeriv}
+                        className="px-3 py-2 rounded-xl bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 font-semibold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                      >
+                        <RefreshCw className={`w-3.5 h-3.5 ${busyAction === 'bulk-sync-deriv' ? 'animate-spin' : ''}`} />
+                        {busyAction === 'bulk-sync-deriv' ? 'Bulk Syncing...' : 'Bulk Sync Deriv'}
+                      </button>
+                    )}
                     {hasPerm('users.export') && (
                       <button
                         type="button"
@@ -2628,32 +2748,61 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                     className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
                                   />
                                   {hasPerm('users.edit') && (
-                                    <button
-                                      type="button"
-                                      disabled={busyAction === `real-${u.id}`}
-                                      onClick={async () => {
-                                        const val = Number(realBalances[u.id] ?? parsedRw);
-                                        if (Number.isNaN(val) || val < 0) {
-                                          flash('Enter a valid non-negative Real balance', 'err');
-                                          return;
-                                        }
-                                        setBusyAction(`real-${u.id}`);
-                                        await runWithReauth(async () => {
-                                          await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
-                                            method: 'PATCH',
-                                            body: JSON.stringify({ balance: val }),
+                                    <>
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `real-${u.id}`}
+                                        onClick={async () => {
+                                          const val = Number(realBalances[u.id] ?? parsedRw);
+                                          if (Number.isNaN(val) || val < 0) {
+                                            flash('Enter a valid non-negative Real balance', 'err');
+                                            return;
+                                          }
+                                          setBusyAction(`real-${u.id}`);
+                                          await runWithReauth(async () => {
+                                            await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                              method: 'PATCH',
+                                              body: JSON.stringify({ balance: val }),
+                                            });
+                                            await loadAllAdminData();
+                                            flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
                                           });
-                                          await loadAllAdminData();
-                                          flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                        });
-                                        setBusyAction(null);
-                                      }}
-                                      className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
-                                    >
-                                      {busyAction === `real-${u.id}` ? '...' : 'Save'}
-                                    </button>
+                                          setBusyAction(null);
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
+                                      >
+                                        {busyAction === `real-${u.id}` ? '...' : 'Save'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `usync-real-${u.id}`}
+                                        onClick={() => handleSyncUserDeriv(u.id, 'real', u.email)}
+                                        title="Reset & sync Real account(s) from actual Deriv"
+                                        className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                      >
+                                        <RefreshCw className={`w-3 h-3 ${busyAction === `usync-real-${u.id}` ? 'animate-spin' : ''}`} />
+                                        Sync
+                                      </button>
+                                    </>
                                   )}
                                 </div>
+                                {matchedReal.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 pt-0.5">
+                                    {matchedReal.map((a: any) => (
+                                      <button
+                                        key={a.id}
+                                        type="button"
+                                        disabled={busyAction === `accsync-${a.id}`}
+                                        onClick={() => handleSyncSingleConnectedAcc(a)}
+                                        title="Tap to reset & sync this Real account from Deriv"
+                                        className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 hover:bg-[#FF444F]/20 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
+                                        {a.deriv_login_id || a.deriv_account_id} (${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)})
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
 
                               <div className="p-2.5 rounded-xl bg-[#111319] border border-[#00A878]/25 space-y-2">
@@ -2679,36 +2828,76 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                     className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
                                   />
                                   {hasPerm('users.edit') && (
-                                    <button
-                                      type="button"
-                                      disabled={busyAction === `user-${u.id}`}
-                                      onClick={async () => {
-                                        const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                        if (Number.isNaN(val) || val < 0) {
-                                          flash('Enter a valid non-negative Demo balance', 'err');
-                                          return;
-                                        }
-                                        setBusyAction(`user-${u.id}`);
-                                        await runWithReauth(async () => {
-                                          await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                            method: 'PATCH',
-                                            body: JSON.stringify({ balance: val }),
+                                    <>
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `user-${u.id}`}
+                                        onClick={async () => {
+                                          const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                          if (Number.isNaN(val) || val < 0) {
+                                            flash('Enter a valid non-negative Demo balance', 'err');
+                                            return;
+                                          }
+                                          setBusyAction(`user-${u.id}`);
+                                          await runWithReauth(async () => {
+                                            await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                              method: 'PATCH',
+                                              body: JSON.stringify({ balance: val }),
+                                            });
+                                            await loadAllAdminData();
+                                            flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
                                           });
-                                          await loadAllAdminData();
-                                          flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                        });
-                                        setBusyAction(null);
-                                      }}
-                                      className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
-                                    >
-                                      {busyAction === `user-${u.id}` ? '...' : 'Save'}
-                                    </button>
+                                          setBusyAction(null);
+                                        }}
+                                        className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
+                                      >
+                                        {busyAction === `user-${u.id}` ? '...' : 'Save'}
+                                      </button>
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `usync-demo-${u.id}`}
+                                        onClick={() => handleSyncUserDeriv(u.id, 'demo', u.email)}
+                                        title="Reset & sync Demo account(s) from actual Deriv"
+                                        className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 border border-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                      >
+                                        <RefreshCw className={`w-3 h-3 ${busyAction === `usync-demo-${u.id}` ? 'animate-spin' : ''}`} />
+                                        Sync
+                                      </button>
+                                    </>
                                   )}
                                 </div>
+                                {matchedDemo.length > 0 && (
+                                  <div className="flex flex-wrap gap-1 pt-0.5">
+                                    {matchedDemo.map((a: any) => (
+                                      <button
+                                        key={a.id}
+                                        type="button"
+                                        disabled={busyAction === `accsync-${a.id}`}
+                                        onClick={() => handleSyncSingleConnectedAcc(a)}
+                                        title="Tap to reset & sync this Demo account from Deriv"
+                                        className="px-1.5 py-0.5 rounded bg-[#00A878]/10 hover:bg-[#00A878]/20 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
+                                      >
+                                        <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
+                                        {a.deriv_login_id || a.deriv_account_id} (${Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)})
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
                               </div>
                             </div>
 
                             <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[#2A2F3D]">
+                              {hasPerm('users.edit') && (
+                                <button
+                                  type="button"
+                                  disabled={busyAction === `usync-all-${u.id}`}
+                                  onClick={() => handleSyncUserDeriv(u.id, 'all', u.email)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                >
+                                  <RefreshCw className={`w-3 h-3 ${busyAction === `usync-all-${u.id}` ? 'animate-spin' : ''}`} />
+                                  Sync Deriv
+                                </button>
+                              )}
                               {hasPerm('users.edit') && (
                                 <button
                                   type="button"
@@ -2904,41 +3093,58 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                       className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
                                     />
                                     {hasPerm('users.edit') && (
-                                      <button
-                                        type="button"
-                                        disabled={busyAction === `real-${u.id}`}
-                                        onClick={async () => {
-                                          const val = Number(realBalances[u.id] ?? parsedRw);
-                                          if (Number.isNaN(val) || val < 0) {
-                                            flash('Enter a valid non-negative Real balance', 'err');
-                                            return;
-                                          }
-                                          setBusyAction(`real-${u.id}`);
-                                          await runWithReauth(async () => {
-                                            await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
-                                              method: 'PATCH',
-                                              body: JSON.stringify({ balance: val }),
+                                      <>
+                                        <button
+                                          type="button"
+                                          disabled={busyAction === `real-${u.id}`}
+                                          onClick={async () => {
+                                            const val = Number(realBalances[u.id] ?? parsedRw);
+                                            if (Number.isNaN(val) || val < 0) {
+                                              flash('Enter a valid non-negative Real balance', 'err');
+                                              return;
+                                            }
+                                            setBusyAction(`real-${u.id}`);
+                                            await runWithReauth(async () => {
+                                              await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                                method: 'PATCH',
+                                                body: JSON.stringify({ balance: val }),
+                                              });
+                                              await loadAllAdminData();
+                                              flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
                                             });
-                                            await loadAllAdminData();
-                                            flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                          });
-                                          setBusyAction(null);
-                                        }}
-                                        className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
-                                      >
-                                        {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
-                                      </button>
+                                            setBusyAction(null);
+                                          }}
+                                          className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
+                                        >
+                                          {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={busyAction === `usync-real-${u.id}`}
+                                          onClick={() => handleSyncUserDeriv(u.id, 'real', u.email)}
+                                          title="Reset & sync Real account(s) from actual Deriv"
+                                          className="px-2 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                        >
+                                          <RefreshCw className={`w-3 h-3 ${busyAction === `usync-real-${u.id}` ? 'animate-spin' : ''}`} />
+                                          Sync
+                                        </button>
+                                      </>
                                     )}
                                   </div>
                                   {matchedReal.length > 0 && (
                                     <div className="flex flex-wrap justify-end gap-1">
                                       {matchedReal.map((a: any) => (
-                                        <span
+                                        <button
                                           key={a.id}
-                                          className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num"
+                                          type="button"
+                                          disabled={busyAction === `accsync-${a.id}`}
+                                          onClick={() => handleSyncSingleConnectedAcc(a)}
+                                          title="Reset & sync this Real account from Deriv"
+                                          className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 hover:bg-[#FF444F]/20 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
                                         >
+                                          <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
                                           {a.deriv_login_id || a.deriv_account_id} · {a.account_type}
-                                        </span>
+                                        </button>
                                       ))}
                                     </div>
                                   )}
@@ -2959,47 +3165,75 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                       className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
                                     />
                                     {hasPerm('users.edit') && (
-                                      <button
-                                        type="button"
-                                        disabled={busyAction === `user-${u.id}`}
-                                        onClick={async () => {
-                                          const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                          if (Number.isNaN(val) || val < 0) {
-                                            flash('Enter a valid non-negative balance', 'err');
-                                            return;
-                                          }
-                                          setBusyAction(`user-${u.id}`);
-                                          await runWithReauth(async () => {
-                                            await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                              method: 'PATCH',
-                                              body: JSON.stringify({ balance: val }),
+                                      <>
+                                        <button
+                                          type="button"
+                                          disabled={busyAction === `user-${u.id}`}
+                                          onClick={async () => {
+                                            const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                            if (Number.isNaN(val) || val < 0) {
+                                              flash('Enter a valid non-negative balance', 'err');
+                                              return;
+                                            }
+                                            setBusyAction(`user-${u.id}`);
+                                            await runWithReauth(async () => {
+                                              await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                                method: 'PATCH',
+                                                body: JSON.stringify({ balance: val }),
+                                              });
+                                              await loadAllAdminData();
+                                              flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
                                             });
-                                            await loadAllAdminData();
-                                            flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                          });
-                                          setBusyAction(null);
-                                        }}
-                                        className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
-                                      >
-                                        {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
-                                      </button>
+                                            setBusyAction(null);
+                                          }}
+                                          className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
+                                        >
+                                          {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={busyAction === `usync-demo-${u.id}`}
+                                          onClick={() => handleSyncUserDeriv(u.id, 'demo', u.email)}
+                                          title="Reset & sync Demo account(s) from actual Deriv"
+                                          className="px-2 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                        >
+                                          <RefreshCw className={`w-3 h-3 ${busyAction === `usync-demo-${u.id}` ? 'animate-spin' : ''}`} />
+                                          Sync
+                                        </button>
+                                      </>
                                     )}
                                   </div>
                                   {matchedDemo.length > 0 && (
                                     <div className="flex flex-wrap justify-end gap-1">
                                       {matchedDemo.map((a: any) => (
-                                        <span
+                                        <button
                                           key={a.id}
-                                          className="px-1.5 py-0.5 rounded bg-[#00A878]/10 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num"
+                                          type="button"
+                                          disabled={busyAction === `accsync-${a.id}`}
+                                          onClick={() => handleSyncSingleConnectedAcc(a)}
+                                          title="Reset & sync this Demo account from Deriv"
+                                          className="px-1.5 py-0.5 rounded bg-[#00A878]/10 hover:bg-[#00A878]/20 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num inline-flex items-center gap-1 cursor-pointer"
                                         >
+                                          <RefreshCw className={`w-2.5 h-2.5 ${busyAction === `accsync-${a.id}` ? 'animate-spin' : ''}`} />
                                           {a.deriv_login_id || a.deriv_account_id} · {a.account_type}
-                                        </span>
+                                        </button>
                                       ))}
                                     </div>
                                   )}
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                                {hasPerm('users.edit') && (
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `usync-all-${u.id}`}
+                                    onClick={() => handleSyncUserDeriv(u.id, 'all', u.email)}
+                                    className="px-2 py-1 rounded-lg bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 font-semibold inline-flex items-center gap-1 cursor-pointer disabled:opacity-50"
+                                  >
+                                    <RefreshCw className={`w-3 h-3 ${busyAction === `usync-all-${u.id}` ? 'animate-spin' : ''}`} />
+                                    Sync Deriv
+                                  </button>
+                                )}
                                 {hasPerm('users.edit') && (
                                   <button
                                     type="button"
