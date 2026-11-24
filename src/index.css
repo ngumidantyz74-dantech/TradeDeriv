@@ -3,8 +3,8 @@
 
 @layer base {
   :root {
-    --font-display: 'Plus Jakarta Sans', system-ui, -apple-system, sans-serif;
-    --font-sans: 'DM Sans', system-ui, -apple-system, sans-serif;
+    --font-display: 'IBM Plex Sans', 'Ubuntu', system-ui, -apple-system, sans-serif;
+    --font-sans: 'IBM Plex Sans', system-ui, -apple-system, sans-serif;
     --font-mono: 'JetBrains Mono', ui-monospace, SFMono-Regular, monospace;
   }
 

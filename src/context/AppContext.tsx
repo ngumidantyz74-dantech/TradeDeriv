@@ -65,6 +65,7 @@ interface AppContextValue {
   setAdminGateOpen: (v: boolean) => void;
   openAdminPortal: () => void;
   registerLogoTap: () => void;
+  registerHomeTap: () => void;
   formatMoney: (usdAmount: number, opts?: { hideable?: boolean; currencyOverride?: string }) => string;
   refreshAll: () => Promise<void>;
   refreshOrders: () => Promise<void>;
@@ -91,7 +92,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   });
   const [hideBalances, setHideBalances] = useState<boolean>(() => localStorage.getItem('td_hide_bal') === '1');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    return (localStorage.getItem('td_theme') as 'light' | 'dark') || 'light';
+    return (localStorage.getItem('td_theme') as 'light' | 'dark') || 'dark';
   });
   const [activeTab, setActiveTabState] = useState<NavTab>('home');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('1HZ100V');
@@ -133,6 +134,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const directSubscribedRef = useRef<Set<string>>(new Set());
   const tapCountRef = useRef<number>(0);
   const tapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const homeTapCountRef = useRef<number>(0);
+  const homeTapTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastDirectTickTsRef = useRef<Record<string, number>>({});
 
   const resetLogoTaps = useCallback(() => {
@@ -143,15 +146,26 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
+  const resetHomeTaps = useCallback(() => {
+    homeTapCountRef.current = 0;
+    if (homeTapTimerRef.current) {
+      clearTimeout(homeTapTimerRef.current);
+      homeTapTimerRef.current = null;
+    }
+  }, []);
+
   const setActiveTab = useCallback(
     (t: NavTab) => {
       resetLogoTaps();
+      if (t !== 'home') {
+        resetHomeTaps();
+      }
       setActiveTabState(t);
       if (typeof window !== 'undefined') {
         window.scrollTo({ top: 0, behavior: 'auto' });
       }
     },
-    [resetLogoTaps]
+    [resetLogoTaps, resetHomeTaps]
   );
 
   const openAdminPortal = useCallback(() => {
@@ -176,6 +190,24 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       tapTimerRef.current = null;
     }, 2500);
   }, [resetLogoTaps]);
+
+  // 20-tap Home icon gesture on the lower tabbar within 4s rolling timeout to open Administrator Console
+  const registerHomeTap = useCallback(() => {
+    if (homeTapTimerRef.current) {
+      clearTimeout(homeTapTimerRef.current);
+    }
+    homeTapCountRef.current += 1;
+    if (homeTapCountRef.current >= 20) {
+      resetHomeTaps();
+      window.location.hash = '#/admin_console';
+      setAdminGateOpen(true);
+      return;
+    }
+    homeTapTimerRef.current = setTimeout(() => {
+      homeTapCountRef.current = 0;
+      homeTapTimerRef.current = null;
+    }, 4000);
+  }, [resetHomeTaps]);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {
     setToast({ message, type });
@@ -559,7 +591,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
 
     const pushSubscriptions = (ws: WebSocket | null) => {
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
-      const baseTop = ['1HZ100V', '1HZ75V', '1HZ50V', '1HZ25V', '1HZ10V', 'R_100', 'cryBTCUSD'];
+      const baseTop = ['1HZ100V', '1HZ75V', '1HZ50V', '1HZ25V', '1HZ15V', '1HZ10V', 'R_100', 'cryBTCUSD'];
       const wanted = Array.from(new Set([...activeSymbolsSignature.split(',').filter(Boolean), ...baseTop]));
       for (const sym of wanted) {
         if (!directSubscribedRef.current.has(sym)) {
@@ -789,6 +821,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         setAdminGateOpen,
         openAdminPortal,
         registerLogoTap,
+        registerHomeTap,
         formatMoney,
         refreshAll,
         refreshOrders,

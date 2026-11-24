@@ -1,6 +1,5 @@
 import React, { useState } from 'react';
 import {
-  RefreshCw,
   CandlestickChart,
   X,
   Check,
@@ -11,15 +10,16 @@ import {
   RotateCcw,
   MoreHorizontal,
   Receipt,
+  ArrowLeftRight,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
+import { Mt5Badge, CTraderBadge } from '../components/DerivBadges';
 
 interface SelectedCfdDetail {
-  code: string;
+  code: 'STD' | 'SWF' | 'GOLD' | 'FIN' | 'ZSP' | 'cT';
   title: string;
-  badgeColor: string;
   balance: number;
   server: string;
   loginId: string;
@@ -36,6 +36,8 @@ export const CfdsHub: React.FC = () => {
     hideBalances,
     setHideBalances,
     orders,
+    currencyDisplay,
+    kesRate,
     formatMoney,
     refreshAccounts,
     refreshAll,
@@ -43,12 +45,13 @@ export const CfdsHub: React.FC = () => {
     setSelectedSymbol,
     showToast,
   } = useApp();
-  const [refreshing, setRefreshing] = useState(false);
+
   const [compareOpen, setCompareOpen] = useState(false);
   const [activating, setActivating] = useState<string | null>(null);
   const [selectedDetail, setSelectedDetail] = useState<SelectedCfdDetail | null>(null);
   const [detailsModalOpen, setDetailsModalOpen] = useState(false);
   const [resettingDemo, setResettingDemo] = useState(false);
+  const [featuredSlide, setFeaturedSlide] = useState<0 | 1>(0);
 
   const cfdAccounts = accounts.filter(
     (a) =>
@@ -61,10 +64,27 @@ export const CfdsHub: React.FC = () => {
     cfdsTotalBal: totalValue,
   } = getCanonicalBalances(user, accounts, accountMode, null);
 
-  const handleRefresh = async () => {
-    setRefreshing(true);
-    await refreshAccounts(true);
-    setRefreshing(false);
+  const renderSplitMoney = (usdAmount: number, hero = false) => {
+    if (hideBalances) {
+      return <span className="font-mono-num font-bold text-slate-900 dark:text-white">••••••</span>;
+    }
+    const isKsh = currencyDisplay === 'KSH';
+    const val = isKsh ? usdAmount * kesRate : usdAmount;
+    const formatted = val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const unit = isKsh ? 'KSH' : 'USD';
+    if (hero) {
+      return (
+        <span className="font-display text-[26px] sm:text-[30px] font-bold tracking-tight tabular-nums text-white">
+          {formatted} {unit}
+        </span>
+      );
+    }
+    return (
+      <span className="inline-flex items-baseline gap-1 tabular-nums">
+        <span className="text-[16px] font-bold text-slate-900 dark:text-white">{formatted}</span>
+        <span className="text-[11px] font-normal text-slate-500 dark:text-[#8E95A2]">{unit}</span>
+      </span>
+    );
   };
 
   const handleActivate = async (accountType: string, platform = 'mt5') => {
@@ -109,28 +129,25 @@ export const CfdsHub: React.FC = () => {
 
   const openDetailForAccount = (
     name: string,
-    code: string,
-    badgeColor: string,
+    code: SelectedCfdDetail['code'],
     balance: number,
     loginId: string
   ) => {
     setSelectedDetail({
       code,
       title: name,
-      badgeColor,
       balance,
       server: accountMode === 'demo' ? 'Deriv-Demo' : 'Deriv-Server-02',
       loginId,
-      leverage: code === 'GLD' ? '1:500' : '1:1000',
+      leverage: code === 'GOLD' ? '1:500' : '1:1000',
       isDemo: accountMode === 'demo',
     });
   };
 
-  // Account Detail Sub-View matching uploaded Deriv MT5 screenshots
   if (selectedDetail) {
     const accountOrders = orders.slice(0, 12);
     return (
-      <div className="min-h-[82vh] bg-[#151820] text-white">
+      <div className="min-h-[82vh] bg-[#0E0F13] text-white">
         <div className="max-w-3xl mx-auto px-5 pt-5 pb-12">
           <div className="flex items-center justify-between mb-8">
             <button
@@ -152,15 +169,12 @@ export const CfdsHub: React.FC = () => {
           </div>
 
           <div className="flex flex-col items-center text-center pb-8 border-b border-white/10">
-            <div
-              className={`w-16 h-16 rounded-2xl ${selectedDetail.badgeColor} flex flex-col items-center justify-center shadow-lg mb-5`}
-            >
-              <span className="font-display font-extrabold italic text-lg leading-none">
-                {selectedDetail.code === 'cT' ? 'cTrader' : 'MT5'}
-              </span>
-              <span className="text-[10px] font-bold tracking-wider uppercase mt-1 px-2 py-0.5 rounded bg-black/25">
-                {selectedDetail.code}
-              </span>
+            <div className="mb-5">
+              {selectedDetail.code === 'cT' ? (
+                <CTraderBadge />
+              ) : (
+                <Mt5Badge variant={selectedDetail.code} size="lg" />
+              )}
             </div>
 
             <p className="font-mono-num text-3xl sm:text-4xl font-bold">
@@ -178,17 +192,16 @@ export const CfdsHub: React.FC = () => {
 
             <div className="flex items-center justify-center gap-10 mt-8">
               {!selectedDetail.isDemo && (
-                <a
-                  href="https://app.deriv.com/cashier/deposit"
-                  target="_blank"
-                  rel="noopener noreferrer"
+                <button
+                  type="button"
+                  onClick={() => setActiveTab('portfolio')}
                   className="flex flex-col items-center gap-2 cursor-pointer"
                 >
                   <span className="w-12 h-12 rounded-full bg-[#FF444F] hover:bg-[#E63946] flex items-center justify-center">
                     <Plus className="w-5 h-5 text-white" />
                   </span>
                   <span className="text-xs font-medium">Deposit</span>
-                </a>
+                </button>
               )}
 
               <button
@@ -243,21 +256,22 @@ export const CfdsHub: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-2.5">
-                <p className="text-xs font-semibold text-slate-400 mb-3">Recent Transactions & Orders</p>
+                <p className="text-xs font-semibold text-slate-400 mb-3">Recent Transactions &amp; Orders</p>
                 {accountOrders.map((o) => (
                   <div
                     key={o.id}
-                    className="p-3.5 rounded-2xl bg-[#1D222E] border border-white/10 flex items-center justify-between text-xs"
+                    className="p-3.5 rounded-2xl bg-[#181B22] border border-white/10 flex items-center justify-between text-xs"
                   >
                     <div>
-                      <p className="font-bold">{o.symbol} · {o.side}</p>
+                      <p className="font-bold">
+                        {o.symbol} · {o.side}
+                      </p>
                       <p className="text-slate-400 mt-0.5">
                         Stake ${Number(o.stake).toFixed(2)} · {o.status}
                       </p>
                     </div>
                     <span className={`font-mono-num font-bold ${Number(o.pnl) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
-                      {Number(o.pnl) >= 0 ? '+' : ''}
-                      ${Number(o.pnl || 0).toFixed(2)}
+                      {Number(o.pnl) >= 0 ? '+' : ''}${Number(o.pnl || 0).toFixed(2)}
                     </span>
                   </div>
                 ))}
@@ -268,7 +282,7 @@ export const CfdsHub: React.FC = () => {
 
         {detailsModalOpen && (
           <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#1D222E] rounded-3xl p-6 border border-white/10 text-white">
+            <div className="w-full max-w-sm bg-[#181B22] rounded-3xl p-6 border border-white/10 text-white">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-display text-lg font-bold">Account Details</h3>
                 <button
@@ -314,17 +328,50 @@ export const CfdsHub: React.FC = () => {
     );
   }
 
+  const displayedAccounts =
+    cfdAccounts.length > 0
+      ? cfdAccounts
+      : accountMode === 'demo'
+        ? [
+            {
+              id: 0,
+              deriv_account_id: 'MT5-DEMO-STD',
+              account_type: 'CFDs | Standard',
+              balance: stdWalletBal,
+            },
+          ]
+        : [
+            {
+              id: 0,
+              deriv_account_id: 'MT5-REAL-STD2',
+              account_type: 'CFDs | Standard 2',
+              balance: 0,
+            },
+            {
+              id: -1,
+              deriv_account_id: 'MT5-REAL-STD3',
+              account_type: 'CFDs | Standard 3',
+              balance: stdWalletBal,
+            },
+            {
+              id: -2,
+              deriv_account_id: 'MT5-REAL-SWF',
+              account_type: 'Swap-Free',
+              balance: goldWalletBal,
+            },
+          ];
+
   return (
     <div className="max-w-7xl mx-auto">
-      {/* Dark Hero Banner */}
-      <section className="bg-[#151820] text-white px-5 sm:px-8 pt-5 pb-7 rounded-b-[28px] lg:rounded-3xl lg:mx-6 lg:mt-6">
-        <div className="flex justify-center lg:justify-start mb-5">
-          <div className="inline-flex items-center bg-[#232734] p-1 rounded-full">
+      {/* Upper Dark Hero Block matching 102701 (Real) & 102820 (Demo) */}
+      <section className="bg-[#171A21] text-white px-4 sm:px-8 pt-2 pb-6 rounded-b-[24px] lg:rounded-3xl lg:mx-6 lg:mt-4">
+        <div className="hidden lg:flex items-center mb-4">
+          <div className="inline-flex items-center bg-[#232732] p-1 rounded-full">
             <button
               type="button"
               onClick={() => setAccountMode('real')}
-              className={`px-5 py-1.5 rounded-full text-xs font-semibold transition-colors cursor-pointer ${
-                accountMode === 'real' ? 'bg-[#363C4E] text-white' : 'text-slate-400'
+              className={`px-5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
+                accountMode === 'real' ? 'bg-[#383D4A] text-white' : 'text-[#8E95A2]'
               }`}
             >
               Real
@@ -332,8 +379,8 @@ export const CfdsHub: React.FC = () => {
             <button
               type="button"
               onClick={() => setAccountMode('demo')}
-              className={`px-5 py-1.5 rounded-full text-xs font-semibold transition-colors cursor-pointer ${
-                accountMode === 'demo' ? 'bg-[#363C4E] text-white' : 'text-slate-400'
+              className={`px-5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
+                accountMode === 'demo' ? 'bg-[#383D4A] text-white' : 'text-[#8E95A2]'
               }`}
             >
               Demo
@@ -341,196 +388,217 @@ export const CfdsHub: React.FC = () => {
           </div>
         </div>
 
-        <p className="text-xs text-slate-400">Total trading value</p>
-        <div className="flex items-center gap-3 mt-1">
-          <span className="font-mono-num text-2xl sm:text-3xl font-bold">
-            {formatMoney(totalValue, { hideable: true })}
-          </span>
-          <button
-            type="button"
-            onClick={handleRefresh}
-            aria-label="Refresh CFD balance"
-            className="p-1.5 rounded-full hover:bg-white/10 cursor-pointer"
-          >
-            <RefreshCw className={`w-4 h-4 text-slate-300 ${refreshing ? 'animate-spin' : ''}`} />
-          </button>
-        </div>
-        <p className="text-xs text-slate-400 mt-1">Updated just now</p>
+        <p className="text-[13px] text-[#9BA3B0]">Total trading value</p>
+        <div className="mt-0.5">{renderSplitMoney(totalValue, true)}</div>
+        <p className="text-[12px] text-[#8E95A2] mt-0.5">Updated just now</p>
 
-        <div className="flex justify-center lg:justify-start mt-6">
-          <button
-            type="button"
-            onClick={() => setActiveTab('mt5-tv')}
-            className="flex flex-col items-center gap-2 group cursor-pointer"
-          >
-            <span className="w-13 h-13 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] flex items-center justify-center transition-colors shadow-lg shadow-[#FF444F]/25">
-              <CandlestickChart className="w-6 h-6 text-white" />
-            </span>
-            <span className="text-xs font-medium text-white">Trade</span>
-          </button>
-        </div>
+        {accountMode === 'real' ? (
+          <div className="grid grid-cols-2 max-w-md mx-auto lg:mx-0 lg:flex lg:items-center lg:gap-20 mt-6">
+            <button
+              type="button"
+              onClick={() => setActiveTab('mt5-tv')}
+              className="flex flex-col items-center gap-1.5 cursor-pointer group"
+            >
+              <span className="w-11 h-11 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] flex items-center justify-center transition-colors">
+                <CandlestickChart className="w-5 h-5 text-white" />
+              </span>
+              <span className="text-[12px] font-medium text-white/95">Trade</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="flex flex-col items-center gap-1.5 cursor-pointer group"
+            >
+              <span className="w-11 h-11 rounded-full border border-white/75 group-hover:bg-white/10 flex items-center justify-center transition-colors">
+                <ArrowLeftRight className="w-[18px] h-[18px] text-white" />
+              </span>
+              <span className="text-[12px] font-medium text-white/95">Transfer</span>
+            </button>
+          </div>
+        ) : (
+          <div className="flex justify-center lg:justify-start mt-6">
+            <button
+              type="button"
+              onClick={() => setActiveTab('mt5-tv')}
+              className="flex flex-col items-center gap-1.5 cursor-pointer group"
+            >
+              <span className="w-11 h-11 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] flex items-center justify-center transition-colors">
+                <CandlestickChart className="w-5 h-5 text-white" />
+              </span>
+              <span className="text-[12px] font-medium text-white/95">Trade</span>
+            </button>
+          </div>
+        )}
       </section>
 
       {/* My accounts */}
-      <section className="px-5 sm:px-8 mt-7">
-        <h2 className="font-display text-lg font-bold mb-3.5">My accounts</h2>
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-          {(cfdAccounts.length > 0
-            ? cfdAccounts
-            : [
-                {
-                  id: 0,
-                  deriv_account_id: accountMode === 'demo' ? 'MT5-DEMO-STD' : 'MT5-REAL-STD',
-                  account_type: 'CFDs | Standard',
-                  balance: stdWalletBal,
-                  currency: 'USD',
-                },
-                {
-                  id: -1,
-                  deriv_account_id: accountMode === 'demo' ? 'MT5-DEMO-GOLD' : 'MT5-REAL-GOLD',
-                  account_type: 'CFDs | Gold',
-                  balance: goldWalletBal,
-                  currency: 'USD',
-                },
-              ]
-          ).map((acc) => {
-            const isGold = String(acc.account_type || '').toLowerCase().includes('gold');
-            const isSwf = String(acc.account_type || '').toLowerCase().includes('swap');
-            const badgeCode = isGold ? 'GLD' : isSwf ? 'SWF' : 'STD';
-            const badgeColor = isSwf
-              ? 'bg-gradient-to-b from-[#1958B7] to-[#00A878]'
-              : 'bg-[#1958B7]';
+      <section className="px-4 sm:px-8 mt-6">
+        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">My accounts</h2>
+        <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1 lg:grid lg:grid-cols-3">
+          {displayedAccounts.map((acc) => {
+            const name = String(acc.account_type || 'CFDs | Standard');
+            const isGold = name.toLowerCase().includes('gold');
+            const isSwf = name.toLowerCase().includes('swap');
+            const badgeCode: SelectedCfdDetail['code'] = isGold ? 'GOLD' : isSwf ? 'SWF' : 'STD';
             return (
               <button
                 key={acc.id}
                 type="button"
                 onClick={() =>
-                  openDetailForAccount(
-                    acc.account_type || 'CFDs | Standard',
-                    badgeCode,
-                    badgeColor,
-                    Number(acc.balance || 0),
-                    acc.deriv_account_id
-                  )
+                  openDetailForAccount(name, badgeCode, Number(acc.balance || 0), acc.deriv_account_id)
                 }
-                className="text-left p-5 rounded-2xl bg-[#EEF1F5] dark:bg-[#181C25] border border-slate-200/80 dark:border-[#2A2F3D] hover:border-[#1958B7] transition-colors cursor-pointer"
+                className="min-w-[164px] text-left p-3.5 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#1958B7] transition-colors cursor-pointer shrink-0"
               >
-                <div className={`w-11 h-11 rounded-xl ${badgeColor} text-white flex flex-col items-center justify-center mb-4 text-xs font-bold leading-tight`}>
-                  <span>MT5</span>
-                  <span className="text-[9px] opacity-85">{badgeCode}</span>
+                <div className="mb-3">
+                  <Mt5Badge variant={badgeCode} />
                 </div>
-                <p className="text-sm font-medium text-slate-700 dark:text-slate-200">
-                  {acc.account_type || 'CFDs | Standard'}
-                </p>
-                <p className="font-mono-num text-lg font-bold mt-1">
-                  {formatMoney(Number(acc.balance || 0), { hideable: true })}
-                </p>
+                <p className="text-[13px] font-medium text-slate-700 dark:text-[#E2E6ED] truncate">{name}</p>
+                <div className="mt-1">{renderSplitMoney(Number(acc.balance || 0), false)}</div>
               </button>
             );
           })}
         </div>
       </section>
 
-      {/* Featured Gold Card */}
-      <section className="px-5 sm:px-8 mt-7">
-        <h2 className="font-display text-lg font-bold mb-3.5">Featured</h2>
-        <div className="rounded-3xl overflow-hidden bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D]">
-          <div className="h-44 sm:h-52 w-full bg-[#080A0E] relative overflow-hidden">
-            <img
-              src="/src/assets/images/mt5_gold_bars_1795009383164.jpg"
-              alt="MT5 Gold bullion"
-              referrerPolicy="no-referrer"
-              className="w-full h-full object-cover"
-            />
-          </div>
-          <div className="p-5">
-            <h3 className="font-display text-lg font-bold">Gold</h3>
-            <p className="text-sm text-slate-500 dark:text-slate-400 mt-0.5">
-              Specialised account for gold and metals
-            </p>
-            <div className="flex items-center justify-between mt-4 pt-4 border-t border-slate-100 dark:border-[#2A2F3D]">
-              <div className="flex items-center gap-2.5">
-                <span className="px-2 py-1 rounded-lg bg-[#1958B7] text-white text-[10px] font-bold">
-                  MT5 GOLD
-                </span>
-                <span className="text-sm font-semibold">Gold</span>
+      {/* Featured Gold Stacked Card matching 102701 & 102820 */}
+      <section className="px-4 sm:px-8 mt-6">
+        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Featured</h2>
+        <div className="max-w-md mx-auto lg:mx-0 lg:max-w-xl">
+          {/* Subtle top stacked deck shadow card edge */}
+          <div className="mx-3 h-2 rounded-t-2xl bg-slate-200 dark:bg-[#1E222B] border-t border-x border-slate-300/60 dark:border-white/[0.08]" />
+          <div className="rounded-2xl overflow-hidden bg-white dark:bg-[#181B22] border border-slate-200 dark:border-white/[0.08]">
+            <div className="p-3.5 pb-0">
+              <div className="h-36 sm:h-44 w-full rounded-xl bg-[#07090C] relative overflow-hidden">
+                <img
+                  src="/src/assets/images/mt5_gold_bars_1795009383164.jpg"
+                  alt="Precious metals gold bullion"
+                  referrerPolicy="no-referrer"
+                  className="w-full h-full object-cover"
+                />
               </div>
-              <button
-                type="button"
-                disabled={activating === 'Gold'}
-                onClick={() => {
-                  handleActivate('Gold', 'mt5');
-                  setSelectedSymbol('frxXAUUSD');
-                }}
-                className="px-4 py-2 rounded-full border border-slate-300 dark:border-[#2A2F3D] hover:bg-slate-50 dark:hover:bg-white/5 text-xs font-semibold cursor-pointer"
-              >
-                {activating === 'Gold' ? 'Activating...' : 'Activate now'}
-              </button>
             </div>
+
+            <div className="p-4">
+              <h3 className="font-display text-[16px] font-bold text-slate-900 dark:text-white">
+                {featuredSlide === 0 ? 'Precious metals' : 'Zero Spread CFDs'}
+              </h3>
+              <p className="text-[13px] text-slate-500 dark:text-[#9BA3B0] mt-1 leading-snug">
+                {featuredSlide === 0
+                  ? 'Trade gold, silver, copper, and more with tight spreads.'
+                  : 'Execute major forex pairs from 0.0 pips with deep liquidity.'}
+              </p>
+
+              <div className="mt-4 bg-[#F4F5F7] dark:bg-[#232732] rounded-xl p-3 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-2.5">
+                  <Mt5Badge variant={featuredSlide === 0 ? 'GOLD' : 'STD'} size="sm" />
+                  <span className="text-sm font-semibold text-slate-900 dark:text-white">
+                    {featuredSlide === 0 ? 'Gold' : 'Zero Spread'}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  disabled={activating === (featuredSlide === 0 ? 'Gold' : 'Zero Spread')}
+                  onClick={() => {
+                    const target = featuredSlide === 0 ? 'Gold' : 'Zero Spread';
+                    handleActivate(target, 'mt5');
+                    setSelectedSymbol(featuredSlide === 0 ? 'frxXAUUSD' : 'frxEURUSD');
+                  }}
+                  className="px-4 py-1.5 rounded-full border border-slate-400 dark:border-white/70 hover:bg-white/10 text-xs font-semibold text-slate-900 dark:text-white cursor-pointer"
+                >
+                  {activating === (featuredSlide === 0 ? 'Gold' : 'Zero Spread') ? '...' : 'Activate'}
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div className="flex items-center justify-center gap-1.5 mt-3">
+            {([0, 1] as const).map((idx) => (
+              <button
+                key={idx}
+                type="button"
+                onClick={() => setFeaturedSlide(idx)}
+                aria-label={`Featured slide ${idx + 1}`}
+                className={`w-1.5 h-1.5 rounded-full cursor-pointer ${
+                  featuredSlide === idx ? 'bg-slate-900 dark:bg-white' : 'bg-slate-300 dark:bg-white/25'
+                }`}
+              />
+            ))}
           </div>
         </div>
       </section>
 
-      {/* Available accounts grid */}
-      <section className="px-5 sm:px-8 mt-7 pb-6">
-        <div className="flex items-center justify-between mb-3.5">
-          <h2 className="font-display text-lg font-bold">Available accounts</h2>
+      {/* Available accounts matching Screenshot 102701 & 102820 */}
+      <section className="px-4 sm:px-8 mt-6 pb-6">
+        <div className="flex items-center justify-between mb-3">
+          <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white">Available accounts</h2>
           <button
             type="button"
             onClick={() => setCompareOpen(true)}
-            className="px-4 py-1.5 rounded-full border border-slate-300 dark:border-[#2A2F3D] text-xs font-semibold hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer"
+            className="px-3.5 py-1 rounded-full border border-slate-300 dark:border-white/25 text-xs font-semibold text-slate-700 dark:text-white hover:bg-white/5 cursor-pointer"
           >
             Compare
           </button>
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3.5">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
           {[
-            { name: 'cTrader', desc: 'CFDs copy trading with 150+ assets', badge: 'Copy Trading', color: 'bg-[#FF444F]', code: 'cT', platform: 'ctrader' },
-            { name: 'Zero Spread', desc: 'Cost-efficient trades, starting from 0 pips', badge: 'Trade with your terms', color: 'bg-[#1958B7]', code: 'MT5', platform: 'mt5' },
-            { name: 'Swap-Free', desc: 'No overnight financing charges on positions', badge: 'Overnight hold', color: 'bg-[#0284C7]', code: 'SWF', platform: 'mt5' },
-            { name: 'Financial', desc: 'Forex, metals, crypto & global stock indices', badge: 'High leverage', color: 'bg-[#1958B7]', code: 'FIN', platform: 'mt5' },
+            {
+              name: 'cTrader',
+              desc: 'CFDs copy trading with 150+ assets',
+              tag: 'Copy Trading',
+              badge: <CTraderBadge size="sm" />,
+              code: 'cT' as const,
+              platform: 'ctrader',
+            },
+            {
+              name: 'Zero Spread',
+              desc: 'Cost-efficient trades, starting from 0 pips',
+              tag: 'Trade with your terms',
+              badge: <Mt5Badge variant="STD" size="sm" />,
+              code: 'ZSP' as const,
+              platform: 'mt5',
+            },
+            {
+              name: 'Swap-Free',
+              desc: 'Hold overnight positions with zero swap fees',
+              tag: 'Overnight hold',
+              badge: <Mt5Badge variant="SWF" size="sm" />,
+              code: 'SWF' as const,
+              platform: 'mt5',
+            },
+            {
+              name: 'Financial',
+              desc: 'Tight spreads on Forex & commodities',
+              tag: 'Financial',
+              badge: <Mt5Badge variant="FIN" size="sm" />,
+              code: 'FIN' as const,
+              platform: 'mt5',
+            },
           ].map((item) => (
-            <div
+            <button
               key={item.name}
-              className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] flex flex-col justify-between"
+              type="button"
+              onClick={() => openDetailForAccount(item.name, item.code, 0, `${item.code}-${accountMode.toUpperCase()}`)}
+              className="text-left p-4 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex items-center justify-between gap-3 cursor-pointer"
             >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <h3 className="font-display text-base font-bold">{item.name}</h3>
-                  <p className="text-xs text-slate-500 dark:text-slate-400 mt-1 leading-relaxed">{item.desc}</p>
-                </div>
-                <span className={`w-10 h-10 rounded-xl ${item.color} text-white text-xs font-bold flex items-center justify-center shrink-0`}>
-                  {item.code}
+              <div className="min-w-0">
+                <h3 className="font-display text-[15px] font-bold text-slate-900 dark:text-white">{item.name}</h3>
+                <p className="text-[12px] text-slate-500 dark:text-[#9BA3B0] mt-0.5 line-clamp-1">{item.desc}</p>
+                <span className="inline-block mt-2.5 px-2 py-0.5 rounded border border-slate-300 dark:border-white/25 text-[10px] font-medium text-slate-700 dark:text-slate-200">
+                  {item.tag}
                 </span>
               </div>
-              <div className="mt-4 flex items-center justify-between gap-2">
-                <button
-                  type="button"
-                  onClick={() =>
-                    openDetailForAccount(item.name, item.code, item.color, 0, `${item.code}-${accountMode.toUpperCase()}`)
-                  }
-                  className="text-[11px] font-medium text-slate-600 dark:text-slate-300 bg-white dark:bg-[#1A1D26] px-2.5 py-1 rounded-lg border border-slate-200/70 dark:border-[#2A2F3D] cursor-pointer hover:border-[#FF444F]"
-                >
-                  View Details
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleActivate(item.name, item.platform)}
-                  className="text-xs font-semibold text-[#FF444F] hover:underline cursor-pointer"
-                >
-                  {activating === item.name ? '...' : 'Activate'}
-                </button>
-              </div>
-            </div>
+              {item.badge}
+            </button>
           ))}
         </div>
       </section>
 
       {/* Compare Accounts Modal */}
       {compareOpen && (
-        <div className="fixed inset-0 z-50 bg-black/60 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-white dark:bg-[#181C25] rounded-3xl p-6 border border-slate-200 dark:border-[#2A2F3D] max-h-[85vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl bg-white dark:bg-[#181B22] rounded-3xl p-6 border border-slate-200 dark:border-white/10 max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-display text-lg font-bold">Compare CFD Accounts</h3>
               <button
@@ -543,7 +611,7 @@ export const CfdsHub: React.FC = () => {
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left">
-                <thead className="border-b border-slate-200 dark:border-[#2A2F3D] text-slate-500">
+                <thead className="border-b border-slate-200 dark:border-white/10 text-slate-400">
                   <tr>
                     <th className="py-2.5 pr-4">Feature</th>
                     <th className="py-2.5 px-3">Standard</th>
@@ -552,7 +620,7 @@ export const CfdsHub: React.FC = () => {
                     <th className="py-2.5 px-3">Swap-Free</th>
                   </tr>
                 </thead>
-                <tbody className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
+                <tbody className="divide-y divide-slate-100 dark:divide-white/10">
                   <tr>
                     <td className="py-3 pr-4 font-semibold">Max Leverage</td>
                     <td className="py-3 px-3 font-mono-num">1:1000</td>

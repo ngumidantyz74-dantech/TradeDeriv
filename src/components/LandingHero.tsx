@@ -1,11 +1,11 @@
 import React, { useState } from 'react';
-import { Menu, X, Star, ArrowRight, ShieldCheck, Globe, Mail, Lock, Shield } from 'lucide-react';
+import { Menu, X, Star, ArrowRight, ShieldCheck, Globe, Mail, Lock } from 'lucide-react';
 import { TradeDerivLogo } from './TradeDerivLogo';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 
 export const LandingHero: React.FC = () => {
-  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap, openAdminPortal, publicSettings } = useApp();
+  const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap, publicSettings } = useApp();
   const appName = publicSettings.branding?.appName || 'DERIV';
   const heroTitle = publicSettings.branding?.heroTitle || 'Trading for';
   const heroSubtitle = publicSettings.branding?.heroSubtitle || 'Anyone Anywhere Anytime';
@@ -148,14 +148,6 @@ export const LandingHero: React.FC = () => {
               </a>{' '}
               <span className="font-mono-num text-white/60">({partnerCode})</span>
             </span>
-            <button
-              type="button"
-              onClick={openAdminPortal}
-              className="inline-flex items-center gap-1 text-white/60 hover:text-white underline cursor-pointer"
-            >
-              <Shield className="w-3 h-3" />
-              <span>Admin Portal</span>
-            </button>
           </div>
         </div>
       </main>
@@ -233,19 +225,6 @@ export const LandingHero: React.FC = () => {
                 >
                   <span className="flex items-center gap-2.5">
                     <ShieldCheck className="w-4 h-4 text-[#00A878]" /> Try free demo ($10,000)
-                  </span>
-                  <ArrowRight className="w-4 h-4 text-slate-400" />
-                </button>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setMenuOpen(false);
-                    openAdminPortal();
-                  }}
-                  className="w-full flex items-center justify-between px-4 py-3 rounded-xl bg-[#1A1D26] hover:bg-[#222633] text-sm cursor-pointer"
-                >
-                  <span className="flex items-center gap-2.5">
-                    <Shield className="w-4 h-4 text-amber-400" /> Admin Portal
                   </span>
                   <ArrowRight className="w-4 h-4 text-slate-400" />
                 </button>

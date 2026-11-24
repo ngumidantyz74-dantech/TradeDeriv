@@ -3,9 +3,7 @@ import {
   CandlestickChart,
   RotateCcw,
   ArrowRight,
-  Bot,
-  Activity,
-  Zap,
+  ArrowLeftRight,
   TrendingUp,
   ArrowUpDown,
 } from 'lucide-react';
@@ -13,8 +11,15 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
 import { SparklineSvg } from '../components/SparklineSvg';
+import { SynthCandleBadge, AccumulatorCoinGraphic } from '../components/DerivBadges';
 
-const MOST_TRADED_CODES = ['1HZ100V', '1HZ75V', '1HZ10V', '1HZ25V', 'R_100'];
+const MOST_TRADED_SPECS = [
+  { symbol: '1HZ100V', num: '100', name: 'Volatility 100 (1s) Index', fallbackPrice: 1724.8 },
+  { symbol: '1HZ10V', num: '10', name: 'Volatility 10 (1s) Index', fallbackPrice: 9715.62 },
+  { symbol: '1HZ25V', num: '25', name: 'Volatility 25 (1s) Index', fallbackPrice: 901126.62 },
+  { symbol: '1HZ15V', num: '15', name: 'Volatility 15 (1s) Index', fallbackPrice: 14410.93 },
+  { symbol: '1HZ75V', num: '75', name: 'Volatility 75 (1s) Index', fallbackPrice: 3522.55 },
+];
 
 export const OptionsHub: React.FC = () => {
   const {
@@ -22,7 +27,9 @@ export const OptionsHub: React.FC = () => {
     accounts,
     accountMode,
     setAccountMode,
-    formatMoney,
+    hideBalances,
+    currencyDisplay,
+    kesRate,
     instruments,
     ticks,
     refreshAll,
@@ -36,19 +43,30 @@ export const OptionsHub: React.FC = () => {
   const [resetting, setResetting] = useState(false);
   const sparkHistoryRef = useRef<Record<string, number[]>>({});
 
-  // Accumulate live ticks into each market's sparkline so charts shift visibly in real time
   useEffect(() => {
-    for (const code of MOST_TRADED_CODES) {
-      const q = ticks[code]?.quote;
+    for (const spec of MOST_TRADED_SPECS) {
+      const q = ticks[spec.symbol]?.quote;
       if (!q || !Number.isFinite(q)) continue;
-      const buf = sparkHistoryRef.current[code] || [];
+      const buf = sparkHistoryRef.current[spec.symbol] || [];
       if (buf[buf.length - 1] !== q) {
-        sparkHistoryRef.current[code] = [...buf.slice(-22), q];
+        sparkHistoryRef.current[spec.symbol] = [...buf.slice(-22), q];
       }
     }
   }, [ticks]);
 
   const { optionsBal: totalValue } = getCanonicalBalances(user, accounts, accountMode, null);
+
+  const renderHeroBalance = () => {
+    if (hideBalances) return <span className="font-mono-num text-[28px] font-bold text-white">••••••</span>;
+    const isKsh = currencyDisplay === 'KSH';
+    const val = isKsh ? totalValue * kesRate : totalValue;
+    const formatted = val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    return (
+      <span className="font-display text-[26px] sm:text-[30px] font-bold tracking-tight tabular-nums text-white">
+        {formatted} {isKsh ? 'KSH' : 'USD'}
+      </span>
+    );
+  };
 
   const handleResetBalance = async () => {
     if (accountMode !== 'demo') return;
@@ -67,20 +85,22 @@ export const OptionsHub: React.FC = () => {
     }
   };
 
-  const featuredMarkets = MOST_TRADED_CODES.map((code) => {
-    const inst = instruments.find((i) => i.symbol === code);
-    const live = ticks[code];
-    const price = live?.quote ?? inst?.price ?? 1000;
-    const baseSpark = sparkHistoryRef.current[code]?.length >= 3
-      ? sparkHistoryRef.current[code]
-      : inst?.sparkline?.length
-        ? [...inst.sparkline, price]
-        : [price * 0.998, price * 0.999, price];
+  const featuredMarkets = MOST_TRADED_SPECS.map((spec) => {
+    const inst = instruments.find((i) => i.symbol === spec.symbol);
+    const live = ticks[spec.symbol];
+    const price = live?.quote ?? inst?.price ?? spec.fallbackPrice;
+    const baseSpark =
+      sparkHistoryRef.current[spec.symbol]?.length >= 3
+        ? sparkHistoryRef.current[spec.symbol]
+        : inst?.sparkline?.length
+          ? [...inst.sparkline, price]
+          : [price * 0.9985, price * 0.9992, price * 0.9998, price];
     const first = baseSpark[0] || price;
-    const livePct = first > 0 ? Number((((price - first) / first) * 100).toFixed(2)) : (inst?.change_pct ?? 0.1);
+    const livePct = first > 0 ? Number((((price - first) / first) * 100).toFixed(2)) : inst?.change_pct ?? 0.05;
     return {
-      symbol: code,
-      name: inst?.display_name || code,
+      symbol: spec.symbol,
+      num: spec.num,
+      name: inst?.display_name || spec.name,
       price,
       changePct: livePct,
       sparkline: baseSpark,
@@ -117,15 +137,15 @@ export const OptionsHub: React.FC = () => {
 
   return (
     <div className="max-w-7xl mx-auto">
-      {/* Dark Hero Banner */}
-      <section className="bg-[#151820] text-white px-5 sm:px-8 pt-5 pb-7 rounded-b-[28px] lg:rounded-3xl lg:mx-6 lg:mt-6">
-        <div className="flex justify-center lg:justify-start mb-5">
-          <div className="inline-flex items-center bg-[#232734] p-1 rounded-full">
+      {/* Upper Dark Hero Block matching 102705 (Demo) & 102813 (Real) */}
+      <section className="bg-[#171A21] text-white px-4 sm:px-8 pt-2 pb-6 rounded-b-[24px] lg:rounded-3xl lg:mx-6 lg:mt-4">
+        <div className="hidden lg:flex items-center mb-4">
+          <div className="inline-flex items-center bg-[#232732] p-1 rounded-full">
             <button
               type="button"
               onClick={() => setAccountMode('real')}
-              className={`px-5 py-1.5 rounded-full text-xs font-semibold cursor-pointer ${
-                accountMode === 'real' ? 'bg-[#363C4E] text-white' : 'text-slate-400'
+              className={`px-5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
+                accountMode === 'real' ? 'bg-[#383D4A] text-white' : 'text-[#8E95A2]'
               }`}
             >
               Real
@@ -133,8 +153,8 @@ export const OptionsHub: React.FC = () => {
             <button
               type="button"
               onClick={() => setAccountMode('demo')}
-              className={`px-5 py-1.5 rounded-full text-xs font-semibold cursor-pointer ${
-                accountMode === 'demo' ? 'bg-[#363C4E] text-white' : 'text-slate-400'
+              className={`px-5 py-1 rounded-full text-xs font-semibold cursor-pointer ${
+                accountMode === 'demo' ? 'bg-[#383D4A] text-white' : 'text-[#8E95A2]'
               }`}
             >
               Demo
@@ -142,44 +162,53 @@ export const OptionsHub: React.FC = () => {
           </div>
         </div>
 
-        <p className="text-xs text-slate-400">Total trading value</p>
-        <p className="font-mono-num text-2xl sm:text-3xl font-bold mt-1">
-          {formatMoney(totalValue, { hideable: true })}
-        </p>
-        <p className="text-xs text-slate-400 mt-1">Live updating</p>
+        <p className="text-[13px] text-[#9BA3B0]">Balance</p>
+        <div className="mt-0.5">{renderHeroBalance()}</div>
+        <p className="text-[12px] text-[#8E95A2] mt-0.5">Updated just now</p>
 
-        <div className="flex items-center justify-center lg:justify-start gap-12 mt-6">
+        <div className="grid grid-cols-2 max-w-md mx-auto lg:mx-0 lg:flex lg:items-center lg:gap-20 mt-6">
           <button
             type="button"
             onClick={() => setActiveTab('mt5-tv')}
-            className="flex flex-col items-center gap-2 cursor-pointer"
+            className="flex flex-col items-center gap-1.5 cursor-pointer group"
           >
-            <span className="w-12 h-12 rounded-full bg-[#FF444F] hover:bg-[#E63946] flex items-center justify-center">
+            <span className="w-11 h-11 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] flex items-center justify-center transition-colors">
               <CandlestickChart className="w-5 h-5 text-white" />
             </span>
-            <span className="text-xs font-medium">Trade</span>
+            <span className="text-[12px] font-medium text-white/95">Trade</span>
           </button>
 
-          {accountMode === 'demo' && (
+          {accountMode === 'demo' ? (
             <button
               type="button"
               disabled={resetting}
               onClick={handleResetBalance}
-              className="flex flex-col items-center gap-2 cursor-pointer"
+              className="flex flex-col items-center gap-1.5 cursor-pointer group"
             >
-              <span className="w-12 h-12 rounded-full border border-white/30 hover:bg-white/10 flex items-center justify-center">
-                <RotateCcw className={`w-5 h-5 text-white ${resetting ? 'animate-spin' : ''}`} />
+              <span className="w-11 h-11 rounded-full border border-white/75 group-hover:bg-white/10 flex items-center justify-center transition-colors">
+                <RotateCcw className={`w-[18px] h-[18px] text-white ${resetting ? 'animate-spin' : ''}`} />
               </span>
-              <span className="text-xs font-medium">Reset balance</span>
+              <span className="text-[12px] font-medium text-white/95">Reset balance</span>
+            </button>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setActiveTab('portfolio')}
+              className="flex flex-col items-center gap-1.5 cursor-pointer group"
+            >
+              <span className="w-11 h-11 rounded-full border border-white/75 group-hover:bg-white/10 flex items-center justify-center transition-colors">
+                <ArrowLeftRight className="w-[18px] h-[18px] text-white" />
+              </span>
+              <span className="text-[12px] font-medium text-white/95">Transfer</span>
             </button>
           )}
         </div>
       </section>
 
-      {/* Most traded markets */}
-      <section className="px-5 sm:px-8 mt-7">
-        <h2 className="font-display text-lg font-bold mb-3.5">Most traded markets</h2>
-        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3.5">
+      {/* Most traded markets 2-col grid matching 102705 & 102813 */}
+      <section className="px-4 sm:px-8 mt-6">
+        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Most traded markets</h2>
+        <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
           {featuredMarkets.map((m) => {
             const pos = m.changePct >= 0;
             return (
@@ -190,27 +219,23 @@ export const OptionsHub: React.FC = () => {
                   setSelectedSymbol(m.symbol);
                   setActiveTab('mt5-tv');
                 }}
-                className="text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
+                className="text-left p-3.5 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
               >
-                <div className="flex items-center gap-1.5 mb-2">
-                  <span className="px-1.5 py-0.5 rounded bg-[#0E1117] text-white text-[10px] font-bold">
-                    {m.symbol.replace('1HZ', '').replace('V', '')}
-                  </span>
-                  <span className="px-1.5 py-0.5 rounded-full bg-[#FF444F] text-white text-[9px] font-bold">1s</span>
+                <div className="mb-2">
+                  <SynthCandleBadge num={m.num} />
                 </div>
-                <p className="text-xs sm:text-sm font-medium text-slate-700 dark:text-slate-300 truncate">{m.name}</p>
-                <p className="font-mono-num text-lg sm:text-xl font-bold mt-2">
-                  {m.price.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                <p className="text-[12px] font-medium text-slate-600 dark:text-[#C7CDD6] truncate">{m.name}</p>
+                <p className="font-mono-num text-[17px] font-bold text-slate-900 dark:text-white mt-0.5 tabular-nums">
+                  {m.price.toFixed(2)}
                 </p>
-                <div className="mt-2.5 flex items-center justify-between gap-2">
-                  <SparklineSvg data={m.sparkline} positive={pos} width={88} height={26} />
-                  <span
-                    className={`font-mono-num text-xs font-semibold whitespace-nowrap ${
-                      pos ? 'text-[#00A878]' : 'text-[#FF444F]'
-                    }`}
-                  >
-                    {pos ? '+' : ''}
-                    {m.changePct.toFixed(2)}% (5m)
+                <div className="mt-2.5 flex items-center justify-between gap-1.5">
+                  <SparklineSvg data={m.sparkline} positive={pos} width={76} height={24} />
+                  <span className="text-[11px] font-semibold whitespace-nowrap tabular-nums">
+                    <span className={pos ? 'text-[#17B978]' : 'text-[#FF444F]'}>
+                      {pos ? '' : ''}
+                      {m.changePct.toFixed(2)}%
+                    </span>{' '}
+                    <span className="text-slate-400 dark:text-[#8E95A2] font-normal">(5m)</span>
                   </span>
                 </div>
               </button>
@@ -220,37 +245,65 @@ export const OptionsHub: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('mt5-tv')}
-            className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 cursor-pointer"
+            className="p-4 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 cursor-pointer"
           >
-            <ArrowRight className="w-5 h-5" />
-            <span className="text-sm font-semibold">View all</span>
+            <ArrowRight className="w-5 h-5 text-slate-700 dark:text-white" />
+            <span className="text-sm font-medium text-slate-800 dark:text-white">View all</span>
           </button>
         </div>
       </section>
 
-      {/* Platforms Stack matching exact Options Tab Screenshot (Deriv Trader DT, Deriv Bot DB, SmartTrader ST) */}
-      <section className="px-5 sm:px-8 mt-8">
-        <h2 className="font-display text-lg font-bold mb-3.5">Platforms</h2>
+      {/* Featured Accumulators Stacked Card matching 102705 & 102813 */}
+      <section className="px-4 sm:px-8 mt-6">
+        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Featured</h2>
+        <div className="max-w-md mx-auto lg:mx-0 lg:max-w-xl">
+          <div className="mx-3 h-2 rounded-t-2xl bg-slate-200 dark:bg-[#1E222B] border-t border-x border-slate-300/60 dark:border-white/[0.08]" />
+          <button
+            type="button"
+            onClick={() => {
+              setTradePreset({ symbol: '1HZ100V', contractType: 'ACCU', growthRate: 0.02 });
+              setActiveTab('mt5-tv');
+            }}
+            className="w-full text-left rounded-2xl overflow-hidden bg-white dark:bg-[#181B22] border border-slate-200 dark:border-white/[0.08] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
+          >
+            <div className="p-3.5 pb-0">
+              <div className="rounded-xl overflow-hidden">
+                <AccumulatorCoinGraphic />
+              </div>
+            </div>
+            <div className="p-4">
+              <h3 className="font-display text-[16px] font-bold text-slate-900 dark:text-white">Accumulators</h3>
+              <p className="text-[13px] text-slate-500 dark:text-[#9BA3B0] mt-0.5">
+                Grow your stake up to 5% per tick with instant stop &amp; take profit.
+              </p>
+            </div>
+          </button>
+        </div>
+      </section>
+
+      {/* Platforms Stack (Deriv Trader DT, Deriv Bot DB, SmartTrader ST) */}
+      <section className="px-4 sm:px-8 mt-7">
+        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Platforms</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {[
             {
               code: 'DT',
               title: 'Deriv Trader',
-              desc: 'Accumulators, Multipliers & Options on live Lightweight Charts.',
+              desc: 'Accumulators, Multipliers & Options on live charts.',
               color: 'bg-[#FF444F]',
               tab: 'mt5-tv',
             },
             {
               code: 'DB',
               title: 'Deriv Bot',
-              desc: 'Quick strategy bots, XML builder & Market Analyser auto-sync.',
+              desc: 'Quick strategy bots, XML builder & Analyser auto-sync.',
               color: 'bg-[#FF444F]',
               tab: 'bot-builder',
             },
             {
               code: 'ST',
               title: 'SmartTrader',
-              desc: 'Rise/Fall, Higher/Lower, Over/Under, Even/Odd & Matches/Differs.',
+              desc: 'Rise/Fall, Higher/Lower, Over/Under, Even/Odd & Digits.',
               color: 'bg-[#2C3A67]',
               tab: 'smart-trader',
             },
@@ -259,50 +312,26 @@ export const OptionsHub: React.FC = () => {
               key={p.title}
               type="button"
               onClick={() => setActiveTab(p.tab as any)}
-              className="flex items-center gap-4 p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 text-left cursor-pointer"
+              className="flex items-center gap-3.5 p-4 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 text-left cursor-pointer"
             >
               <span
-                className={`w-12 h-12 rounded-2xl ${p.color} text-white font-display font-bold text-base flex items-center justify-center shrink-0`}
+                className={`w-11 h-11 rounded-xl ${p.color} text-white font-display font-bold text-sm flex items-center justify-center shrink-0`}
               >
                 {p.code}
               </span>
               <div className="min-w-0">
-                <h3 className="font-display text-sm font-bold">{p.title}</h3>
-                <p className="text-xs text-slate-500 dark:text-slate-400 mt-0.5">{p.desc}</p>
+                <h3 className="font-display text-[14px] font-bold text-slate-900 dark:text-white">{p.title}</h3>
+                <p className="text-[12px] text-slate-500 dark:text-[#9BA3B0] mt-0.5">{p.desc}</p>
               </div>
             </button>
           ))}
         </div>
-
-        <div className="mt-3 flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => setActiveTab('bulk-trader')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold hover:border-[#FF444F] cursor-pointer"
-          >
-            <Zap className="w-3.5 h-3.5 text-[#FF444F]" /> Bulk Trader (1–25)
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('bot-builder')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold hover:border-[#FF444F] cursor-pointer"
-          >
-            <Bot className="w-3.5 h-3.5 text-[#FF444F]" /> Bot Builder & Quick Strategy
-          </button>
-          <button
-            type="button"
-            onClick={() => setActiveTab('market-analyser')}
-            className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold hover:border-[#FF444F] cursor-pointer"
-          >
-            <Activity className="w-3.5 h-3.5 text-[#00A878]" /> Market Analyser
-          </button>
-        </div>
       </section>
 
       {/* Trade types */}
-      <section className="px-5 sm:px-8 mt-8 pb-6">
-        <h2 className="font-display text-lg font-bold mb-3">Trade types</h2>
-        <div className="flex items-center gap-2 mb-4 overflow-x-auto no-scrollbar">
+      <section className="px-4 sm:px-8 mt-7 pb-6">
+        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Trade types</h2>
+        <div className="flex items-center gap-2 mb-3.5 overflow-x-auto no-scrollbar">
           {(['Deriv Trader', 'Deriv Bot', 'SmartTrader'] as const).map((tab) => (
             <button
               key={tab}
@@ -310,8 +339,8 @@ export const OptionsHub: React.FC = () => {
               onClick={() => setTradeFilter(tab)}
               className={`px-4 py-1.5 rounded-full text-xs font-semibold border whitespace-nowrap cursor-pointer ${
                 tradeFilter === tab
-                  ? 'border-[#0E1117] dark:border-white bg-white dark:bg-[#181C25]'
-                  : 'border-slate-200 dark:border-[#2A2F3D] text-slate-500'
+                  ? 'border-[#0E1117] dark:border-white bg-white dark:bg-[#232732] text-slate-900 dark:text-white'
+                  : 'border-slate-200 dark:border-white/15 text-slate-500 dark:text-[#8E95A2]'
               }`}
             >
               {tab}
@@ -319,19 +348,21 @@ export const OptionsHub: React.FC = () => {
           ))}
         </div>
 
-        <div className="grid grid-cols-3 sm:grid-cols-5 gap-3">
+        <div className="grid grid-cols-3 sm:grid-cols-5 gap-2.5">
           {tradeTypes.map((tt) => (
             <button
               key={tt.name}
               type="button"
               onClick={() => handleLaunchTradeType(tt)}
-              className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200/70 dark:border-[#2A2F3D] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2.5 text-center cursor-pointer"
+              className="p-3.5 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
             >
               <div className="flex items-center gap-1 text-[#FF444F]">
                 <TrendingUp className="w-4 h-4" />
                 <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
               </div>
-              <span className="text-xs font-medium truncate max-w-full">{tt.name}</span>
+              <span className="text-[11px] font-medium truncate max-w-full text-slate-800 dark:text-[#E2E6ED]">
+                {tt.name}
+              </span>
             </button>
           ))}
         </div>

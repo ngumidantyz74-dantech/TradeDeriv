@@ -70,6 +70,13 @@ const MainRouter: React.FC = () => {
     };
   }, [privateSlug, envSlug]);
 
+  const [minSplashDone, setMinSplashDone] = useState<boolean>(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setMinSplashDone(true), 650);
+    return () => clearTimeout(t);
+  }, []);
+
   if (isAdminRoute || adminGateOpen) {
     return (
       <AdminMISPage
@@ -82,10 +89,15 @@ const MainRouter: React.FC = () => {
     );
   }
 
-  if (loadingAuth) {
+  if (loadingAuth || !minSplashDone) {
     return (
-      <div className="min-h-screen bg-[#151820] text-white flex items-center justify-center">
-        <div className="w-8 h-8 rounded-full border-2 border-[#FF444F] border-t-transparent animate-spin" />
+      <div className="min-h-screen w-full bg-[#FF444F] text-white flex items-center justify-center select-none">
+        <span
+          className="text-[46px] sm:text-[56px] font-bold italic tracking-[-0.03em] leading-none text-white"
+          style={{ fontFamily: "'IBM Plex Sans', 'Ubuntu', sans-serif" }}
+        >
+          deriv
+        </span>
       </div>
     );
   }
