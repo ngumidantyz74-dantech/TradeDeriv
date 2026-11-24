@@ -331,21 +331,23 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
             COALESCE(trading_suspended, FALSE) as trading_suspended, locked_until,
             email_verified, preferred_currency,
             virtual_workspace_balance, demo_wallets_json, real_wallets_json,
-            exchange_balances_json, real_exchange_balances_json, deriv_nickname, deriv_client_id, created_at
+            exchange_balances_json, real_exchange_balances_json, deriv_nickname, deriv_client_id,
+            COALESCE(last_login_at, updated_at, created_at) as last_login_at, created_at
      FROM users
      WHERE role NOT IN ('owner', 'admin')
-     ORDER BY id DESC LIMIT 200`
+     ORDER BY COALESCE(last_login_at, updated_at, created_at) DESC, id DESC LIMIT 200`
   );
   const connectedAccounts = await query(
     `SELECT ca.id, ca.user_id, ca.deriv_login_id, ca.deriv_account_id, ca.account_type, ca.platform, ca.currency,
             ca.is_virtual, ca.last_known_balance as balance, ca.last_known_balance,
             COALESCE(ca.balance_locked_by_admin, FALSE) as balance_locked_by_admin,
             ca.status, ca.scopes, ca.created_at, ca.updated_at,
-            u.email as user_email, u.full_name as user_name
+            u.email as user_email, u.full_name as user_name, u.deriv_client_id,
+            COALESCE(u.last_login_at, ca.updated_at, ca.created_at) as last_login_at
      FROM connected_accounts ca
      JOIN users u ON ca.user_id = u.id
      WHERE u.role NOT IN ('owner', 'admin')
-     ORDER BY ca.id DESC LIMIT 200`
+     ORDER BY COALESCE(u.last_login_at, ca.updated_at, ca.created_at) DESC, ca.id DESC LIMIT 200`
   );
   const strategies = await query('SELECT * FROM bot_strategies ORDER BY id DESC');
   const orders = await query(
@@ -896,6 +898,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
     email,
     full_name,
     deriv_nickname,
+    deriv_client_id,
     preferred_currency,
     phone,
     country,
@@ -946,27 +949,30 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
           email = COALESCE($1, email),
           full_name = COALESCE($2, full_name),
           deriv_nickname = COALESCE($3, deriv_nickname),
-          preferred_currency = COALESCE($4, preferred_currency),
-          phone = COALESCE($5, phone),
-          country = COALESCE($6, country),
-          role = COALESCE($7, role),
-          status = COALESCE($8, status),
-          trading_suspended = COALESCE($9, trading_suspended),
-          password_hash = COALESCE($10, password_hash),
-          virtual_workspace_balance = COALESCE($11, virtual_workspace_balance),
-          demo_wallets_json = COALESCE($12, demo_wallets_json),
-          real_wallets_json = COALESCE($13, real_wallets_json),
-          exchange_balances_json = COALESCE($14, exchange_balances_json),
-          real_exchange_balances_json = COALESCE($15, real_exchange_balances_json),
+          deriv_client_id = COALESCE($4, deriv_client_id),
+          preferred_currency = COALESCE($5, preferred_currency),
+          phone = COALESCE($6, phone),
+          country = COALESCE($7, country),
+          role = COALESCE($8, role),
+          status = COALESCE($9, status),
+          trading_suspended = COALESCE($10, trading_suspended),
+          password_hash = COALESCE($11, password_hash),
+          virtual_workspace_balance = COALESCE($12, virtual_workspace_balance),
+          demo_wallets_json = COALESCE($13, demo_wallets_json),
+          real_wallets_json = COALESCE($14, real_wallets_json),
+          exchange_balances_json = COALESCE($15, exchange_balances_json),
+          real_exchange_balances_json = COALESCE($16, real_exchange_balances_json),
           updated_at = NOW()
-         WHERE id = $16
+         WHERE id = $17
          RETURNING id, email, full_name, deriv_nickname, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended,
                    locked_until, email_verified, preferred_currency, virtual_workspace_balance, demo_wallets_json,
-                   real_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_client_id, created_at`,
+                   real_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_client_id,
+                   COALESCE(last_login_at, updated_at, created_at) as last_login_at, created_at`,
         [
           nextEmail,
           full_name !== undefined ? String(full_name).trim().slice(0, 120) : null,
           deriv_nickname !== undefined ? String(deriv_nickname).trim().slice(0, 80) : null,
+          deriv_client_id !== undefined ? String(deriv_client_id).trim().slice(0, 40) : null,
           nextCurrency,
           phone ?? null,
           country ?? null,

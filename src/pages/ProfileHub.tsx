@@ -77,8 +77,17 @@ export const ProfileHub: React.FC = () => {
   }, []);
 
   useEffect(() => {
+    if (!user) return;
+    setFullName(user.full_name || '');
+    setPhone(user.phone || '');
+    setCountry(user.country || 'Kenya');
+    setLanguage(user.preferred_language || 'EN');
+  }, [user]);
+
+  useEffect(() => {
+    refreshAll();
     loadDetails();
-  }, [loadDetails]);
+  }, [loadDetails, refreshAll]);
 
   const rawClientId = user?.deriv_client_id || '019e...6cdd';
   const displayClientId =
@@ -280,7 +289,7 @@ export const ProfileHub: React.FC = () => {
             {renderFlatRow({
               icon: Smartphone,
               label: 'Change phone number',
-              subtext: user?.phone || '+254791350215',
+              subtext: user?.phone || derivSettings?.phone || 'Not set',
               onClick: () => setActiveSheet('personal'),
             })}
             {renderFlatRow({

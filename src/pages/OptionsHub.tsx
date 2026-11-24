@@ -209,9 +209,9 @@ export const OptionsHub: React.FC = () => {
         </div>
       </section>
 
-      {/* Most traded markets 2-col grid matching 105336 */}
+      {/* Most traded markets 2-col grid matching 105336 & 114724 */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">Most traded markets</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">Most traded markets</h2>
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
           {featuredMarkets.map((m) => {
             const pos = m.changePct >= 0;
@@ -223,13 +223,13 @@ export const OptionsHub: React.FC = () => {
                   setSelectedSymbol(m.symbol);
                   setActiveTab('mt5-tv');
                 }}
-                className="text-left p-3.5 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
+                className="text-left p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
               >
                 <div className="mb-2">
                   <SynthCandleBadge num={m.num} />
                 </div>
-                <p className="text-[12px] font-medium text-[#C7CDD6] truncate">{m.name}</p>
-                <p className="font-mono-num text-[17px] font-bold text-white mt-0.5 tabular-nums">
+                <p className="text-[12px] font-medium text-[#374151] dark:text-[#C7CDD6] truncate">{m.name}</p>
+                <p className="font-mono-num text-[17px] font-bold text-[#111319] dark:text-white mt-0.5 tabular-nums">
                   {m.price.toFixed(2)}
                 </p>
                 <div className="mt-2.5 flex items-center justify-between gap-1.5">
@@ -238,7 +238,7 @@ export const OptionsHub: React.FC = () => {
                     <span className={pos ? 'text-[#17B978]' : 'text-[#FF444F]'}>
                       {m.changePct.toFixed(2)}%
                     </span>{' '}
-                    <span className="text-[#8E95A2] font-normal">(5m)</span>
+                    <span className="text-[#6B7280] dark:text-[#8E95A2] font-normal">(5m)</span>
                   </span>
                 </div>
               </button>
@@ -248,20 +248,20 @@ export const OptionsHub: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('mt5-tv')}
-            className="p-4 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 cursor-pointer"
+            className="p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 cursor-pointer"
           >
-            <ArrowRight className="w-5 h-5 text-white" />
-            <span className="text-sm font-medium text-white">View all</span>
+            <ArrowRight className="w-5 h-5 text-[#111319] dark:text-white" />
+            <span className="text-sm font-medium text-[#111319] dark:text-white">View all</span>
           </button>
         </div>
       </section>
 
-      {/* Featured Stacked Carousel matching Screenshot 105341 (Trade on Gold + Accumulators) */}
+      {/* Featured Stacked Carousel matching Screenshot 105341 & 114724 */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">Featured</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">Featured</h2>
         <div className="max-w-md mx-auto lg:mx-0 lg:max-w-xl">
-          <div className="mx-3 h-2 rounded-t-2xl bg-[#1E222B] border-t border-x border-white/[0.08]" />
-          <div className="rounded-2xl overflow-hidden bg-[#181B22] border border-white/[0.08]">
+          <div className="mx-3 h-2 rounded-t-2xl bg-[#E5E7EB] dark:bg-[#1E222B] border-t border-x border-slate-200 dark:border-white/[0.08]" />
+          <div className="rounded-2xl overflow-hidden bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.08]">
             <div className="p-3.5 pb-0">
               <div className="rounded-xl overflow-hidden">
                 {featuredSlide === 0 ? <TradeOnGoldGraphic /> : <AccumulatorCoinGraphic />}
@@ -269,21 +269,21 @@ export const OptionsHub: React.FC = () => {
             </div>
 
             <div className="p-4">
-              <h3 className="font-display text-[17px] font-bold text-white">
+              <h3 className="font-display text-[17px] font-bold text-[#111319] dark:text-white">
                 {featuredSlide === 0 ? 'Trade on Gold' : 'Accumulators'}
               </h3>
-              <p className="text-[13px] text-[#9BA3B0] mt-1 leading-snug">
+              <p className="text-[13px] text-[#525866] dark:text-[#9BA3B0] mt-1 leading-snug">
                 {featuredSlide === 0
                   ? "Predict whether gold prices will rise or fall. Trade one of the world's most popular commodities, available 24/5."
                   : 'Grow your stake up to 5% per tick with instant stop & take profit.'}
               </p>
 
-              <div className="mt-4 pt-3 border-t border-white/[0.06] flex items-center justify-between gap-2">
+              <div className="mt-4 pt-3 border-t border-slate-200 dark:border-white/[0.06] flex items-center justify-between gap-2">
                 <div className="flex items-center gap-1.5">
-                  <span className="px-2 py-0.5 rounded bg-[#272B36] text-[10px] font-medium text-[#C7CDD6]">
+                  <span className="px-2 py-0.5 rounded bg-[#E5E7EB] dark:bg-[#272B36] text-[10px] font-medium text-[#374151] dark:text-[#C7CDD6]">
                     {featuredSlide === 0 ? '24/5 trading' : 'Up to 5%/tick'}
                   </span>
-                  <span className="px-2 py-0.5 rounded bg-[#272B36] text-[10px] font-medium text-[#C7CDD6]">
+                  <span className="px-2 py-0.5 rounded bg-[#E5E7EB] dark:bg-[#272B36] text-[10px] font-medium text-[#374151] dark:text-[#C7CDD6]">
                     From 1 USD
                   </span>
                 </div>
@@ -299,7 +299,7 @@ export const OptionsHub: React.FC = () => {
                     }
                     setActiveTab('mt5-tv');
                   }}
-                  className="px-4 py-1.5 rounded-full border border-white/75 hover:bg-white/10 text-xs font-semibold text-white cursor-pointer"
+                  className="px-4 py-1.5 rounded-full border border-slate-700 dark:border-white/75 hover:bg-black/5 dark:hover:bg-white/10 text-xs font-semibold text-[#111319] dark:text-white cursor-pointer"
                 >
                   Trade now
                 </button>
@@ -315,7 +315,7 @@ export const OptionsHub: React.FC = () => {
                 aria-label={`Featured option ${idx + 1}`}
                 onClick={() => setFeaturedSlide(idx)}
                 className={`w-1.5 h-1.5 rounded-full cursor-pointer ${
-                  featuredSlide === idx ? 'bg-white' : 'bg-white/25'
+                  featuredSlide === idx ? 'bg-[#111319] dark:bg-white' : 'bg-[#D1D5DB] dark:bg-white/25'
                 }`}
               />
             ))}
@@ -325,13 +325,13 @@ export const OptionsHub: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('learning-hub')}
-            className="w-full mt-5 p-4 rounded-2xl bg-[#13151B] border border-white/[0.1] hover:border-white/25 flex items-center justify-between gap-3 text-left cursor-pointer transition-colors"
+            className="w-full mt-5 p-4 rounded-2xl bg-white dark:bg-[#13151B] border border-slate-200 dark:border-white/[0.1] hover:border-slate-300 dark:hover:border-white/25 flex items-center justify-between gap-3 text-left cursor-pointer transition-colors"
           >
-            <span className="text-[13px] font-medium text-[#E2E6ED]">
+            <span className="text-[13px] font-medium text-[#111319] dark:text-[#E2E6ED]">
               Learn more about Options trading and other trade types.
             </span>
-            <span className="w-8 h-8 rounded-full border border-white/60 flex items-center justify-center shrink-0">
-              <ArrowRight className="w-4 h-4 text-white" />
+            <span className="w-8 h-8 rounded-full border border-slate-700 dark:border-white/60 flex items-center justify-center shrink-0">
+              <ArrowRight className="w-4 h-4 text-[#111319] dark:text-white" />
             </span>
           </button>
         </div>
@@ -339,7 +339,7 @@ export const OptionsHub: React.FC = () => {
 
       {/* Platforms Stack (Deriv Trader DT, Deriv Bot DB, SmartTrader ST) */}
       <section className="px-4 sm:px-8 mt-7">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">Platforms</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">Platforms</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {[
             {
@@ -368,7 +368,7 @@ export const OptionsHub: React.FC = () => {
               key={p.title}
               type="button"
               onClick={() => setActiveTab(p.tab as any)}
-              className="flex items-center gap-3.5 p-4 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 text-left cursor-pointer"
+              className="flex items-center gap-3.5 p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 text-left cursor-pointer"
             >
               <span
                 className={`w-11 h-11 rounded-xl ${p.color} text-white font-display font-bold text-sm flex items-center justify-center shrink-0`}
@@ -376,8 +376,8 @@ export const OptionsHub: React.FC = () => {
                 {p.code}
               </span>
               <div className="min-w-0">
-                <h3 className="font-display text-[14px] font-bold text-white">{p.title}</h3>
-                <p className="text-[12px] text-[#9BA3B0] mt-0.5">{p.desc}</p>
+                <h3 className="font-display text-[14px] font-bold text-[#111319] dark:text-white">{p.title}</h3>
+                <p className="text-[12px] text-[#525866] dark:text-[#9BA3B0] mt-0.5">{p.desc}</p>
               </div>
             </button>
           ))}
@@ -386,7 +386,7 @@ export const OptionsHub: React.FC = () => {
 
       {/* Trade types */}
       <section className="px-4 sm:px-8 mt-7 pb-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">Trade types</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">Trade types</h2>
         <div className="flex items-center gap-2 mb-3.5 overflow-x-auto no-scrollbar">
           {(['Deriv Trader', 'Deriv Bot', 'SmartTrader'] as const).map((tab) => (
             <button
@@ -395,8 +395,8 @@ export const OptionsHub: React.FC = () => {
               onClick={() => setTradeFilter(tab)}
               className={`px-4 py-1.5 rounded-full text-xs font-semibold border whitespace-nowrap cursor-pointer ${
                 tradeFilter === tab
-                  ? 'border-white bg-[#232732] text-white'
-                  : 'border-white/15 text-[#8E95A2]'
+                  ? 'border-[#111319] bg-[#111319] text-white dark:border-white dark:bg-[#232732] dark:text-white'
+                  : 'border-slate-300 text-[#525866] dark:border-white/15 dark:text-[#8E95A2]'
               }`}
             >
               {tab}
@@ -410,13 +410,13 @@ export const OptionsHub: React.FC = () => {
               key={tt.name}
               type="button"
               onClick={() => handleLaunchTradeType(tt)}
-              className="p-3.5 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
+              className="p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
             >
               <div className="flex items-center gap-1 text-[#FF444F]">
                 <TrendingUp className="w-4 h-4" />
                 <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
               </div>
-              <span className="text-[11px] font-medium truncate max-w-full text-[#E2E6ED]">
+              <span className="text-[11px] font-medium truncate max-w-full text-[#1F2329] dark:text-[#E2E6ED]">
                 {tt.name}
               </span>
             </button>

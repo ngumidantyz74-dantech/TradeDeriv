@@ -46,6 +46,7 @@ export interface UserProfile {
   real_exchange_balances?: Record<string, number>;
   deriv_nickname: string;
   deriv_client_id: string;
+  last_login_at?: string;
   created_at: string;
 }
 
@@ -62,6 +63,7 @@ export interface ConnectedAccount {
   balance_locked_by_admin?: boolean;
   status: string;
   scopes: string;
+  last_login_at?: string;
   updated_at?: string;
 }
 

@@ -139,6 +139,7 @@ async function runSchemaAndSeed(): Promise<void> {
         exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}',
         deriv_nickname TEXT DEFAULT '',
         deriv_client_id TEXT DEFAULT '',
+        last_login_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
@@ -432,6 +433,8 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS real_exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_nickname TEXT DEFAULT '';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_client_id TEXT DEFAULT '';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS last_login_at TIMESTAMPTZ;
+      UPDATE users SET last_login_at = COALESCE(last_login_at, updated_at, created_at, NOW()) WHERE last_login_at IS NULL;
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS strategy_key TEXT DEFAULT '';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS timeframe TEXT DEFAULT '';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS account_mode TEXT DEFAULT 'demo';

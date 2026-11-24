@@ -57,6 +57,7 @@ export function formatPublicUser(u: any) {
     }),
     deriv_nickname: u.deriv_nickname || '',
     deriv_client_id: u.deriv_client_id || maskClientId(String(u.id).padStart(8, '0')),
+    last_login_at: u.last_login_at || u.updated_at || u.created_at,
     created_at: u.created_at,
   };
 }
@@ -171,9 +172,13 @@ router.post('/auth/login', requireDb, async (req, res) => {
       return;
     }
 
-    const token = signUserToken({ id: user.id, email: user.email, role: user.role });
-    await logSecurityEvent(user.id, 'login_success', req.ip);
-    res.json({ token, user: formatPublicUser(user) });
+    const loggedUser =
+      (await queryOne<any>('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *', [
+        user.id,
+      ])) || user;
+    const token = signUserToken({ id: loggedUser.id, email: loggedUser.email, role: loggedUser.role });
+    await logSecurityEvent(loggedUser.id, 'login_success', req.ip);
+    res.json({ token, user: formatPublicUser(loggedUser) });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Login failed' });
   }
@@ -280,19 +285,22 @@ router.get('/account/profile-details', requireDb, requireAuth, async (req: AuthR
     }
   }
 
+  const mergedSettings = {
+    ...(derivSettings || {}),
+    email: user.email,
+    first_name: user.full_name.split(' ')[0] || (derivSettings as any)?.first_name || '',
+    last_name: user.full_name.split(' ').slice(1).join(' ') || (derivSettings as any)?.last_name || '',
+    phone: user.phone || (derivSettings as any)?.phone || '',
+    country: user.country || (derivSettings as any)?.country || 'Kenya',
+    address_line_1: (derivSettings as any)?.address_line_1 || '',
+    address_city: (derivSettings as any)?.address_city || 'Nairobi',
+    tax_identification_number: (derivSettings as any)?.tax_identification_number || '',
+    preferred_language: user.preferred_language || (derivSettings as any)?.preferred_language || 'EN',
+  };
+
   res.json({
     profile: formatPublicUser(user),
-    derivSettings: derivSettings || {
-      email: user.email,
-      first_name: user.full_name.split(' ')[0] || '',
-      last_name: user.full_name.split(' ').slice(1).join(' ') || '',
-      phone: user.phone || '',
-      country: user.country || 'Kenya',
-      address_line_1: '',
-      address_city: 'Nairobi',
-      tax_identification_number: '',
-      preferred_language: user.preferred_language || 'EN',
-    },
+    derivSettings: mergedSettings,
     verification: accountStatus || {
       poi_status: 'verified',
       poa_status: 'pending',
@@ -360,6 +368,7 @@ router.put('/account/profile-details', requireDb, requireAuth, async (req: AuthR
     }
   }
 
+  derivWs.emitUserEvent(req.user!.id, 'account_updated', { userId: req.user!.id });
   res.json({ user: formatPublicUser(updated) });
 });
 

@@ -213,29 +213,27 @@ async function syncDerivProfileOnExistingUser(
   const incomingNick = String(profile.nickname || '').trim();
   const incomingClientId = profile.clientId ? maskClientId(profile.clientId) : '';
 
-  if (shouldUpdateName || shouldUpdatePhone || shouldUpdateCountry || incomingNick || incomingClientId) {
-    const fresh = await queryOne<any>(
-      `UPDATE users SET
-        full_name = CASE WHEN $1 <> '' THEN $1 ELSE full_name END,
-        phone = CASE WHEN $2 <> '' THEN $2 ELSE phone END,
-        country = CASE WHEN $3 <> '' THEN $3 ELSE country END,
-        deriv_nickname = COALESCE(NULLIF($4, ''), deriv_nickname),
-        deriv_client_id = COALESCE(NULLIF($5, ''), deriv_client_id),
-        updated_at = NOW()
-       WHERE id = $6
-       RETURNING *`,
-      [
-        shouldUpdateName ? incomingName : '',
-        shouldUpdatePhone ? incomingPhone : '',
-        shouldUpdateCountry ? normalizedCountry! : '',
-        incomingNick,
-        !String(userRow.deriv_client_id || '').trim() ? incomingClientId : '',
-        userRow.id,
-      ]
-    );
-    if (fresh) return fresh;
-  }
-  return userRow;
+  const fresh = await queryOne<any>(
+    `UPDATE users SET
+      full_name = CASE WHEN $1 <> '' THEN $1 ELSE full_name END,
+      phone = CASE WHEN $2 <> '' THEN $2 ELSE phone END,
+      country = CASE WHEN $3 <> '' THEN $3 ELSE country END,
+      deriv_nickname = COALESCE(NULLIF($4, ''), deriv_nickname),
+      deriv_client_id = COALESCE(NULLIF($5, ''), deriv_client_id),
+      last_login_at = NOW(),
+      updated_at = NOW()
+     WHERE id = $6
+     RETURNING *`,
+    [
+      shouldUpdateName ? incomingName : '',
+      shouldUpdatePhone ? incomingPhone : '',
+      shouldUpdateCountry ? normalizedCountry! : '',
+      incomingNick,
+      !String(userRow.deriv_client_id || '').trim() ? incomingClientId : '',
+      userRow.id,
+    ]
+  );
+  return fresh || userRow;
 }
 
 /**
@@ -804,8 +802,10 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
           clientId: String(accounts[0].acct || ''),
         });
       } catch {
-        // non-blocking
+        await execute('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [req.user!.id]);
       }
+    } else {
+      await execute('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [req.user!.id]);
     }
 
     const updated = await query(

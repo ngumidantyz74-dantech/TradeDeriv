@@ -96,7 +96,7 @@ const TabPortfolioIcon: React.FC<{ active: boolean }> = ({ active }) => (
     {active ? (
       <>
         <rect x="3" y="5.5" width="18" height="13.5" rx="3" fill="currentColor" />
-        <rect x="14.5" y="10.5" width="6.5" height="3.5" rx="1.2" fill="#16181F" />
+        <rect x="14.5" y="10.5" width="6.5" height="3.5" rx="1.2" className="fill-white dark:fill-[#16181F]" />
         <circle cx="17" cy="12.25" r="0.9" fill="currentColor" />
       </>
     ) : (
@@ -184,7 +184,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
   const isCoreMobileHub = activeTab === 'home' || activeTab === 'cfds' || activeTab === 'options' || activeTab === 'portfolio';
 
   return (
-    <div className="min-h-screen bg-[#F5F7FA] dark:bg-[#0E0F13] text-[#0E1117] dark:text-white flex flex-col lg:flex-row">
+    <div className="min-h-screen bg-white dark:bg-[#0E0F13] text-[#111319] dark:text-white flex flex-col lg:flex-row">
       {/* Desktop Sidebar */}
       <aside className="hidden lg:flex lg:flex-col lg:w-64 lg:fixed lg:inset-y-0 bg-white dark:bg-[#151820] border-r border-slate-200 dark:border-white/[0.08] z-30">
         <div className="px-5 py-4 border-b border-slate-100 dark:border-white/[0.08] flex items-center justify-between">
@@ -533,7 +533,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
       </div>
 
       {/* Fixed 4-Tab Mobile Lower Tabbar matching Screenshots (Home, CFDs, Options, Portfolio) */}
-      <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-[#16181F] border-t border-white/[0.08] pb-safe">
+      <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white dark:bg-[#16181F] border-t border-slate-200 dark:border-white/[0.08] pb-safe">
         <div className="grid grid-cols-4 h-[60px]">
           <button
             type="button"
@@ -544,7 +544,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               }
             }}
             className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer select-none ${
-              activeTab === 'home' ? 'text-[#FF444F]' : 'text-[#8E95A2]'
+              activeTab === 'home' ? 'text-[#FF444F]' : 'text-[#525866] dark:text-[#8E95A2]'
             }`}
           >
             <TabHomeIcon active={activeTab === 'home'} />
@@ -555,7 +555,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             type="button"
             onClick={() => setActiveTab('cfds')}
             className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer select-none ${
-              activeTab === 'cfds' ? 'text-[#FF444F]' : 'text-[#8E95A2]'
+              activeTab === 'cfds' ? 'text-[#FF444F]' : 'text-[#525866] dark:text-[#8E95A2]'
             }`}
           >
             <TabCfdsIcon />
@@ -566,7 +566,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             type="button"
             onClick={() => setActiveTab('options')}
             className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer select-none ${
-              activeTab === 'options' ? 'text-[#FF444F]' : 'text-[#8E95A2]'
+              activeTab === 'options' ? 'text-[#FF444F]' : 'text-[#525866] dark:text-[#8E95A2]'
             }`}
           >
             <TabOptionsIcon />
@@ -577,7 +577,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             type="button"
             onClick={() => setActiveTab('portfolio')}
             className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer select-none ${
-              activeTab === 'portfolio' ? 'text-[#FF444F]' : 'text-[#8E95A2]'
+              activeTab === 'portfolio' ? 'text-[#FF444F]' : 'text-[#525866] dark:text-[#8E95A2]'
             }`}
           >
             <TabPortfolioIcon active={activeTab === 'portfolio'} />

@@ -70,7 +70,11 @@ export const CfdsHub: React.FC = () => {
   const renderSplitMoney = (usdAmount: number, hero = false) => {
     if (hideBalances) {
       return (
-        <span className={`font-mono-num font-bold text-white tracking-widest ${hero ? 'text-[22px]' : 'text-[14px]'}`}>
+        <span
+          className={`font-mono-num font-bold tracking-widest ${
+            hero ? 'text-[22px] text-white' : 'text-[14px] text-[#111319] dark:text-white'
+          }`}
+        >
           *****
         </span>
       );
@@ -88,8 +92,8 @@ export const CfdsHub: React.FC = () => {
     }
     return (
       <span className="inline-flex items-baseline gap-1 tabular-nums">
-        <span className="text-[16px] font-bold text-white">{formatted}</span>
-        <span className="text-[11px] font-normal text-[#8E95A2]">{unit}</span>
+        <span className="text-[16px] font-bold text-[#111319] dark:text-white">{formatted}</span>
+        <span className="text-[11px] font-normal text-[#6B7280] dark:text-[#8E95A2]">{unit}</span>
       </span>
     );
   };
@@ -154,13 +158,13 @@ export const CfdsHub: React.FC = () => {
   if (selectedDetail) {
     const accountOrders = orders.slice(0, 12);
     return (
-      <div className="min-h-[82vh] bg-[#0E0F13] text-white">
+      <div className="min-h-[82vh] bg-white dark:bg-[#0E0F13] text-[#111319] dark:text-white">
         <div className="max-w-3xl mx-auto px-5 pt-5 pb-12">
           <div className="flex items-center justify-between mb-8">
             <button
               type="button"
               onClick={() => setSelectedDetail(null)}
-              className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/15 flex items-center justify-center cursor-pointer"
+              className="w-10 h-10 rounded-full bg-[#F4F5F7] dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/15 flex items-center justify-center cursor-pointer"
               aria-label="Back to CFDs"
             >
               <ArrowLeft className="w-5 h-5" />
@@ -168,14 +172,14 @@ export const CfdsHub: React.FC = () => {
             <button
               type="button"
               onClick={() => setHideBalances(!hideBalances)}
-              className="w-10 h-10 rounded-full bg-white/10 hover:bg-white/15 flex items-center justify-center cursor-pointer"
+              className="w-10 h-10 rounded-full bg-[#F4F5F7] dark:bg-white/10 hover:bg-slate-200 dark:hover:bg-white/15 flex items-center justify-center cursor-pointer"
               aria-label="Toggle balance visibility"
             >
               {hideBalances ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
             </button>
           </div>
 
-          <div className="flex flex-col items-center text-center pb-8 border-b border-white/10">
+          <div className="flex flex-col items-center text-center pb-8 border-b border-slate-200 dark:border-white/10">
             <div className="mb-5">
               {selectedDetail.code === 'cT' ? (
                 <CTraderBadge />
@@ -189,9 +193,9 @@ export const CfdsHub: React.FC = () => {
             </p>
 
             <div className="flex items-center gap-2 mt-2">
-              <span className="text-sm text-slate-300">{selectedDetail.title}</span>
+              <span className="text-sm text-[#525866] dark:text-slate-300">{selectedDetail.title}</span>
               {selectedDetail.isDemo && (
-                <span className="px-2 py-0.5 rounded border border-white/25 text-[10px] font-semibold text-slate-300">
+                <span className="px-2 py-0.5 rounded border border-slate-300 dark:border-white/25 text-[10px] font-semibold text-[#525866] dark:text-slate-300">
                   Demo
                 </span>
               )}
@@ -219,11 +223,11 @@ export const CfdsHub: React.FC = () => {
                 <span
                   className={`w-12 h-12 rounded-full flex items-center justify-center ${
                     selectedDetail.isDemo
-                      ? 'bg-[#FF444F] hover:bg-[#E63946]'
-                      : 'border border-white/30 hover:bg-white/10'
+                      ? 'bg-[#FF444F] hover:bg-[#E63946] text-white'
+                      : 'border border-slate-300 dark:border-white/30 hover:bg-black/5 dark:hover:bg-white/10 text-[#111319] dark:text-white'
                   }`}
                 >
-                  <CandlestickChart className="w-5 h-5 text-white" />
+                  <CandlestickChart className="w-5 h-5" />
                 </span>
                 <span className="text-xs font-medium">Trade</span>
               </button>
@@ -235,8 +239,8 @@ export const CfdsHub: React.FC = () => {
                   onClick={handleResetDemo}
                   className="flex flex-col items-center gap-2 cursor-pointer"
                 >
-                  <span className="w-12 h-12 rounded-full border border-white/30 hover:bg-white/10 flex items-center justify-center">
-                    <RotateCcw className={`w-5 h-5 text-white ${resettingDemo ? 'animate-spin' : ''}`} />
+                  <span className="w-12 h-12 rounded-full border border-slate-300 dark:border-white/30 hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center">
+                    <RotateCcw className={`w-5 h-5 ${resettingDemo ? 'animate-spin' : ''}`} />
                   </span>
                   <span className="text-xs font-medium">Reset balance</span>
                 </button>
@@ -247,8 +251,8 @@ export const CfdsHub: React.FC = () => {
                 onClick={() => setDetailsModalOpen(true)}
                 className="flex flex-col items-center gap-2 cursor-pointer"
               >
-                <span className="w-12 h-12 rounded-full border border-white/30 hover:bg-white/10 flex items-center justify-center">
-                  <MoreHorizontal className="w-5 h-5 text-white" />
+                <span className="w-12 h-12 rounded-full border border-slate-300 dark:border-white/30 hover:bg-black/5 dark:hover:bg-white/10 flex items-center justify-center">
+                  <MoreHorizontal className="w-5 h-5" />
                 </span>
                 <span className="text-xs font-medium">Details</span>
               </button>
@@ -263,17 +267,17 @@ export const CfdsHub: React.FC = () => {
               </div>
             ) : (
               <div className="space-y-2.5">
-                <p className="text-xs font-semibold text-slate-400 mb-3">Recent Transactions &amp; Orders</p>
+                <p className="text-xs font-semibold text-slate-500 dark:text-slate-400 mb-3">Recent Transactions &amp; Orders</p>
                 {accountOrders.map((o) => (
                   <div
                     key={o.id}
-                    className="p-3.5 rounded-2xl bg-[#181B22] border border-white/10 flex items-center justify-between text-xs"
+                    className="p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200 dark:border-white/10 flex items-center justify-between text-xs"
                   >
                     <div>
                       <p className="font-bold">
                         {o.symbol} · {o.side}
                       </p>
-                      <p className="text-slate-400 mt-0.5">
+                      <p className="text-slate-500 dark:text-slate-400 mt-0.5">
                         Stake ${Number(o.stake).toFixed(2)} · {o.status}
                       </p>
                     </div>
@@ -289,7 +293,7 @@ export const CfdsHub: React.FC = () => {
 
         {detailsModalOpen && (
           <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-            <div className="w-full max-w-sm bg-[#181B22] rounded-3xl p-6 border border-white/10 text-white">
+            <div className="w-full max-w-sm bg-white dark:bg-[#181B22] rounded-3xl p-6 border border-slate-200 dark:border-white/10 text-[#111319] dark:text-white">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="font-display text-lg font-bold">Account Details</h3>
                 <button
@@ -498,7 +502,7 @@ export const CfdsHub: React.FC = () => {
 
       {/* My accounts */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">My accounts</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">My accounts</h2>
         <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1 lg:grid lg:grid-cols-3">
           {displayedAccounts.map((acc) => {
             const name = String(acc.account_type || 'CFDs | Standard');
@@ -523,12 +527,12 @@ export const CfdsHub: React.FC = () => {
                 onClick={() =>
                   openDetailForAccount(name, badgeCode, Number(acc.balance || 0), acc.deriv_account_id)
                 }
-                className="min-w-[164px] text-left p-3.5 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#1958B7] transition-colors cursor-pointer shrink-0"
+                className="min-w-[164px] text-left p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#1958B7] transition-colors cursor-pointer shrink-0"
               >
                 <div className="mb-3">
                   <Mt5Badge variant={badgeCode} />
                 </div>
-                <p className="text-[13px] font-medium text-[#E2E6ED] truncate">{name}</p>
+                <p className="text-[13px] font-medium text-[#374151] dark:text-[#E2E6ED] truncate">{name}</p>
                 <div className="mt-1">{renderSplitMoney(Number(acc.balance || 0), false)}</div>
               </button>
             );
@@ -538,10 +542,10 @@ export const CfdsHub: React.FC = () => {
 
       {/* Featured Gold Stacked Card matching 105311 & 105321 */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">Featured</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">Featured</h2>
         <div className="max-w-md mx-auto lg:mx-0 lg:max-w-xl">
-          <div className="mx-3 h-2 rounded-t-2xl bg-[#1E222B] border-t border-x border-white/[0.08]" />
-          <div className="rounded-2xl overflow-hidden bg-[#181B22] border border-white/[0.08]">
+          <div className="mx-3 h-2 rounded-t-2xl bg-[#E5E7EB] dark:bg-[#1E222B] border-t border-x border-slate-200 dark:border-white/[0.08]" />
+          <div className="rounded-2xl overflow-hidden bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.08]">
             <div className="p-3.5 pb-0">
               <div className="h-36 sm:h-44 w-full rounded-xl bg-[#07090C] relative overflow-hidden">
                 <img
@@ -554,19 +558,19 @@ export const CfdsHub: React.FC = () => {
             </div>
 
             <div className="p-4">
-              <h3 className="font-display text-[16px] font-bold text-white">
+              <h3 className="font-display text-[16px] font-bold text-[#111319] dark:text-white">
                 {featuredSlide === 0 ? 'Precious metals' : 'Zero Spread CFDs'}
               </h3>
-              <p className="text-[13px] text-[#9BA3B0] mt-1 leading-snug">
+              <p className="text-[13px] text-[#525866] dark:text-[#9BA3B0] mt-1 leading-snug">
                 {featuredSlide === 0
                   ? 'Trade gold, silver, copper, and more with tight spreads.'
                   : 'Execute major forex pairs from 0.0 pips with deep liquidity.'}
               </p>
 
-              <div className="mt-4 bg-[#232732] rounded-xl p-3 flex items-center justify-between gap-3">
+              <div className="mt-4 bg-[#EAECEF] dark:bg-[#232732] rounded-xl p-3 flex items-center justify-between gap-3">
                 <div className="flex items-center gap-2.5">
                   <Mt5Badge variant={featuredSlide === 0 ? 'GOLD' : 'ZRS'} size="sm" />
-                  <span className="text-sm font-semibold text-white">
+                  <span className="text-sm font-semibold text-[#111319] dark:text-white">
                     {featuredSlide === 0 ? 'Gold' : 'Zero Spread'}
                   </span>
                 </div>
@@ -578,7 +582,7 @@ export const CfdsHub: React.FC = () => {
                     handleActivate(target, 'mt5');
                     setSelectedSymbol(featuredSlide === 0 ? 'frxXAUUSD' : 'frxEURUSD');
                   }}
-                  className="px-4 py-1.5 rounded-full border border-white/70 hover:bg-white/10 text-xs font-semibold text-white cursor-pointer"
+                  className="px-4 py-1.5 rounded-full border border-slate-700 dark:border-white/70 hover:bg-black/5 dark:hover:bg-white/10 text-xs font-semibold text-[#111319] dark:text-white cursor-pointer"
                 >
                   {activating === (featuredSlide === 0 ? 'Gold' : 'Zero Spread') ? '...' : 'Activate'}
                 </button>
@@ -594,7 +598,7 @@ export const CfdsHub: React.FC = () => {
                 onClick={() => setFeaturedSlide(idx)}
                 aria-label={`Featured slide ${idx + 1}`}
                 className={`w-1.5 h-1.5 rounded-full cursor-pointer ${
-                  featuredSlide === idx ? 'bg-white' : 'bg-white/25'
+                  featuredSlide === idx ? 'bg-[#111319] dark:bg-white' : 'bg-[#D1D5DB] dark:bg-white/25'
                 }`}
               />
             ))}
@@ -605,11 +609,11 @@ export const CfdsHub: React.FC = () => {
       {/* Available accounts matching 105311 & 105321 */}
       <section className="px-4 sm:px-8 mt-6 pb-6">
         <div className="flex items-center justify-between mb-3">
-          <h2 className="font-display text-[17px] font-bold text-white">Available accounts</h2>
+          <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white">Available accounts</h2>
           <button
             type="button"
             onClick={() => setCompareOpen(true)}
-            className="px-3.5 py-1 rounded-full border border-white/25 text-xs font-semibold text-white hover:bg-white/5 cursor-pointer"
+            className="px-3.5 py-1 rounded-full border border-slate-300 dark:border-white/25 text-xs font-semibold text-[#111319] dark:text-white hover:bg-black/5 dark:hover:bg-white/5 cursor-pointer"
           >
             Compare
           </button>
@@ -621,12 +625,12 @@ export const CfdsHub: React.FC = () => {
               key={item.name}
               type="button"
               onClick={() => openDetailForAccount(item.name, item.code, 0, `${item.code}-${accountMode.toUpperCase()}`)}
-              className="min-w-[280px] sm:min-w-[300px] lg:min-w-0 text-left p-4 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 flex items-center justify-between gap-3 cursor-pointer shrink-0"
+              className="min-w-[280px] sm:min-w-[300px] lg:min-w-0 text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex items-center justify-between gap-3 cursor-pointer shrink-0"
             >
               <div className="min-w-0">
-                <h3 className="font-display text-[15px] font-bold text-white">{item.name}</h3>
-                <p className="text-[12px] text-[#9BA3B0] mt-0.5 line-clamp-1">{item.desc}</p>
-                <span className="inline-block mt-2.5 px-2.5 py-0.5 rounded border border-white/25 text-[10px] font-medium text-slate-200">
+                <h3 className="font-display text-[15px] font-bold text-[#111319] dark:text-white">{item.name}</h3>
+                <p className="text-[12px] text-[#525866] dark:text-[#9BA3B0] mt-0.5 line-clamp-1">{item.desc}</p>
+                <span className="inline-block mt-2.5 px-2.5 py-0.5 rounded border border-slate-400 dark:border-white/25 text-[10px] font-medium text-[#374151] dark:text-slate-200">
                   {item.tag}
                 </span>
               </div>
@@ -639,20 +643,20 @@ export const CfdsHub: React.FC = () => {
       {/* Compare Accounts Modal */}
       {compareOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-2xl bg-[#181B22] text-white rounded-3xl p-6 border border-white/10 max-h-[85vh] overflow-y-auto">
+          <div className="w-full max-w-2xl bg-white dark:bg-[#181B22] text-[#111319] dark:text-white rounded-3xl p-6 border border-slate-200 dark:border-white/10 max-h-[85vh] overflow-y-auto">
             <div className="flex items-center justify-between mb-4">
               <h3 className="font-display text-lg font-bold">Compare CFD Accounts</h3>
               <button
                 type="button"
                 onClick={() => setCompareOpen(false)}
-                className="p-2 rounded-full hover:bg-white/10 cursor-pointer"
+                className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
             </div>
             <div className="overflow-x-auto">
               <table className="w-full text-xs text-left">
-                <thead className="border-b border-white/10 text-slate-400">
+                <thead className="border-b border-slate-200 dark:border-white/10 text-slate-500 dark:text-slate-400">
                   <tr>
                     <th className="py-2.5 pr-4">Feature</th>
                     <th className="py-2.5 px-3">Standard</th>

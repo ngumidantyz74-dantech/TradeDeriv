@@ -86,8 +86,8 @@ export const HomeHub: React.FC = () => {
     if (hideBalances) {
       return (
         <span
-          className={`font-mono-num font-bold text-white tracking-widest ${
-            size === 'hero' ? 'text-[22px] sm:text-[26px]' : 'text-[14px]'
+          className={`font-mono-num font-bold tracking-widest ${
+            size === 'hero' ? 'text-[22px] sm:text-[26px] text-white' : 'text-[14px] text-[#111319] dark:text-white'
           }`}
         >
           *****
@@ -109,8 +109,8 @@ export const HomeHub: React.FC = () => {
 
     return (
       <span className="inline-flex items-baseline gap-1 tabular-nums">
-        <span className="text-[16px] font-bold text-white">{formatted}</span>
-        <span className="text-[11px] font-normal text-[#8E95A2]">{unit}</span>
+        <span className="text-[16px] font-bold text-[#111319] dark:text-white">{formatted}</span>
+        <span className="text-[11px] font-normal text-[#6B7280] dark:text-[#8E95A2]">{unit}</span>
       </span>
     );
   };
@@ -186,7 +186,7 @@ export const HomeHub: React.FC = () => {
 
       {/* My trading accounts horizontal scroller (Real accounts only) */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">
           My trading accounts
         </h2>
         <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1 lg:grid lg:grid-cols-4">
@@ -195,12 +195,12 @@ export const HomeHub: React.FC = () => {
               key={card.key}
               type="button"
               onClick={() => setActiveTab(card.tab)}
-              className="min-w-[164px] text-left p-3.5 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0"
+              className="min-w-[164px] text-left p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0"
             >
               <div className="mb-3">
                 {card.variant === 'CT' ? <CTraderBadge /> : <Mt5Badge variant={card.variant} />}
               </div>
-              <p className="text-[13px] font-medium text-[#E2E6ED] truncate">{card.title}</p>
+              <p className="text-[13px] font-medium text-[#374151] dark:text-[#E2E6ED] truncate">{card.title}</p>
               <div className="mt-1">{renderSplitMoney(card.bal, 'card')}</div>
             </button>
           ))}
@@ -245,7 +245,7 @@ export const HomeHub: React.FC = () => {
                 aria-label={`Promo slide ${idx + 1}`}
                 onClick={() => setPromoIdx(idx)}
                 className={`h-1 rounded-full transition-all cursor-pointer ${
-                  promoIdx === idx ? 'w-5 bg-white' : 'w-1.5 bg-white/25'
+                  promoIdx === idx ? 'w-5 bg-[#111319] dark:bg-white' : 'w-1.5 bg-[#D1D5DB] dark:bg-white/25'
                 }`}
               />
             ))}
@@ -255,7 +255,7 @@ export const HomeHub: React.FC = () => {
 
       {/* Explore Deriv 3x2 Circular Icon Grid matching Screenshots */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-4">
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-4">
           Explore {appName === 'DERIV' ? 'Deriv' : appName}
         </h2>
         <div className="grid grid-cols-3 sm:grid-cols-6 gap-y-5 gap-x-4">
@@ -300,10 +300,10 @@ export const HomeHub: React.FC = () => {
               onClick={tile.action}
               className="flex flex-col items-center gap-2 group cursor-pointer"
             >
-              <div className="w-[58px] h-[58px] rounded-full bg-[#181B22] border border-white/[0.06] flex items-center justify-center group-hover:border-[#FF444F]/60 transition-colors">
+              <div className="w-[58px] h-[58px] rounded-full bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] flex items-center justify-center group-hover:border-[#FF444F]/60 transition-colors">
                 {tile.badge}
               </div>
-              <span className="text-[12px] font-medium text-[#C7CDD6] text-center whitespace-nowrap">
+              <span className="text-[12px] font-medium text-[#374151] dark:text-[#C7CDD6] text-center whitespace-nowrap">
                 {tile.label}
               </span>
             </button>
@@ -313,7 +313,7 @@ export const HomeHub: React.FC = () => {
 
       {/* Highlights horizontal graphic cards */}
       <section className="px-4 sm:px-8 mt-7 pb-6">
-        <h2 className="font-display text-[17px] font-bold text-white mb-3">Highlights</h2>
+        <h2 className="font-display text-[17px] font-bold text-[#111319] dark:text-white mb-3">Highlights</h2>
         <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1 lg:grid lg:grid-cols-3">
           {/* Card 1: Metals */}
           <button
@@ -322,7 +322,7 @@ export const HomeHub: React.FC = () => {
               setSelectedSymbol('frxXAUUSD');
               setActiveTab('mt5-tv');
             }}
-            className="min-w-[168px] text-left rounded-2xl bg-[#181B22] border border-white/[0.06] overflow-hidden hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0 flex flex-col"
+            className="min-w-[168px] text-left rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] overflow-hidden hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0 flex flex-col"
           >
             <div className="h-28 w-full bg-[#090B0E] relative overflow-hidden flex items-center justify-center">
               <svg viewBox="0 0 180 100" className="w-full h-full" aria-hidden="true">
@@ -336,8 +336,8 @@ export const HomeHub: React.FC = () => {
               </svg>
             </div>
             <div className="p-3.5">
-              <h3 className="font-display text-[15px] font-bold text-white">Metals</h3>
-              <p className="text-[12px] text-[#9BA3B0] mt-1 leading-snug line-clamp-2">
+              <h3 className="font-display text-[15px] font-bold text-[#111319] dark:text-white">Metals</h3>
+              <p className="text-[12px] text-[#525866] dark:text-[#9BA3B0] mt-1 leading-snug line-clamp-2">
                 Key metals. Tight spreads. Up to 1:1000 leverage.
               </p>
             </div>
@@ -350,7 +350,7 @@ export const HomeHub: React.FC = () => {
               setSelectedSymbol('1HZ100V');
               setActiveTab('mt5-tv');
             }}
-            className="min-w-[168px] text-left rounded-2xl bg-[#181B22] border border-white/[0.06] overflow-hidden hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0 flex flex-col"
+            className="min-w-[168px] text-left rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] overflow-hidden hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0 flex flex-col"
           >
             <div className="h-28 w-full bg-[#0E1320] relative overflow-hidden p-2.5 flex items-center justify-center">
               <div className="absolute inset-0 bg-gradient-to-br from-[#1D2D50] via-[#7F1D1D]/55 to-[#090B0E]" />
@@ -370,8 +370,8 @@ export const HomeHub: React.FC = () => {
               </div>
             </div>
             <div className="p-3.5">
-              <h3 className="font-display text-[15px] font-bold text-white">US Indices</h3>
-              <p className="text-[12px] text-[#9BA3B0] mt-1 leading-snug line-clamp-2">
+              <h3 className="font-display text-[15px] font-bold text-[#111319] dark:text-white">US Indices</h3>
+              <p className="text-[12px] text-[#525866] dark:text-[#9BA3B0] mt-1 leading-snug line-clamp-2">
                 1:400 leverage and record-low spreads on America&apos;s top indices.
               </p>
             </div>
@@ -381,7 +381,7 @@ export const HomeHub: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('cfds')}
-            className="min-w-[168px] text-left rounded-2xl bg-[#181B22] border border-white/[0.06] overflow-hidden hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0 flex flex-col"
+            className="min-w-[168px] text-left rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] overflow-hidden hover:border-[#FF444F]/50 transition-colors cursor-pointer shrink-0 flex flex-col"
           >
             <div className="h-28 w-full bg-[#090B0E] relative overflow-hidden flex items-center justify-center">
               <svg viewBox="0 0 180 100" className="w-full h-full" aria-hidden="true">
@@ -395,8 +395,8 @@ export const HomeHub: React.FC = () => {
               </svg>
             </div>
             <div className="p-3.5">
-              <h3 className="font-display text-[15px] font-bold text-white">Zero Spread</h3>
-              <p className="text-[12px] text-[#9BA3B0] mt-1 leading-snug line-clamp-2">
+              <h3 className="font-display text-[15px] font-bold text-[#111319] dark:text-white">Zero Spread</h3>
+              <p className="text-[12px] text-[#525866] dark:text-[#9BA3B0] mt-1 leading-snug line-clamp-2">
                 Keep more profits with tight zero-pip spreads.
               </p>
             </div>
@@ -407,13 +407,13 @@ export const HomeHub: React.FC = () => {
       {/* More Tools Bottom Sheet / Modal */}
       {moreOpen && (
         <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-end sm:items-center justify-center p-0 sm:p-4">
-          <div className="w-full sm:max-w-md bg-[#181B22] text-white rounded-t-3xl sm:rounded-3xl p-6 border border-white/10">
+          <div className="w-full sm:max-w-md bg-white dark:bg-[#181B22] text-[#111319] dark:text-white rounded-t-3xl sm:rounded-3xl p-6 border border-slate-200 dark:border-white/10">
             <div className="flex items-center justify-between mb-5">
               <h3 className="font-display text-lg font-bold">All Platforms &amp; Tools</h3>
               <button
                 type="button"
                 onClick={() => setMoreOpen(false)}
-                className="p-2 rounded-full hover:bg-white/10 cursor-pointer"
+                className="p-2 rounded-full hover:bg-black/5 dark:hover:bg-white/10 cursor-pointer"
               >
                 <X className="w-5 h-5" />
               </button>
@@ -439,7 +439,7 @@ export const HomeHub: React.FC = () => {
                       setMoreOpen(false);
                       setActiveTab(tool.id as any);
                     }}
-                    className="flex items-center gap-3 p-3.5 rounded-2xl bg-[#1D212A] hover:border-[#FF444F] border border-transparent text-left cursor-pointer"
+                    className="flex items-center gap-3 p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#1D212A] hover:border-[#FF444F] border border-transparent text-left cursor-pointer"
                   >
                     <Icon className="w-5 h-5 text-[#FF444F] shrink-0" />
                     <span className="text-sm font-semibold">{tool.label}</span>
