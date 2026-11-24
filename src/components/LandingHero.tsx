@@ -6,7 +6,7 @@ import { apiFetch } from '../lib/api';
 
 export const LandingHero: React.FC = () => {
   const { launchDerivOAuth, loginWithToken, showToast, registerLogoTap, publicSettings } = useApp();
-  const appName = publicSettings.branding?.appName || 'DERIV';
+  const appName = publicSettings.branding?.appName || 'deriv';
   const heroTitle = publicSettings.branding?.heroTitle || 'Trading for';
   const heroSubtitle = publicSettings.branding?.heroSubtitle || 'Anyone Anywhere Anytime';
   const heroDescription =
