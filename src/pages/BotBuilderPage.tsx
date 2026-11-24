@@ -46,7 +46,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { DepositSheet } from '../components/CashierFlows';
-import { SynthCandleBadge, BotContractTypeIcon } from '../components/DerivBadges';
+import { BotInstrumentIcon, BotContractTypeIcon } from '../components/DerivBadges';
 import { BotBlocklyCanvas } from '../components/BotBlocklyCanvas';
 import {
   createDefaultXmlWorkspaceState,
@@ -140,10 +140,6 @@ function getContractDisplayLabel(ct: string): string {
   return u || 'Options';
 }
 
-function getSymbolBadgeNum(sym: string): string {
-  const m = String(sym || '').match(/\d+/);
-  return m?.[0] || '100';
-}
 
 function formatGmtStamp(iso?: string | null): string {
   const d = iso ? new Date(iso) : new Date();
@@ -1174,7 +1170,7 @@ export const BotBuilderPage: React.FC = () => {
           <div className="relative flex-1 bg-white dark:bg-[#151820] overflow-hidden">
             {/* Floating Symbol Card Top-Left matching Screenshot 152825 */}
             <div className="absolute top-3 left-3 z-20 bg-white/95 dark:bg-[#181C25]/95 backdrop-blur-sm border border-slate-200 dark:border-white/10 rounded-lg shadow-md px-3 py-2 flex items-center gap-2.5 max-w-[300px]">
-              <SynthCandleBadge num={getSymbolBadgeNum(symbol)} />
+              <BotInstrumentIcon symbol={symbol} size="md" />
               <div className="min-w-0">
                 <div className="flex items-center gap-1">
                   <select
@@ -1371,14 +1367,19 @@ export const BotBuilderPage: React.FC = () => {
                           }`}
                         >
                           <div className="flex items-center gap-2">
-                            <SynthCandleBadge num={getSymbolBadgeNum(latestBotOrder.symbol)} />
+                            <BotInstrumentIcon symbol={latestBotOrder.symbol} size="sm" />
                             <span className="text-[12px] font-bold text-[#111319] dark:text-white">
                               {instruments.find((i) => i.symbol === latestBotOrder.symbol)?.display_name ||
                                 latestBotOrder.symbol}
                             </span>
                           </div>
                           <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#111319] dark:text-white">
-                            <BotContractTypeIcon contractType={latestBotOrder.contract_type} className="w-3.5 h-3.5 shrink-0" />
+                            <BotContractTypeIcon
+                              contractType={latestBotOrder.contract_type}
+                              side={latestBotOrder.side}
+                              barrier={latestBotOrder.barrier}
+                              className="w-3.5 h-3.5 shrink-0"
+                            />
                             {getContractDisplayLabel(latestBotOrder.contract_type)}
                           </span>
                         </div>
@@ -1542,8 +1543,13 @@ export const BotBuilderPage: React.FC = () => {
                           )}
                           <div className="grid grid-cols-3 items-center px-4 py-2.5 text-[11px]">
                             <div className="flex items-center gap-2">
-                              <SynthCandleBadge num={getSymbolBadgeNum(o.symbol)} />
-                              <BotContractTypeIcon contractType={o.contract_type} className="w-4 h-4 shrink-0" />
+                              <BotInstrumentIcon symbol={o.symbol} size="sm" />
+                              <BotContractTypeIcon
+                                contractType={o.contract_type}
+                                side={o.side}
+                                barrier={o.barrier}
+                                className="w-4 h-4 shrink-0"
+                              />
                             </div>
 
                             <div className="flex flex-col items-center font-mono-num tabular-nums space-y-0.5">
@@ -1761,8 +1767,13 @@ export const BotBuilderPage: React.FC = () => {
                     className="bg-white dark:bg-[#181C25] rounded-xl border border-slate-200/80 dark:border-white/[0.08] p-4 space-y-3 text-[12px]"
                   >
                     <div className="flex items-center gap-2.5">
-                      <SynthCandleBadge num={getSymbolBadgeNum(o.symbol)} />
-                      <BotContractTypeIcon contractType={o.contract_type} className="w-4 h-4 shrink-0" />
+                      <BotInstrumentIcon symbol={o.symbol} size="sm" />
+                      <BotContractTypeIcon
+                        contractType={o.contract_type}
+                        side={o.side}
+                        barrier={o.barrier}
+                        className="w-4 h-4 shrink-0"
+                      />
                     </div>
                     <div>
                       <p className="font-bold text-[#111319] dark:text-white text-[11px]">Ref. ID</p>

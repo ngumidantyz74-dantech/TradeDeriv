@@ -255,6 +255,211 @@ export const SynthCandleBadge: React.FC<{ num: string; is1s?: boolean }> = ({ nu
   </div>
 );
 
+export const BotInstrumentIcon: React.FC<{
+  symbol?: string | null;
+  size?: 'sm' | 'md';
+}> = ({ symbol, size = 'sm' }) => {
+  const s = String(symbol || '').toUpperCase().trim();
+  const boxCls =
+    size === 'sm'
+      ? 'relative w-8 h-7 shrink-0 select-none flex items-end justify-center'
+      : 'relative w-9 h-8 shrink-0 select-none flex items-end justify-center';
+  const svgCls = size === 'sm' ? 'w-7 h-5' : 'w-8 h-6';
+  const numCls =
+    size === 'sm'
+      ? 'absolute top-0 left-0 px-[3px] py-[1px] rounded-[2px] bg-[#2D313B] text-[7px] font-extrabold text-white leading-none tabular-nums'
+      : 'absolute -top-0.5 left-0 px-1 py-[1px] rounded-[3px] bg-[#232732] border border-white/10 text-[8.5px] font-bold text-white leading-none tabular-nums';
+  const oneSecCls =
+    size === 'sm'
+      ? 'absolute top-0 right-0 px-[3px] py-[1px] rounded-full bg-[#FF444F] text-[6.5px] font-extrabold text-white leading-none'
+      : 'absolute -top-0.5 right-0 px-1 py-[1px] rounded-full bg-[#FF444F] text-[7.5px] font-bold text-white leading-none';
+
+  // 1s Volatility Indices: 1HZ10V .. 1HZ300V
+  const hzMatch = s.match(/^1HZ(\d+)V$/);
+  if (hzMatch) {
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls}>
+          <line x1="6" y1="8" x2="6" y2="25" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="4" y="12" width="4" height="8" rx="0.7" fill="#00B5C8" />
+          <line x1="13" y1="6" x2="13" y2="23" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="11" y="10" width="4" height="9" rx="0.7" fill="#00B5C8" />
+          <line x1="20" y1="9" x2="20" y2="26" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="18" y="13" width="4" height="8" rx="0.7" fill="#00B5C8" />
+          <line x1="27" y1="7" x2="27" y2="22" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="25" y="10" width="4" height="7" rx="0.7" fill="#00B5C8" />
+        </svg>
+        <span className={numCls}>{hzMatch[1]}</span>
+        <span className={oneSecCls}>1s</span>
+      </div>
+    );
+  }
+
+  // Standard Volatility Indices: R_10 .. R_100 (no 1s pill)
+  const rMatch = s.match(/^R_(\d+)$/);
+  if (rMatch) {
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls}>
+          <line x1="6" y1="8" x2="6" y2="25" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="4" y="12" width="4" height="8" rx="0.7" fill="#00B5C8" />
+          <line x1="13" y1="6" x2="13" y2="23" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="11" y="10" width="4" height="9" rx="0.7" fill="#00B5C8" />
+          <line x1="20" y1="9" x2="20" y2="26" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="18" y="13" width="4" height="8" rx="0.7" fill="#00B5C8" />
+          <line x1="27" y1="7" x2="27" y2="22" stroke="#00B5C8" strokeWidth="1.8" />
+          <rect x="25" y="10" width="4" height="7" rx="0.7" fill="#00B5C8" />
+        </svg>
+        <span className={numCls}>{rMatch[1]}</span>
+      </div>
+    );
+  }
+
+  // Jump Indices: JD10 .. JD100
+  const jdMatch = s.match(/^JD(\d+)$/);
+  if (jdMatch) {
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls} fill="none">
+          <path d="M4 22H10V16H16V10H22V14H28V7" stroke="#00B5C8" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+          <circle cx="28" cy="7" r="2.2" fill="#FF444F" />
+        </svg>
+        <span className={numCls}>J{jdMatch[1]}</span>
+      </div>
+    );
+  }
+
+  // Boom Indices
+  const boomMatch = s.match(/^BOOM(\d+)/);
+  if (boomMatch) {
+    const label = boomMatch[1] === '1000' ? '1K' : boomMatch[1];
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls} fill="none">
+          <path d="M5 23L11 19L16 21L21 8L26 16L31 11" stroke="#00A878" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className={numCls}>B{label}</span>
+      </div>
+    );
+  }
+
+  // Crash Indices
+  const crashMatch = s.match(/^CRASH(\d+)/);
+  if (crashMatch) {
+    const label = crashMatch[1] === '1000' ? '1K' : crashMatch[1];
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls} fill="none">
+          <path d="M5 9L11 13L16 10L21 23L26 15L31 19" stroke="#FF444F" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className={numCls}>C{label}</span>
+      </div>
+    );
+  }
+
+  // Step / Range Break Indices
+  if (s === 'STPIDX' || s === 'RDBULL' || s === 'RDBEAR') {
+    const label = s === 'STPIDX' ? 'STP' : s === 'RDBULL' ? 'BULL' : 'BEAR';
+    const stroke = s === 'RDBEAR' ? '#FF444F' : '#00B5C8';
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls} fill="none">
+          <path
+            d={s === 'RDBEAR' ? 'M4 9H12V14H20V19H30' : 'M4 21H12V16H20V11H30'}
+            stroke={stroke}
+            strokeWidth="2.2"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+        <span className={numCls}>{label}</span>
+      </div>
+    );
+  }
+
+  // Metals / Commodities (Gold / Silver)
+  if (s === 'FRXXAUUSD' || s === 'WLDXAU' || s === 'XAUUSD' || s === 'FRXXAGUSD' || s === 'XAGUSD') {
+    const isSilver = s.includes('XAG');
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <div
+          className={`w-6 h-5 rounded-[4px] flex items-center justify-center text-[7.5px] font-black tracking-tight shadow-xs ${
+            isSilver
+              ? 'bg-gradient-to-br from-slate-200 to-slate-400 text-[#111319]'
+              : 'bg-gradient-to-br from-[#FACC15] to-[#B45309] text-[#111319]'
+          }`}
+        >
+          {isSilver ? 'XAG' : 'XAU'}
+        </div>
+      </div>
+    );
+  }
+
+  // Basket Indices (WLDAUD, WLDEUR, WLDGBP, WLDUSD)
+  const wldMatch = s.match(/^WLD([A-Z]{3})$/);
+  if (wldMatch) {
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <svg viewBox="0 0 36 28" className={svgCls} fill="none">
+          <path d="M4 20L12 14L20 17L30 9" stroke="#00B5C8" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span className={numCls}>{wldMatch[1]}</span>
+      </div>
+    );
+  }
+
+  // Cryptocurrencies (cryBTCUSD, cryETHUSD, BTCUSD, etc.)
+  const cryMatch = s.match(/^CRY([A-Z0-9]+?)USD$/);
+  if (cryMatch) {
+    return <CryptoCircleBadge code={cryMatch[1]} size={size === 'sm' ? 'xs' : 'sm'} />;
+  }
+
+  // Forex pairs (frxEURUSD, frxGBPUSD, etc.)
+  const frxMatch = s.match(/^FRX([A-Z]{3})([A-Z]{3})$/);
+  if (frxMatch) {
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <div className="w-6 h-5 rounded-[4px] bg-[#1E293B] border border-[#334155] flex items-center justify-center text-[7px] font-extrabold text-[#38BDF8] leading-none">
+          {frxMatch[1].slice(0, 2)}/{frxMatch[2].slice(0, 2)}
+        </div>
+      </div>
+    );
+  }
+
+  // Stock Indices (OTC_DJI, OTC_NDX, OTC_SPC, etc.)
+  if (s.startsWith('OTC_')) {
+    const codeMap: Record<string, string> = {
+      OTC_DJI: 'US30',
+      OTC_NDX: 'NDX',
+      OTC_SPC: 'SPX',
+      OTC_FTSE: 'UK',
+      OTC_GDAXI: 'DE40',
+      OTC_N225: 'JP',
+    };
+    return (
+      <div className={boxCls} aria-hidden="true">
+        <div className="w-6 h-5 rounded-[4px] bg-[#232732] border border-white/10 flex items-center justify-center text-[7px] font-extrabold text-[#00B5C8] leading-none">
+          {codeMap[s] || 'IDX'}
+        </div>
+      </div>
+    );
+  }
+
+  // Neutral fallback icon when instrument symbol is unknown
+  return (
+    <div className={boxCls} aria-hidden="true">
+      <svg viewBox="0 0 36 28" className={svgCls}>
+        <line x1="7" y1="8" x2="7" y2="23" stroke="#94A3B8" strokeWidth="1.8" />
+        <rect x="5" y="12" width="4" height="7" rx="0.7" fill="#94A3B8" />
+        <line x1="15" y1="6" x2="15" y2="21" stroke="#94A3B8" strokeWidth="1.8" />
+        <rect x="13" y="10" width="4" height="7" rx="0.7" fill="#94A3B8" />
+        <line x1="23" y1="9" x2="23" y2="24" stroke="#94A3B8" strokeWidth="1.8" />
+        <rect x="21" y="13" width="4" height="7" rx="0.7" fill="#94A3B8" />
+      </svg>
+    </div>
+  );
+};
+
 export const CrashBoomGraphic: React.FC = () => (
   <div className="relative w-20 h-16 shrink-0 select-none" aria-hidden="true">
     <div className="absolute top-0 left-1 w-12 h-11 rounded-xl bg-gradient-to-br from-[#2B303D] to-[#171A21] border border-white/15 -rotate-6 flex items-center justify-center shadow-md">
@@ -368,12 +573,18 @@ export const DxnCandlesGraphic: React.FC = () => (
 
 export const BotContractTypeIcon: React.FC<{
   contractType?: string | null;
+  side?: string | null;
+  barrier?: string | number | null;
   className?: string;
-}> = ({ contractType, className = 'w-4 h-4 shrink-0' }) => {
-  const u = String(contractType || '').toUpperCase();
+}> = ({ contractType, side, barrier, className = 'w-4 h-4 shrink-0' }) => {
+  const ct = String(contractType || '').toUpperCase().trim();
+  const s = String(side || '').toUpperCase().trim();
+  const u = ct || s;
+  const barrierStr = barrier !== undefined && barrier !== null ? String(barrier).trim() : '';
+  const isPriceBarrier = /^[+-]\d+(\.\d+)?$/.test(barrierStr) || /^\d+\.\d+$/.test(barrierStr);
 
   // Matches / Differs: 8-spoke red radial starburst
-  if (u === 'DIGITMATCH' || u === 'DIGITDIFF') {
+  if (u === 'DIGITMATCH' || u === 'DIGITDIFF' || u === 'MATCH' || u === 'DIFF') {
     return (
       <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
         <line x1="10" y1="2.2" x2="10" y2="6.2" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
@@ -389,47 +600,161 @@ export const BotContractTypeIcon: React.FC<{
   }
 
   // Even / Odd: 2x2 rounded grid (top-left & bottom-right dark, top-right & bottom-left red)
-  if (u === 'DIGITEVEN' || u === 'DIGITODD') {
+  if (u === 'DIGITEVEN' || u === 'DIGITODD' || u === 'EVEN' || u === 'ODD') {
     return (
       <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.4" className="fill-[#333333] dark:fill-[#CBD5E1]" />
-        <rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.4" fill="#FF444F" />
-        <rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.4" fill="#FF444F" />
-        <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.4" className="fill-[#333333] dark:fill-[#CBD5E1]" />
+        <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.2" className="fill-[#4A4D57] dark:fill-[#CBD5E1]" />
+        <rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
+        <rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
+        <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.2" className="fill-[#4A4D57] dark:fill-[#CBD5E1]" />
       </svg>
     );
   }
 
-  // Over / Under: red diagonal up-right arrow directly above a horizontal baseline
-  if (u === 'DIGITOVER' || u === 'DIGITUNDER') {
+  // Over: solid grey horizontal threshold bar across lower third crossed by red diagonal up-right arrow
+  if (u === 'DIGITOVER' || u === 'OVER') {
     return (
       <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <line
+          x1="2.5"
+          y1="13"
+          x2="16.8"
+          y2="13"
+          strokeWidth="1.9"
+          strokeLinecap="round"
+          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+        />
         <path
-          d="M4.5 11.5L14.5 4.2M9.5 4.2H14.5V9.2"
+          d="M4 15.8L15.2 4.6M10 4.6H15.2V9.8"
           stroke="#FF444F"
           strokeWidth="2.1"
           strokeLinecap="round"
           strokeLinejoin="round"
         />
+      </svg>
+    );
+  }
+
+  // Under: solid grey horizontal threshold bar across upper third crossed by red diagonal down-right arrow
+  if (u === 'DIGITUNDER' || u === 'UNDER') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
         <line
-          x1="3.5"
-          y1="16"
-          x2="16.5"
-          y2="16"
-          strokeWidth="2"
+          x1="2.5"
+          y1="7"
+          x2="16.8"
+          y2="7"
+          strokeWidth="1.9"
           strokeLinecap="round"
-          className="stroke-[#333333] dark:stroke-[#CBD5E1]"
+          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+        />
+        <path
+          d="M4 4.2L15.2 15.4M10 15.4H15.2V10.2"
+          stroke="#FF444F"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
         />
       </svg>
     );
   }
 
+  // Higher: dashed barrier line with red upward arrow above
+  if (u === 'HIGHER' || s === 'HIGHER' || ((u === 'CALL' || u === 'CALLE') && isPriceBarrier)) {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <line
+          x1="2.5"
+          y1="14.5"
+          x2="17.5"
+          y2="14.5"
+          strokeWidth="1.8"
+          strokeDasharray="2.5 2"
+          strokeLinecap="round"
+          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+        />
+        <path
+          d="M4.5 11.2L14.8 3.8M10 3.8H14.8V8.6"
+          stroke="#FF444F"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  // Lower: dashed barrier line with red downward arrow below
+  if (u === 'LOWER' || s === 'LOWER' || ((u === 'PUT' || u === 'PUTE') && isPriceBarrier)) {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <line
+          x1="2.5"
+          y1="5.5"
+          x2="17.5"
+          y2="5.5"
+          strokeWidth="1.8"
+          strokeDasharray="2.5 2"
+          strokeLinecap="round"
+          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+        />
+        <path
+          d="M4.5 8.8L14.8 16.2M10 16.2H14.8V11.4"
+          stroke="#FF444F"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  // Touch / No Touch
+  if (u === 'ONETOUCH' || u === 'TOUCH' || u === 'NOTOUCH') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <line
+          x1="2.5"
+          y1="6"
+          x2="17.5"
+          y2="6"
+          strokeWidth="1.8"
+          strokeLinecap="round"
+          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+        />
+        <path
+          d={u === 'NOTOUCH' ? 'M4 15.5L10 10.5L16 14' : 'M4 15.5L11.5 6.5L16 10.5'}
+          stroke="#FF444F"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        {u !== 'NOTOUCH' && <circle cx="11.5" cy="6.2" r="2" fill="#FF444F" />}
+      </svg>
+    );
+  }
+
   // Fall: clean red diagonal down-right arrow (no baseline)
-  if (u === 'PUT' || u === 'PUTE' || u === 'MULTDOWN') {
+  if (u === 'PUT' || u === 'PUTE' || u === 'FALL' || u === 'MULTDOWN') {
     return (
       <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
         <path
           d="M4.5 5L15 15M15 9.5V15H9.5"
+          stroke="#FF444F"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  // Rise: clean red diagonal up-right arrow (no baseline)
+  if (u === 'CALL' || u === 'CALLE' || u === 'RISE' || u === 'MULTUP') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <path
+          d="M4.5 15L15 5M9.5 5H15V10.5"
           stroke="#FF444F"
           strokeWidth="2.2"
           strokeLinecap="round"
@@ -456,16 +781,11 @@ export const BotContractTypeIcon: React.FC<{
     );
   }
 
-  // Rise / default CALL: clean red diagonal up-right arrow (no baseline)
+  // Neutral fallback icon for unknown/unrecognized contract types
   return (
     <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-      <path
-        d="M4.5 15L15 5M9.5 5H15V10.5"
-        stroke="#FF444F"
-        strokeWidth="2.2"
-        strokeLinecap="round"
-        strokeLinejoin="round"
-      />
+      <circle cx="10" cy="10" r="6.5" stroke="#94A3B8" strokeWidth="1.8" />
+      <line x1="6.8" y1="10" x2="13.2" y2="10" stroke="#94A3B8" strokeWidth="1.8" strokeLinecap="round" />
     </svg>
   );
 };
