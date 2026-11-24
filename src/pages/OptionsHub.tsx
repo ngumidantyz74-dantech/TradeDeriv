@@ -11,7 +11,8 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
 import { SparklineSvg } from '../components/SparklineSvg';
-import { SynthCandleBadge, AccumulatorCoinGraphic } from '../components/DerivBadges';
+import { SynthCandleBadge, AccumulatorCoinGraphic, TradeOnGoldGraphic } from '../components/DerivBadges';
+import { DepositSheet, TransferScreen } from '../components/CashierFlows';
 
 const MOST_TRADED_SPECS = [
   { symbol: '1HZ100V', num: '100', name: 'Volatility 100 (1s) Index', fallbackPrice: 1724.8 },
@@ -41,6 +42,9 @@ export const OptionsHub: React.FC = () => {
 
   const [tradeFilter, setTradeFilter] = useState<'Deriv Trader' | 'Deriv Bot' | 'SmartTrader'>('Deriv Trader');
   const [resetting, setResetting] = useState(false);
+  const [featuredSlide, setFeaturedSlide] = useState<0 | 1>(0);
+  const [transferOpen, setTransferOpen] = useState(false);
+  const [depositOpen, setDepositOpen] = useState(false);
   const sparkHistoryRef = useRef<Record<string, number[]>>({});
 
   useEffect(() => {
@@ -57,7 +61,7 @@ export const OptionsHub: React.FC = () => {
   const { optionsBal: totalValue } = getCanonicalBalances(user, accounts, accountMode, null);
 
   const renderHeroBalance = () => {
-    if (hideBalances) return <span className="font-mono-num text-[28px] font-bold text-white">••••••</span>;
+    if (hideBalances) return <span className="font-mono-num text-[22px] sm:text-[26px] font-bold tracking-widest text-white">*****</span>;
     const isKsh = currencyDisplay === 'KSH';
     const val = isKsh ? totalValue * kesRate : totalValue;
     const formatted = val.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
@@ -137,7 +141,7 @@ export const OptionsHub: React.FC = () => {
 
   return (
     <div className="max-w-7xl mx-auto">
-      {/* Upper Dark Hero Block matching 102705 (Demo) & 102813 (Real) */}
+      {/* Upper Dark Hero Block matching 105336 (Real) & Demo */}
       <section className="bg-[#171A21] text-white px-4 sm:px-8 pt-2 pb-6 rounded-b-[24px] lg:rounded-3xl lg:mx-6 lg:mt-4">
         <div className="hidden lg:flex items-center mb-4">
           <div className="inline-flex items-center bg-[#232732] p-1 rounded-full">
@@ -193,7 +197,7 @@ export const OptionsHub: React.FC = () => {
           ) : (
             <button
               type="button"
-              onClick={() => setActiveTab('portfolio')}
+              onClick={() => setTransferOpen(true)}
               className="flex flex-col items-center gap-1.5 cursor-pointer group"
             >
               <span className="w-11 h-11 rounded-full border border-white/75 group-hover:bg-white/10 flex items-center justify-center transition-colors">
@@ -205,9 +209,9 @@ export const OptionsHub: React.FC = () => {
         </div>
       </section>
 
-      {/* Most traded markets 2-col grid matching 102705 & 102813 */}
+      {/* Most traded markets 2-col grid matching 105336 */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Most traded markets</h2>
+        <h2 className="font-display text-[17px] font-bold text-white mb-3">Most traded markets</h2>
         <div className="grid grid-cols-2 lg:grid-cols-3 gap-3">
           {featuredMarkets.map((m) => {
             const pos = m.changePct >= 0;
@@ -219,23 +223,22 @@ export const OptionsHub: React.FC = () => {
                   setSelectedSymbol(m.symbol);
                   setActiveTab('mt5-tv');
                 }}
-                className="text-left p-3.5 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
+                className="text-left p-3.5 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
               >
                 <div className="mb-2">
                   <SynthCandleBadge num={m.num} />
                 </div>
-                <p className="text-[12px] font-medium text-slate-600 dark:text-[#C7CDD6] truncate">{m.name}</p>
-                <p className="font-mono-num text-[17px] font-bold text-slate-900 dark:text-white mt-0.5 tabular-nums">
+                <p className="text-[12px] font-medium text-[#C7CDD6] truncate">{m.name}</p>
+                <p className="font-mono-num text-[17px] font-bold text-white mt-0.5 tabular-nums">
                   {m.price.toFixed(2)}
                 </p>
                 <div className="mt-2.5 flex items-center justify-between gap-1.5">
                   <SparklineSvg data={m.sparkline} positive={pos} width={76} height={24} />
                   <span className="text-[11px] font-semibold whitespace-nowrap tabular-nums">
                     <span className={pos ? 'text-[#17B978]' : 'text-[#FF444F]'}>
-                      {pos ? '' : ''}
                       {m.changePct.toFixed(2)}%
                     </span>{' '}
-                    <span className="text-slate-400 dark:text-[#8E95A2] font-normal">(5m)</span>
+                    <span className="text-[#8E95A2] font-normal">(5m)</span>
                   </span>
                 </div>
               </button>
@@ -245,45 +248,98 @@ export const OptionsHub: React.FC = () => {
           <button
             type="button"
             onClick={() => setActiveTab('mt5-tv')}
-            className="p-4 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 cursor-pointer"
+            className="p-4 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 cursor-pointer"
           >
-            <ArrowRight className="w-5 h-5 text-slate-700 dark:text-white" />
-            <span className="text-sm font-medium text-slate-800 dark:text-white">View all</span>
+            <ArrowRight className="w-5 h-5 text-white" />
+            <span className="text-sm font-medium text-white">View all</span>
           </button>
         </div>
       </section>
 
-      {/* Featured Accumulators Stacked Card matching 102705 & 102813 */}
+      {/* Featured Stacked Carousel matching Screenshot 105341 (Trade on Gold + Accumulators) */}
       <section className="px-4 sm:px-8 mt-6">
-        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Featured</h2>
+        <h2 className="font-display text-[17px] font-bold text-white mb-3">Featured</h2>
         <div className="max-w-md mx-auto lg:mx-0 lg:max-w-xl">
-          <div className="mx-3 h-2 rounded-t-2xl bg-slate-200 dark:bg-[#1E222B] border-t border-x border-slate-300/60 dark:border-white/[0.08]" />
-          <button
-            type="button"
-            onClick={() => {
-              setTradePreset({ symbol: '1HZ100V', contractType: 'ACCU', growthRate: 0.02 });
-              setActiveTab('mt5-tv');
-            }}
-            className="w-full text-left rounded-2xl overflow-hidden bg-white dark:bg-[#181B22] border border-slate-200 dark:border-white/[0.08] hover:border-[#FF444F]/50 transition-colors cursor-pointer"
-          >
+          <div className="mx-3 h-2 rounded-t-2xl bg-[#1E222B] border-t border-x border-white/[0.08]" />
+          <div className="rounded-2xl overflow-hidden bg-[#181B22] border border-white/[0.08]">
             <div className="p-3.5 pb-0">
               <div className="rounded-xl overflow-hidden">
-                <AccumulatorCoinGraphic />
+                {featuredSlide === 0 ? <TradeOnGoldGraphic /> : <AccumulatorCoinGraphic />}
               </div>
             </div>
+
             <div className="p-4">
-              <h3 className="font-display text-[16px] font-bold text-slate-900 dark:text-white">Accumulators</h3>
-              <p className="text-[13px] text-slate-500 dark:text-[#9BA3B0] mt-0.5">
-                Grow your stake up to 5% per tick with instant stop &amp; take profit.
+              <h3 className="font-display text-[17px] font-bold text-white">
+                {featuredSlide === 0 ? 'Trade on Gold' : 'Accumulators'}
+              </h3>
+              <p className="text-[13px] text-[#9BA3B0] mt-1 leading-snug">
+                {featuredSlide === 0
+                  ? "Predict whether gold prices will rise or fall. Trade one of the world's most popular commodities, available 24/5."
+                  : 'Grow your stake up to 5% per tick with instant stop & take profit.'}
               </p>
+
+              <div className="mt-4 pt-3 border-t border-white/[0.06] flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5">
+                  <span className="px-2 py-0.5 rounded bg-[#272B36] text-[10px] font-medium text-[#C7CDD6]">
+                    {featuredSlide === 0 ? '24/5 trading' : 'Up to 5%/tick'}
+                  </span>
+                  <span className="px-2 py-0.5 rounded bg-[#272B36] text-[10px] font-medium text-[#C7CDD6]">
+                    From 1 USD
+                  </span>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (featuredSlide === 0) {
+                      setSelectedSymbol('frxXAUUSD');
+                      setTradePreset({ symbol: 'frxXAUUSD', contractType: 'CALL' });
+                    } else {
+                      setTradePreset({ symbol: '1HZ100V', contractType: 'ACCU', growthRate: 0.02 });
+                    }
+                    setActiveTab('mt5-tv');
+                  }}
+                  className="px-4 py-1.5 rounded-full border border-white/75 hover:bg-white/10 text-xs font-semibold text-white cursor-pointer"
+                >
+                  Trade now
+                </button>
+              </div>
             </div>
+          </div>
+
+          <div className="flex items-center justify-center gap-1.5 mt-3">
+            {([0, 1] as const).map((idx) => (
+              <button
+                key={idx}
+                type="button"
+                aria-label={`Featured option ${idx + 1}`}
+                onClick={() => setFeaturedSlide(idx)}
+                className={`w-1.5 h-1.5 rounded-full cursor-pointer ${
+                  featuredSlide === idx ? 'bg-white' : 'bg-white/25'
+                }`}
+              />
+            ))}
+          </div>
+
+          {/* Learn more card matching Screenshot 105341 */}
+          <button
+            type="button"
+            onClick={() => setActiveTab('learning-hub')}
+            className="w-full mt-5 p-4 rounded-2xl bg-[#13151B] border border-white/[0.1] hover:border-white/25 flex items-center justify-between gap-3 text-left cursor-pointer transition-colors"
+          >
+            <span className="text-[13px] font-medium text-[#E2E6ED]">
+              Learn more about Options trading and other trade types.
+            </span>
+            <span className="w-8 h-8 rounded-full border border-white/60 flex items-center justify-center shrink-0">
+              <ArrowRight className="w-4 h-4 text-white" />
+            </span>
           </button>
         </div>
       </section>
 
       {/* Platforms Stack (Deriv Trader DT, Deriv Bot DB, SmartTrader ST) */}
       <section className="px-4 sm:px-8 mt-7">
-        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Platforms</h2>
+        <h2 className="font-display text-[17px] font-bold text-white mb-3">Platforms</h2>
         <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
           {[
             {
@@ -312,7 +368,7 @@ export const OptionsHub: React.FC = () => {
               key={p.title}
               type="button"
               onClick={() => setActiveTab(p.tab as any)}
-              className="flex items-center gap-3.5 p-4 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 text-left cursor-pointer"
+              className="flex items-center gap-3.5 p-4 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 text-left cursor-pointer"
             >
               <span
                 className={`w-11 h-11 rounded-xl ${p.color} text-white font-display font-bold text-sm flex items-center justify-center shrink-0`}
@@ -320,8 +376,8 @@ export const OptionsHub: React.FC = () => {
                 {p.code}
               </span>
               <div className="min-w-0">
-                <h3 className="font-display text-[14px] font-bold text-slate-900 dark:text-white">{p.title}</h3>
-                <p className="text-[12px] text-slate-500 dark:text-[#9BA3B0] mt-0.5">{p.desc}</p>
+                <h3 className="font-display text-[14px] font-bold text-white">{p.title}</h3>
+                <p className="text-[12px] text-[#9BA3B0] mt-0.5">{p.desc}</p>
               </div>
             </button>
           ))}
@@ -330,7 +386,7 @@ export const OptionsHub: React.FC = () => {
 
       {/* Trade types */}
       <section className="px-4 sm:px-8 mt-7 pb-6">
-        <h2 className="font-display text-[17px] font-bold text-slate-900 dark:text-white mb-3">Trade types</h2>
+        <h2 className="font-display text-[17px] font-bold text-white mb-3">Trade types</h2>
         <div className="flex items-center gap-2 mb-3.5 overflow-x-auto no-scrollbar">
           {(['Deriv Trader', 'Deriv Bot', 'SmartTrader'] as const).map((tab) => (
             <button
@@ -339,8 +395,8 @@ export const OptionsHub: React.FC = () => {
               onClick={() => setTradeFilter(tab)}
               className={`px-4 py-1.5 rounded-full text-xs font-semibold border whitespace-nowrap cursor-pointer ${
                 tradeFilter === tab
-                  ? 'border-[#0E1117] dark:border-white bg-white dark:bg-[#232732] text-slate-900 dark:text-white'
-                  : 'border-slate-200 dark:border-white/15 text-slate-500 dark:text-[#8E95A2]'
+                  ? 'border-white bg-[#232732] text-white'
+                  : 'border-white/15 text-[#8E95A2]'
               }`}
             >
               {tab}
@@ -354,19 +410,26 @@ export const OptionsHub: React.FC = () => {
               key={tt.name}
               type="button"
               onClick={() => handleLaunchTradeType(tt)}
-              className="p-3.5 rounded-2xl bg-white dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
+              className="p-3.5 rounded-2xl bg-[#181B22] border border-white/[0.06] hover:border-[#FF444F]/50 flex flex-col items-center justify-center gap-2 text-center cursor-pointer"
             >
               <div className="flex items-center gap-1 text-[#FF444F]">
                 <TrendingUp className="w-4 h-4" />
                 <ArrowUpDown className="w-3.5 h-3.5 text-slate-400" />
               </div>
-              <span className="text-[11px] font-medium truncate max-w-full text-slate-800 dark:text-[#E2E6ED]">
+              <span className="text-[11px] font-medium truncate max-w-full text-[#E2E6ED]">
                 {tt.name}
               </span>
             </button>
           ))}
         </div>
       </section>
+
+      <DepositSheet open={depositOpen} onClose={() => setDepositOpen(false)} />
+      <TransferScreen
+        open={transferOpen}
+        onClose={() => setTransferOpen(false)}
+        onOpenDeposit={() => setDepositOpen(true)}
+      />
     </div>
   );
 };

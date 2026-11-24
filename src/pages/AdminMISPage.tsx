@@ -180,10 +180,12 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [annTitle, setAnnTitle] = useState('');
   const [annMsg, setAnnMsg] = useState('');
 
-  // Inline balance edit maps
+  // Inline balance & display name edit maps
   const [userBalances, setUserBalances] = useState<Record<number, string>>({});
   const [realBalances, setRealBalances] = useState<Record<number, string>>({});
+  const [userNames, setUserNames] = useState<Record<number, string>>({});
   const [accountBalances, setAccountBalances] = useState<Record<number, string>>({});
+  const [accountNames, setAccountNames] = useState<Record<number, string>>({});
   const [busyAction, setBusyAction] = useState<string | null>(null);
 
   // Re-authentication modal & Security Diagnostics state
@@ -232,8 +234,10 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
       const uMap: Record<number, string> = {};
       const rMap: Record<number, string> = {};
+      const nMap: Record<number, string> = {};
       for (const u of ov.users || []) {
         uMap[u.id] = String(Number(u.virtual_workspace_balance ?? 0).toFixed(2));
+        nMap[u.id] = String(u.full_name ?? '');
         let realOpt = 0;
         try {
           const rw = JSON.parse(u.real_wallets_json || '{}');
@@ -245,12 +249,16 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
       }
       setUserBalances(uMap);
       setRealBalances(rMap);
+      setUserNames(nMap);
 
       const aMap: Record<number, string> = {};
+      const anMap: Record<number, string> = {};
       for (const a of ov.connectedAccounts || []) {
         aMap[a.id] = String(Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2));
+        anMap[a.id] = String(a.account_type ?? '');
       }
       setAccountBalances(aMap);
+      setAccountNames(anMap);
 
       setAppName(ov.branding?.appName || 'DERIV');
       setTagline(ov.branding?.tagline || 'Precision Synthetic, CFD, Options & Crypto Exchange Terminal');
@@ -1115,12 +1123,53 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         } catch {
                           parsedRw = 0;
                         }
+                        const matchedAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === u.id);
+                        const matchedReal = matchedAccounts.filter((a: any) => !a.is_virtual);
+                        const matchedDemo = matchedAccounts.filter((a: any) => Boolean(a.is_virtual));
+
                         return (
                           <div key={u.id} className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] space-y-3 text-xs">
                             <div className="flex items-start justify-between gap-2">
-                              <div className="min-w-0">
-                                <p className="font-bold truncate">{u.full_name}</p>
-                                <p className="text-slate-400 truncate">{u.email}</p>
+                              <div className="min-w-0 flex-1 space-y-1.5">
+                                <div className="flex items-center gap-1.5">
+                                  <input
+                                    type="text"
+                                    value={userNames[u.id] ?? u.full_name ?? ''}
+                                    onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                    placeholder="Display Profile Name"
+                                    className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `uname-${u.id}`}
+                                    onClick={async () => {
+                                      const nextName = String(userNames[u.id] ?? u.full_name ?? '').trim();
+                                      if (!nextName) {
+                                        flash('Display profile name cannot be empty', 'err');
+                                        return;
+                                      }
+                                      setBusyAction(`uname-${u.id}`);
+                                      try {
+                                        await adminFetch(`/api/admin/users/${u.id}`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ full_name: nextName }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Display name updated to "${nextName}"`);
+                                      } catch (err) {
+                                        flash(err instanceof Error ? err.message : 'Failed to save name', 'err');
+                                      } finally {
+                                        setBusyAction(null);
+                                      }
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                                  >
+                                    {busyAction === `uname-${u.id}` ? '...' : 'Save Name'}
+                                  </button>
+                                </div>
+                                <p className="text-slate-400 truncate">
+                                  {u.email} · {u.preferred_currency || 'USD'}
+                                </p>
                               </div>
                               <div className="flex flex-col items-end gap-1 shrink-0">
                                 <span
@@ -1138,77 +1187,102 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                               </div>
                             </div>
 
+                            {/* Separated Real & Demo Matched Accounts */}
                             <div className="grid grid-cols-1 gap-2">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  min="0"
-                                  value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
-                                  onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                  className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                                />
-                                <button
-                                  type="button"
-                                  disabled={busyAction === `user-${u.id}`}
-                                  onClick={async () => {
-                                    const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                    if (Number.isNaN(val) || val < 0) {
-                                      flash('Enter a valid non-negative Demo balance', 'err');
-                                      return;
-                                    }
-                                    setBusyAction(`user-${u.id}`);
-                                    await runWithReauth(async () => {
-                                      await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                        method: 'PATCH',
-                                        body: JSON.stringify({ balance: val }),
+                              <div className="p-2.5 rounded-xl bg-[#111319] border border-[#FF444F]/25 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#FF444F]">
+                                    Real Account ({matchedReal.length})
+                                  </span>
+                                  {matchedReal.length > 0 && (
+                                    <span className="text-[10px] font-mono-num text-slate-400">
+                                      {matchedReal.map((a: any) => `${a.deriv_login_id || a.deriv_account_id} (${a.account_type})`).join(', ')}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] text-[#FF444F] font-bold w-16">Real ($):</span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                    onChange={(e) => setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `real-${u.id}`}
+                                    onClick={async () => {
+                                      const val = Number(realBalances[u.id] ?? parsedRw);
+                                      if (Number.isNaN(val) || val < 0) {
+                                        flash('Enter a valid non-negative Real balance', 'err');
+                                        return;
+                                      }
+                                      setBusyAction(`real-${u.id}`);
+                                      await runWithReauth(async () => {
+                                        await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ balance: val }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
                                       });
-                                      await loadAllAdminData();
-                                      flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                    });
-                                    setBusyAction(null);
-                                  }}
-                                  className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
-                                >
-                                  {busyAction === `user-${u.id}` ? '...' : 'Save'}
-                                </button>
+                                      setBusyAction(null);
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
+                                  >
+                                    {busyAction === `real-${u.id}` ? '...' : 'Save'}
+                                  </button>
+                                </div>
                               </div>
 
-                              <div className="flex items-center gap-2">
-                                <span className="text-[11px] text-[#FF444F] font-bold w-16">Real ($):</span>
-                                <input
-                                  type="number"
-                                  step="0.01"
-                                  min="0"
-                                  value={realBalances[u.id] ?? parsedRw.toFixed(2)}
-                                  onChange={(e) => setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                  className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                                />
-                                <button
-                                  type="button"
-                                  disabled={busyAction === `real-${u.id}`}
-                                  onClick={async () => {
-                                    const val = Number(realBalances[u.id] ?? parsedRw);
-                                    if (Number.isNaN(val) || val < 0) {
-                                      flash('Enter a valid non-negative Real balance', 'err');
-                                      return;
-                                    }
-                                    setBusyAction(`real-${u.id}`);
-                                    await runWithReauth(async () => {
-                                      await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
-                                        method: 'PATCH',
-                                        body: JSON.stringify({ balance: val }),
+                              <div className="p-2.5 rounded-xl bg-[#111319] border border-[#00A878]/25 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#00A878]">
+                                    Demo Account ({matchedDemo.length})
+                                  </span>
+                                  {matchedDemo.length > 0 && (
+                                    <span className="text-[10px] font-mono-num text-slate-400">
+                                      {matchedDemo.map((a: any) => `${a.deriv_login_id || a.deriv_account_id} (${a.account_type})`).join(', ')}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                    onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `user-${u.id}`}
+                                    onClick={async () => {
+                                      const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                      if (Number.isNaN(val) || val < 0) {
+                                        flash('Enter a valid non-negative Demo balance', 'err');
+                                        return;
+                                      }
+                                      setBusyAction(`user-${u.id}`);
+                                      await runWithReauth(async () => {
+                                        await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ balance: val }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
                                       });
-                                      await loadAllAdminData();
-                                      flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                    });
-                                    setBusyAction(null);
-                                  }}
-                                  className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
-                                >
-                                  {busyAction === `real-${u.id}` ? '...' : 'Save'}
-                                </button>
+                                      setBusyAction(null);
+                                    }}
+                                    className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
+                                  >
+                                    {busyAction === `user-${u.id}` ? '...' : 'Save'}
+                                  </button>
+                                </div>
                               </div>
                             </div>
 
@@ -1283,10 +1357,10 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     <table className="w-full text-xs">
                       <thead>
                         <tr className="border-b border-[#2A2F3D] text-slate-400">
-                          <th className="text-left px-4 py-3">Trader</th>
+                          <th className="text-left px-4 py-3">Display Profile Name &amp; Trader</th>
                           <th className="text-left px-4 py-3">Status</th>
-                          <th className="text-right px-4 py-3">Demo Bal (DB)</th>
-                          <th className="text-right px-4 py-3">Real Bal (DB)</th>
+                          <th className="text-right px-4 py-3 text-[#FF444F]">Real Account &amp; Bal (DB)</th>
+                          <th className="text-right px-4 py-3 text-[#00A878]">Demo Account &amp; Bal (DB)</th>
                           <th className="text-right px-4 py-3">Actions</th>
                         </tr>
                       </thead>
@@ -1298,16 +1372,61 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           } catch {
                             parsedRw = 0;
                           }
+                          const matchedAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === u.id);
+                          const matchedReal = matchedAccounts.filter((a: any) => !a.is_virtual);
+                          const matchedDemo = matchedAccounts.filter((a: any) => Boolean(a.is_virtual));
+
                           return (
                             <tr key={u.id}>
-                              <td className="px-4 py-3">
-                                <p className="font-bold">{u.full_name}</p>
-                                <p className="text-slate-400">{u.email}</p>
+                              <td className="px-4 py-3 min-w-[230px]">
+                                <div className="flex items-center gap-1.5 mb-1">
+                                  <input
+                                    type="text"
+                                    value={userNames[u.id] ?? u.full_name ?? ''}
+                                    onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                    placeholder="Display Profile Name"
+                                    className="w-40 px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `uname-${u.id}`}
+                                    onClick={async () => {
+                                      const nextName = String(userNames[u.id] ?? u.full_name ?? '').trim();
+                                      if (!nextName) {
+                                        flash('Display profile name cannot be empty', 'err');
+                                        return;
+                                      }
+                                      setBusyAction(`uname-${u.id}`);
+                                      try {
+                                        await adminFetch(`/api/admin/users/${u.id}`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ full_name: nextName }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Display profile name updated for ${u.email}`);
+                                      } catch (err) {
+                                        flash(err instanceof Error ? err.message : 'Failed to save name', 'err');
+                                      } finally {
+                                        setBusyAction(null);
+                                      }
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer whitespace-nowrap"
+                                  >
+                                    {busyAction === `uname-${u.id}` ? '...' : 'Save'}
+                                  </button>
+                                </div>
+                                <p className="text-slate-400">
+                                  {u.email}
+                                  {u.deriv_nickname ? ` · @${u.deriv_nickname}` : ''}
+                                </p>
                               </td>
                               <td className="px-4 py-3">
                                 <div className="flex flex-col gap-1 items-start">
                                   <span className={u.status === 'active' ? 'text-[#00A878] font-semibold' : 'text-[#FF444F] font-semibold'}>
                                     {u.status}
+                                  </span>
+                                  <span className="text-[10px] font-mono-num text-slate-400">
+                                    Pref: {u.preferred_currency || 'USD'}
                                   </span>
                                   {u.trading_suspended && (
                                     <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold">
@@ -1317,79 +1436,107 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right">
-                                <div className="inline-flex items-center justify-end gap-1.5">
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
-                                    onChange={(e) =>
-                                      setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
-                                    }
-                                    className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `user-${u.id}`}
-                                    onClick={async () => {
-                                      const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                      if (Number.isNaN(val) || val < 0) {
-                                        flash('Enter a valid non-negative balance', 'err');
-                                        return;
+                                <div className="inline-flex flex-col items-end gap-1">
+                                  <div className="inline-flex items-center justify-end gap-1.5">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      min="0"
+                                      value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                      onChange={(e) =>
+                                        setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
                                       }
-                                      setBusyAction(`user-${u.id}`);
-                                      await runWithReauth(async () => {
-                                        await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ balance: val }),
+                                      className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `real-${u.id}`}
+                                      onClick={async () => {
+                                        const val = Number(realBalances[u.id] ?? parsedRw);
+                                        if (Number.isNaN(val) || val < 0) {
+                                          flash('Enter a valid non-negative Real balance', 'err');
+                                          return;
+                                        }
+                                        setBusyAction(`real-${u.id}`);
+                                        await runWithReauth(async () => {
+                                          await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                            method: 'PATCH',
+                                            body: JSON.stringify({ balance: val }),
+                                          });
+                                          await loadAllAdminData();
+                                          flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
                                         });
-                                        await loadAllAdminData();
-                                        flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                      });
-                                      setBusyAction(null);
-                                    }}
-                                    className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
-                                  >
-                                    {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
-                                  </button>
+                                        setBusyAction(null);
+                                      }}
+                                      className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
+                                    >
+                                      {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                    </button>
+                                  </div>
+                                  {matchedReal.length > 0 && (
+                                    <div className="flex flex-wrap justify-end gap-1">
+                                      {matchedReal.map((a: any) => (
+                                        <span
+                                          key={a.id}
+                                          className="px-1.5 py-0.5 rounded bg-[#FF444F]/10 border border-[#FF444F]/25 text-[#FF444F] text-[10px] font-mono-num"
+                                        >
+                                          {a.deriv_login_id || a.deriv_account_id} · {a.account_type}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right">
-                                <div className="inline-flex items-center justify-end gap-1.5">
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    value={realBalances[u.id] ?? parsedRw.toFixed(2)}
-                                    onChange={(e) =>
-                                      setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
-                                    }
-                                    className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `real-${u.id}`}
-                                    onClick={async () => {
-                                      const val = Number(realBalances[u.id] ?? parsedRw);
-                                      if (Number.isNaN(val) || val < 0) {
-                                        flash('Enter a valid non-negative Real balance', 'err');
-                                        return;
+                                <div className="inline-flex flex-col items-end gap-1">
+                                  <div className="inline-flex items-center justify-end gap-1.5">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      min="0"
+                                      value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                      onChange={(e) =>
+                                        setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
                                       }
-                                      setBusyAction(`real-${u.id}`);
-                                      await runWithReauth(async () => {
-                                        await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ balance: val }),
+                                      className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `user-${u.id}`}
+                                      onClick={async () => {
+                                        const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                        if (Number.isNaN(val) || val < 0) {
+                                          flash('Enter a valid non-negative balance', 'err');
+                                          return;
+                                        }
+                                        setBusyAction(`user-${u.id}`);
+                                        await runWithReauth(async () => {
+                                          await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                            method: 'PATCH',
+                                            body: JSON.stringify({ balance: val }),
+                                          });
+                                          await loadAllAdminData();
+                                          flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
                                         });
-                                        await loadAllAdminData();
-                                        flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                      });
-                                      setBusyAction(null);
-                                    }}
-                                    className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
-                                  >
-                                    {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
-                                  </button>
+                                        setBusyAction(null);
+                                      }}
+                                      className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
+                                    >
+                                      {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
+                                    </button>
+                                  </div>
+                                  {matchedDemo.length > 0 && (
+                                    <div className="flex flex-wrap justify-end gap-1">
+                                      {matchedDemo.map((a: any) => (
+                                        <span
+                                          key={a.id}
+                                          className="px-1.5 py-0.5 rounded bg-[#00A878]/10 border border-[#00A878]/25 text-[#00A878] text-[10px] font-mono-num"
+                                        >
+                                          {a.deriv_login_id || a.deriv_account_id} · {a.account_type}
+                                        </span>
+                                      ))}
+                                    </div>
+                                  )}
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
@@ -1464,23 +1611,27 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               );
             })()}
 
-          {/* 4. Connected Deriv Accounts */}
-          {tab === 'accounts' && (
-            <>
-              <div className="md:hidden space-y-3">
-                {(overview?.connectedAccounts || []).length === 0 ? (
-                  <div className="p-6 rounded-2xl bg-[#181C25] border border-[#2A2F3D] text-center text-xs text-slate-400">
-                    No connected trader accounts yet.
+          {/* 4. Connected Deriv Accounts — Real and Demo Strictly Separated */}
+          {tab === 'accounts' &&
+            (() => {
+              const allAcc = overview?.connectedAccounts || [];
+              const realAcc = allAcc.filter((a: any) => !a.is_virtual);
+              const demoAcc = allAcc.filter((a: any) => Boolean(a.is_virtual));
+
+              const renderMobileAccountList = (list: any[], emptyText: string) =>
+                list.length === 0 ? (
+                  <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] text-center text-xs text-slate-400">
+                    {emptyText}
                   </div>
                 ) : (
-                  (overview?.connectedAccounts || []).map((a: any) => (
+                  list.map((a: any) => (
                     <div key={a.id} className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] space-y-3 text-xs">
                       <div className="flex items-center justify-between gap-2">
                         <div className="flex items-center gap-2 min-w-0">
                           <span className="font-mono-num font-bold truncate">{a.deriv_login_id || a.deriv_account_id}</span>
                           <span
                             className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                              a.is_virtual ? 'bg-slate-700/60 text-slate-300' : 'bg-[#FF444F]/20 text-[#FF444F]'
+                              a.is_virtual ? 'bg-[#00A878]/20 text-[#00A878]' : 'bg-[#FF444F]/20 text-[#FF444F]'
                             }`}
                           >
                             {a.is_virtual ? 'DEMO' : 'REAL'}
@@ -1493,7 +1644,51 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         </div>
                         <span className="text-slate-400">{a.status}</span>
                       </div>
-                      <p className="text-slate-400 truncate">Trader: {a.user_email} · {a.account_type}</p>
+
+                      <div className="space-y-0.5">
+                        <p className="font-semibold text-white truncate">
+                          Profile: {a.user_name || a.user_email}
+                        </p>
+                        <p className="text-slate-400 truncate">{a.user_email}</p>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <input
+                          type="text"
+                          value={accountNames[a.id] ?? a.account_type ?? ''}
+                          onChange={(e) => setAccountNames((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                          placeholder="Account Display Name"
+                          className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] text-xs text-white"
+                        />
+                        <button
+                          type="button"
+                          disabled={busyAction === `aname-${a.id}`}
+                          onClick={async () => {
+                            const nextType = String(accountNames[a.id] ?? a.account_type ?? '').trim();
+                            if (!nextType) {
+                              flash('Account display name cannot be empty', 'err');
+                              return;
+                            }
+                            setBusyAction(`aname-${a.id}`);
+                            try {
+                              await adminFetch(`/api/admin/connected-accounts/${a.id}`, {
+                                method: 'PATCH',
+                                body: JSON.stringify({ account_type: nextType }),
+                              });
+                              await loadAllAdminData();
+                              flash(`Account display name updated for ${a.deriv_login_id || a.deriv_account_id}`);
+                            } catch (err) {
+                              flash(err instanceof Error ? err.message : 'Rename failed', 'err');
+                            } finally {
+                              setBusyAction(null);
+                            }
+                          }}
+                          className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer"
+                        >
+                          {busyAction === `aname-${a.id}` ? '...' : 'Save Name'}
+                        </button>
+                      </div>
+
                       <div className="flex items-center gap-2">
                         <input
                           type="number"
@@ -1505,7 +1700,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         />
                         <span className="text-slate-400 font-mono-num">{a.currency || 'USD'}</span>
                       </div>
-                      <div className="flex items-center justify-end gap-2">
+
+                      <div className="flex flex-wrap items-center justify-end gap-2">
                         <button
                           type="button"
                           disabled={busyAction === `save-${a.id}`}
@@ -1577,139 +1773,205 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       </div>
                     </div>
                   ))
-                )}
-              </div>
+                );
 
-              <div className="hidden md:block bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-[#2A2F3D] text-slate-400">
-                      <th className="text-left px-4 py-3">Account</th>
-                      <th className="text-left px-4 py-3">Trader</th>
-                      <th className="text-right px-4 py-3">DB Balance (Real &amp; Demo)</th>
-                      <th className="text-right px-4 py-3">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#2A2F3D]">
-                    {(overview?.connectedAccounts || []).map((a: any) => (
-                      <tr key={a.id}>
-                        <td className="px-4 py-3">
-                          <div className="flex items-center gap-2">
-                            <p className="font-mono-num font-bold">{a.deriv_login_id || a.deriv_account_id}</p>
-                            <span
-                              className={`px-2 py-0.5 rounded text-[10px] font-bold ${
-                                a.is_virtual
-                                  ? 'bg-slate-700/60 text-slate-300'
-                                  : 'bg-[#FF444F]/20 text-[#FF444F]'
-                              }`}
-                            >
-                              {a.is_virtual ? 'DEMO' : 'REAL'}
-                            </span>
-                            {a.balance_locked_by_admin && (
-                              <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
-                                DB Locked
-                              </span>
-                            )}
-                          </div>
-                          <p className="text-slate-400 mt-0.5">
-                            {a.account_type} · {a.currency} · {a.status}
-                          </p>
-                        </td>
-                        <td className="px-4 py-3">{a.user_email}</td>
-                        <td className="px-4 py-3 text-right">
-                          <div className="inline-flex items-center justify-end gap-1.5">
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={accountBalances[a.id] ?? String(Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2))}
-                              onChange={(e) =>
-                                setAccountBalances((prev) => ({ ...prev, [a.id]: e.target.value }))
-                              }
-                              className="w-28 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                            />
-                            <span className="text-slate-400 font-mono-num text-[11px]">{a.currency || 'USD'}</span>
-                          </div>
-                        </td>
-                        <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
-                          <button
-                            type="button"
-                            disabled={busyAction === `save-${a.id}`}
-                            onClick={async () => {
-                              const val = Number(accountBalances[a.id] ?? a.balance);
-                              if (Number.isNaN(val) || val < 0) {
-                                flash('Enter a valid non-negative balance', 'err');
-                                return;
-                              }
-                              setBusyAction(`save-${a.id}`);
-                              await runWithReauth(async () => {
-                                await adminFetch(`/api/admin/connected-accounts/${a.id}/balance`, {
-                                  method: 'PATCH',
-                                  body: JSON.stringify({ balance: val }),
-                                });
-                                await loadAllAdminData();
-                                flash(
-                                  `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency})`
-                                );
-                              });
-                              setBusyAction(null);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
-                          >
-                            {busyAction === `save-${a.id}` ? 'Saving...' : 'Save DB Balance'}
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busyAction === `sync-${a.id}`}
-                            onClick={async () => {
-                              setBusyAction(`sync-${a.id}`);
-                              try {
-                                await adminFetch(`/api/admin/connected-accounts/${a.id}/sync`, { method: 'POST' });
-                                await loadAllAdminData();
-                                flash(`Unlocked & synced live balance for ${a.deriv_login_id || a.deriv_account_id}`);
-                              } catch (err) {
-                                flash(err instanceof Error ? err.message : 'Sync failed', 'err');
-                              } finally {
-                                setBusyAction(null);
-                              }
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                          >
-                            {busyAction === `sync-${a.id}` ? 'Syncing...' : 'Sync Live'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              const nextStatus = a.status === 'frozen' ? 'active' : 'frozen';
-                              await adminFetch(`/api/admin/connected-accounts/${a.id}/status`, {
-                                method: 'PATCH',
-                                body: JSON.stringify({ status: nextStatus }),
-                              });
-                              await loadAllAdminData();
-                              flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
-                          >
-                            {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await adminFetch(`/api/admin/connected-accounts/${a.id}/revoke`, { method: 'POST' });
-                              loadAllAdminData();
-                            }}
-                            className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] cursor-pointer"
-                          >
-                            Revoke
-                          </button>
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            </>
-          )}
+              const renderDesktopAccountTable = (list: any[], title: string, accentClass: string, emptyText: string) => (
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                  <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between">
+                    <h3 className={`text-xs font-bold uppercase tracking-wider ${accentClass}`}>
+                      {title} ({list.length})
+                    </h3>
+                  </div>
+                  {list.length === 0 ? (
+                    <div className="p-6 text-center text-xs text-slate-400">{emptyText}</div>
+                  ) : (
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[#2A2F3D] text-slate-400">
+                          <th className="text-left px-4 py-3">Account &amp; Display Name</th>
+                          <th className="text-left px-4 py-3">Display Profile Name &amp; Email</th>
+                          <th className="text-right px-4 py-3">DB Balance</th>
+                          <th className="text-right px-4 py-3">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#2A2F3D]">
+                        {list.map((a: any) => (
+                          <tr key={a.id}>
+                            <td className="px-4 py-3">
+                              <div className="flex items-center gap-2 mb-1.5">
+                                <p className="font-mono-num font-bold">{a.deriv_login_id || a.deriv_account_id}</p>
+                                <span
+                                  className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                    a.is_virtual ? 'bg-[#00A878]/20 text-[#00A878]' : 'bg-[#FF444F]/20 text-[#FF444F]'
+                                  }`}
+                                >
+                                  {a.is_virtual ? 'DEMO' : 'REAL'}
+                                </span>
+                                {a.balance_locked_by_admin && (
+                                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
+                                    DB Locked
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-1.5">
+                                <input
+                                  type="text"
+                                  value={accountNames[a.id] ?? a.account_type ?? ''}
+                                  onChange={(e) => setAccountNames((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                                  className="w-40 px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] text-xs text-white"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={busyAction === `aname-${a.id}`}
+                                  onClick={async () => {
+                                    const nextType = String(accountNames[a.id] ?? a.account_type ?? '').trim();
+                                    if (!nextType) {
+                                      flash('Account display name cannot be empty', 'err');
+                                      return;
+                                    }
+                                    setBusyAction(`aname-${a.id}`);
+                                    try {
+                                      await adminFetch(`/api/admin/connected-accounts/${a.id}`, {
+                                        method: 'PATCH',
+                                        body: JSON.stringify({ account_type: nextType }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Updated account display name for ${a.deriv_login_id || a.deriv_account_id}`);
+                                    } catch (err) {
+                                      flash(err instanceof Error ? err.message : 'Rename failed', 'err');
+                                    } finally {
+                                      setBusyAction(null);
+                                    }
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer whitespace-nowrap"
+                                >
+                                  {busyAction === `aname-${a.id}` ? '...' : 'Save Name'}
+                                </button>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3">
+                              <p className="font-semibold text-white">{a.user_name || a.user_email}</p>
+                              <p className="text-slate-400 text-[11px]">{a.user_email} · {a.status}</p>
+                            </td>
+                            <td className="px-4 py-3 text-right">
+                              <div className="inline-flex items-center justify-end gap-1.5">
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  value={accountBalances[a.id] ?? String(Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2))}
+                                  onChange={(e) =>
+                                    setAccountBalances((prev) => ({ ...prev, [a.id]: e.target.value }))
+                                  }
+                                  className="w-28 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                />
+                                <span className="text-slate-400 font-mono-num text-[11px]">{a.currency || 'USD'}</span>
+                              </div>
+                            </td>
+                            <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                              <button
+                                type="button"
+                                disabled={busyAction === `save-${a.id}`}
+                                onClick={async () => {
+                                  const val = Number(accountBalances[a.id] ?? a.balance);
+                                  if (Number.isNaN(val) || val < 0) {
+                                    flash('Enter a valid non-negative balance', 'err');
+                                    return;
+                                  }
+                                  setBusyAction(`save-${a.id}`);
+                                  await runWithReauth(async () => {
+                                    await adminFetch(`/api/admin/connected-accounts/${a.id}/balance`, {
+                                      method: 'PATCH',
+                                      body: JSON.stringify({ balance: val }),
+                                    });
+                                    await loadAllAdminData();
+                                    flash(
+                                      `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency})`
+                                    );
+                                  });
+                                  setBusyAction(null);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
+                              >
+                                {busyAction === `save-${a.id}` ? 'Saving...' : 'Save DB Balance'}
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busyAction === `sync-${a.id}`}
+                                onClick={async () => {
+                                  setBusyAction(`sync-${a.id}`);
+                                  try {
+                                    await adminFetch(`/api/admin/connected-accounts/${a.id}/sync`, { method: 'POST' });
+                                    await loadAllAdminData();
+                                    flash(`Unlocked & synced live balance for ${a.deriv_login_id || a.deriv_account_id}`);
+                                  } catch (err) {
+                                    flash(err instanceof Error ? err.message : 'Sync failed', 'err');
+                                  } finally {
+                                    setBusyAction(null);
+                                  }
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                              >
+                                {busyAction === `sync-${a.id}` ? 'Syncing...' : 'Sync Live'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const nextStatus = a.status === 'frozen' ? 'active' : 'frozen';
+                                  await adminFetch(`/api/admin/connected-accounts/${a.id}/status`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ status: nextStatus }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
+                              >
+                                {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  await adminFetch(`/api/admin/connected-accounts/${a.id}/revoke`, { method: 'POST' });
+                                  loadAllAdminData();
+                                }}
+                                className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] cursor-pointer"
+                              >
+                                Revoke
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  )}
+                </div>
+              );
+
+              return (
+                <div className="space-y-5">
+                  <div className="md:hidden space-y-4">
+                    <div className="space-y-2.5">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-[#FF444F]">
+                        Real Accounts ({realAcc.length})
+                      </h3>
+                      {renderMobileAccountList(realAcc, 'No real connected accounts yet.')}
+                    </div>
+                    <div className="space-y-2.5">
+                      <h3 className="text-xs font-bold uppercase tracking-wider text-[#00A878]">
+                        Demo Accounts ({demoAcc.length})
+                      </h3>
+                      {renderMobileAccountList(demoAcc, 'No demo connected accounts yet.')}
+                    </div>
+                  </div>
+
+                  <div className="hidden md:block space-y-5">
+                    {renderDesktopAccountTable(realAcc, 'Real Accounts (LIVE)', 'text-[#FF444F]', 'No real connected accounts yet.')}
+                    {renderDesktopAccountTable(demoAcc, 'Demo Accounts (VIRTUAL)', 'text-[#00A878]', 'No demo connected accounts yet.')}
+                  </div>
+                </div>
+              );
+            })()}
 
           {/* 5. Bot Strategies CRUD */}
           {tab === 'strategies' && (
@@ -2752,6 +3014,8 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     method: 'PATCH',
                     body: JSON.stringify({
                       full_name: editingUser.full_name,
+                      deriv_nickname: editingUser.deriv_nickname || '',
+                      preferred_currency: editingUser.preferred_currency || 'USD',
                       email: editingUser.email,
                       phone: editingUser.phone || '',
                       country: editingUser.country || '',
@@ -2784,12 +3048,22 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             >
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-400 mb-1">Full Name</label>
+                  <label className="block text-slate-400 mb-1">Display Profile Name (Full Name)</label>
                   <input
                     type="text"
                     required
                     value={editingUser.full_name || ''}
                     onChange={(e) => setEditingUser((p: any) => ({ ...p, full_name: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Deriv Nickname / Handle</label>
+                  <input
+                    type="text"
+                    value={editingUser.deriv_nickname || ''}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, deriv_nickname: e.target.value }))}
+                    placeholder="e.g. TraderPro"
                     className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
                   />
                 </div>
@@ -2802,6 +3076,17 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     onChange={(e) => setEditingUser((p: any) => ({ ...p, email: e.target.value }))}
                     className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
                   />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Preferred Currency</label>
+                  <select
+                    value={editingUser.preferred_currency || 'USD'}
+                    onChange={(e) => setEditingUser((p: any) => ({ ...p, preferred_currency: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="USD">USD (US Dollar)</option>
+                    <option value="KSH">KSH (Kenyan Shilling)</option>
+                  </select>
                 </div>
                 <div>
                   <label className="block text-slate-400 mb-1">Phone</label>
@@ -2845,132 +3130,224 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 </div>
               </div>
 
-              <div className="p-4 rounded-xl bg-[#111319] border border-[#00A878]/30 space-y-3">
-                <p className="font-bold text-[#00A878]">Demo Wallets (USD / Assets)</p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Demo</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.virtual_workspace_balance ?? 0}
-                      onChange={(e) => setEditingUser((p: any) => ({ ...p, virtual_workspace_balance: e.target.value }))}
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Standard Demo</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.demo_wallets?.mt5_standard ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          demo_wallets: { ...p.demo_wallets, mt5_standard: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Gold Demo</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.demo_wallets?.mt5_gold ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          demo_wallets: { ...p.demo_wallets, mt5_gold: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">Exchange USDT Demo</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.demo_wallets?.exchange_usdt ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          demo_wallets: { ...p.demo_wallets, exchange_usdt: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                </div>
-              </div>
+              {(() => {
+                const userAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === editingUser.id);
+                const realMatched = userAccounts.filter((a: any) => !a.is_virtual);
+                const demoMatched = userAccounts.filter((a: any) => Boolean(a.is_virtual));
 
-              <div className="p-4 rounded-xl bg-[#111319] border border-[#FF444F]/30 space-y-3">
-                <p className="font-bold text-[#FF444F]">Real Wallets (USD / Assets)</p>
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Real</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.real_wallets?.options ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          real_wallets: { ...p.real_wallets, options: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
+                return (
+                  <div className="space-y-4">
+                    <div className="p-4 rounded-xl bg-[#111319] border border-[#FF444F]/30 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="font-bold text-[#FF444F]">Real Wallets &amp; Matched Real Accounts (USD)</p>
+                        <span className="text-[10px] font-mono-num text-slate-400">{realMatched.length} connected</span>
+                      </div>
+
+                      {realMatched.length > 0 && (
+                        <div className="space-y-2 pb-2 border-b border-white/5">
+                          {realMatched.map((a: any) => (
+                            <div key={a.id} className="flex items-center gap-2">
+                              <span className="px-2 py-1 rounded bg-[#FF444F]/15 text-[#FF444F] font-mono-num text-[10px] font-bold shrink-0">
+                                {a.deriv_login_id || a.deriv_account_id}
+                              </span>
+                              <input
+                                type="text"
+                                value={accountNames[a.id] ?? a.account_type ?? ''}
+                                onChange={(e) => setAccountNames((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                                className="flex-1 px-2.5 py-1 rounded-lg bg-[#181C25] border border-[#2A2F3D] text-xs"
+                              />
+                              <span className="text-slate-400 font-mono-num text-[11px] shrink-0">
+                                {Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)} {a.currency || 'USD'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const nextType = String(accountNames[a.id] ?? a.account_type ?? '').trim();
+                                  if (!nextType) return;
+                                  await adminFetch(`/api/admin/connected-accounts/${a.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ account_type: nextType }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Renamed ${a.deriv_login_id || a.deriv_account_id}`);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                              >
+                                Save Name
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Real</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.real_wallets?.options ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                real_wallets: { ...p.real_wallets, options: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">MT5 Standard Real</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.real_wallets?.mt5_standard ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                real_wallets: { ...p.real_wallets, mt5_standard: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">MT5 Gold Real</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.real_wallets?.mt5_gold ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                real_wallets: { ...p.real_wallets, mt5_gold: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">Exchange USDT Real</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.real_wallets?.exchange_usdt ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                real_wallets: { ...p.real_wallets, exchange_usdt: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                      </div>
+                    </div>
+
+                    <div className="p-4 rounded-xl bg-[#111319] border border-[#00A878]/30 space-y-3">
+                      <div className="flex items-center justify-between">
+                        <p className="font-bold text-[#00A878]">Demo Wallets &amp; Matched Demo Accounts (USD)</p>
+                        <span className="text-[10px] font-mono-num text-slate-400">{demoMatched.length} connected</span>
+                      </div>
+
+                      {demoMatched.length > 0 && (
+                        <div className="space-y-2 pb-2 border-b border-white/5">
+                          {demoMatched.map((a: any) => (
+                            <div key={a.id} className="flex items-center gap-2">
+                              <span className="px-2 py-1 rounded bg-[#00A878]/15 text-[#00A878] font-mono-num text-[10px] font-bold shrink-0">
+                                {a.deriv_login_id || a.deriv_account_id}
+                              </span>
+                              <input
+                                type="text"
+                                value={accountNames[a.id] ?? a.account_type ?? ''}
+                                onChange={(e) => setAccountNames((prev) => ({ ...prev, [a.id]: e.target.value }))}
+                                className="flex-1 px-2.5 py-1 rounded-lg bg-[#181C25] border border-[#2A2F3D] text-xs"
+                              />
+                              <span className="text-slate-400 font-mono-num text-[11px] shrink-0">
+                                {Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2)} {a.currency || 'USD'}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const nextType = String(accountNames[a.id] ?? a.account_type ?? '').trim();
+                                  if (!nextType) return;
+                                  await adminFetch(`/api/admin/connected-accounts/${a.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ account_type: nextType }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Renamed ${a.deriv_login_id || a.deriv_account_id}`);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                              >
+                                Save Name
+                              </button>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+
+                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Demo</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.virtual_workspace_balance ?? 0}
+                            onChange={(e) => setEditingUser((p: any) => ({ ...p, virtual_workspace_balance: e.target.value }))}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">MT5 Standard Demo</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.demo_wallets?.mt5_standard ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                demo_wallets: { ...p.demo_wallets, mt5_standard: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">MT5 Gold Demo</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.demo_wallets?.mt5_gold ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                demo_wallets: { ...p.demo_wallets, mt5_gold: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">Exchange USDT Demo</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            value={editingUser.demo_wallets?.exchange_usdt ?? 0}
+                            onChange={(e) =>
+                              setEditingUser((p: any) => ({
+                                ...p,
+                                demo_wallets: { ...p.demo_wallets, exchange_usdt: e.target.value },
+                              }))
+                            }
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                          />
+                        </div>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Standard Real</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.real_wallets?.mt5_standard ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          real_wallets: { ...p.real_wallets, mt5_standard: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">MT5 Gold Real</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.real_wallets?.mt5_gold ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          real_wallets: { ...p.real_wallets, mt5_gold: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                  <div>
-                    <label className="block text-[11px] text-slate-400 mb-1">Exchange USDT Real</label>
-                    <input
-                      type="number"
-                      step="0.01"
-                      value={editingUser.real_wallets?.exchange_usdt ?? 0}
-                      onChange={(e) =>
-                        setEditingUser((p: any) => ({
-                          ...p,
-                          real_wallets: { ...p.real_wallets, exchange_usdt: e.target.value },
-                        }))
-                      }
-                      className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
-                    />
-                  </div>
-                </div>
-              </div>
+                );
+              })()}
 
               <div className="flex justify-end gap-2 pt-2">
                 <button

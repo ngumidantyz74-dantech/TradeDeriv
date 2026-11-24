@@ -88,11 +88,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [accountMode, setAccountMode] = useState<'real' | 'demo'>('demo');
   const [activeConnectedAccountId, setActiveConnectedAccountId] = useState<number | null>(null);
   const [currencyDisplay, setCurrencyDisplay] = useState<'USD' | 'KSH'>(() => {
-    return (localStorage.getItem('td_currency') as 'USD' | 'KSH') || 'USD';
+    const saved = localStorage.getItem('td_currency_v2');
+    return saved === 'KSH' ? 'KSH' : 'USD';
   });
   const [hideBalances, setHideBalances] = useState<boolean>(() => localStorage.getItem('td_hide_bal') === '1');
   const [theme, setTheme] = useState<'light' | 'dark'>(() => {
-    return (localStorage.getItem('td_theme') as 'light' | 'dark') || 'dark';
+    const saved = localStorage.getItem('td_theme_v2');
+    return saved === 'light' ? 'light' : 'dark';
   });
   const [activeTab, setActiveTabState] = useState<NavTab>('home');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('1HZ100V');
@@ -220,11 +222,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const root = document.documentElement;
     if (theme === 'dark') root.classList.add('dark');
     else root.classList.remove('dark');
-    localStorage.setItem('td_theme', theme);
+    localStorage.setItem('td_theme_v2', theme);
   }, [theme]);
 
   useEffect(() => {
-    localStorage.setItem('td_currency', currencyDisplay);
+    localStorage.setItem('td_currency_v2', currencyDisplay);
   }, [currencyDisplay]);
 
   useEffect(() => {
@@ -755,7 +757,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const formatMoney = useCallback(
     (usdAmount: number, opts?: { hideable?: boolean; currencyOverride?: string }) => {
       if (opts?.hideable && hideBalances) {
-        return '••••••';
+        return '*****';
       }
       if (opts?.currencyOverride && opts.currencyOverride !== 'USD') {
         return `${Number(usdAmount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${opts.currencyOverride}`;

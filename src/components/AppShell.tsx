@@ -469,7 +469,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         )}
 
         {/* Compact Mobile Top Bar for Chart / Bot / Sub-Tool Terminals */}
-        {activeTab !== 'profile' && !isCoreMobileHub && (
+        {activeTab !== 'profile' && activeTab !== 'notifications' && !isCoreMobileHub && (
           <header className="lg:hidden bg-[#171A21] text-white px-3.5 py-2.5 flex items-center justify-between gap-2 sticky top-0 z-30 border-b border-white/[0.06]">
             <div className="flex items-center gap-2 min-w-0">
               <button

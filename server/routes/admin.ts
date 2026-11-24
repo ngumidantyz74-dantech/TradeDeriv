@@ -895,6 +895,8 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
   const {
     email,
     full_name,
+    deriv_nickname,
+    preferred_currency,
     phone,
     country,
     role,
@@ -927,6 +929,9 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
   }
 
   const nextEmail = email ? String(email).trim().toLowerCase() : null;
+  const nextCurrency = preferred_currency
+    ? String(preferred_currency).trim().toUpperCase().slice(0, 8)
+    : null;
   const nextDemoBal =
     virtual_workspace_balance !== undefined ? fromCents(Math.max(0, toCents(virtual_workspace_balance))) : null;
 
@@ -940,25 +945,29 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
         `UPDATE users SET
           email = COALESCE($1, email),
           full_name = COALESCE($2, full_name),
-          phone = COALESCE($3, phone),
-          country = COALESCE($4, country),
-          role = COALESCE($5, role),
-          status = COALESCE($6, status),
-          trading_suspended = COALESCE($7, trading_suspended),
-          password_hash = COALESCE($8, password_hash),
-          virtual_workspace_balance = COALESCE($9, virtual_workspace_balance),
-          demo_wallets_json = COALESCE($10, demo_wallets_json),
-          real_wallets_json = COALESCE($11, real_wallets_json),
-          exchange_balances_json = COALESCE($12, exchange_balances_json),
-          real_exchange_balances_json = COALESCE($13, real_exchange_balances_json),
+          deriv_nickname = COALESCE($3, deriv_nickname),
+          preferred_currency = COALESCE($4, preferred_currency),
+          phone = COALESCE($5, phone),
+          country = COALESCE($6, country),
+          role = COALESCE($7, role),
+          status = COALESCE($8, status),
+          trading_suspended = COALESCE($9, trading_suspended),
+          password_hash = COALESCE($10, password_hash),
+          virtual_workspace_balance = COALESCE($11, virtual_workspace_balance),
+          demo_wallets_json = COALESCE($12, demo_wallets_json),
+          real_wallets_json = COALESCE($13, real_wallets_json),
+          exchange_balances_json = COALESCE($14, exchange_balances_json),
+          real_exchange_balances_json = COALESCE($15, real_exchange_balances_json),
           updated_at = NOW()
-         WHERE id = $14
-         RETURNING id, email, full_name, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended,
+         WHERE id = $16
+         RETURNING id, email, full_name, deriv_nickname, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended,
                    locked_until, email_verified, preferred_currency, virtual_workspace_balance, demo_wallets_json,
                    real_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_client_id, created_at`,
         [
           nextEmail,
-          full_name ?? null,
+          full_name !== undefined ? String(full_name).trim().slice(0, 120) : null,
+          deriv_nickname !== undefined ? String(deriv_nickname).trim().slice(0, 80) : null,
+          nextCurrency,
           phone ?? null,
           country ?? null,
           role ?? null,
@@ -1058,6 +1067,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
     if (real_wallets && typeof real_wallets === 'object') {
       derivWs.emitUserEvent(id, 'balance_updated', { real_wallets, realWallets: real_wallets });
     }
+    derivWs.emitUserEvent(id, 'account_updated', { userId: id });
 
     res.json({ user });
   } catch (err) {
@@ -1470,6 +1480,69 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, a
       error: err instanceof Error ? err.message : 'Failed to adjust account balance',
     });
   }
+});
+
+router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+  const id = Number(req.params.id);
+  const { account_type, currency, balance } = req.body || {};
+
+  if (balance !== undefined && !checkReauthHeader(req, res)) return;
+
+  const existing = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1', [id]);
+  if (!existing) {
+    res.status(404).json({ error: 'Connected account not found' });
+    return;
+  }
+
+  const cleanType =
+    account_type !== undefined && String(account_type).trim()
+      ? String(account_type).trim().slice(0, 80)
+      : existing.account_type;
+  const cleanCurrency =
+    currency !== undefined && String(currency).trim()
+      ? String(currency).trim().toUpperCase().slice(0, 8)
+      : existing.currency;
+  const nextBal =
+    balance !== undefined && !Number.isNaN(Number(balance)) && toCents(balance) >= 0
+      ? fromCents(toCents(balance))
+      : null;
+
+  const updated = await queryOne<any>(
+    `UPDATE connected_accounts
+     SET account_type = $1,
+         currency = $2,
+         balance = COALESCE($3, balance),
+         last_known_balance = COALESCE($3, last_known_balance),
+         balance_locked_by_admin = CASE WHEN $3 IS NOT NULL THEN TRUE ELSE balance_locked_by_admin END,
+         updated_at = NOW()
+     WHERE id = $4
+     RETURNING id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+               last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+               status, scopes, updated_at`,
+    [cleanType, cleanCurrency, nextBal, id]
+  );
+
+  await logAdminAction(
+    req.user!.id,
+    'update_connected_account',
+    'connected_accounts',
+    String(id),
+    { account_type: cleanType, currency: cleanCurrency, balance: nextBal },
+    {
+      previousValue: `${existing.account_type} (${existing.currency})`,
+      newValue: `${cleanType} (${cleanCurrency})`,
+      ipAddress: reqIp(req),
+      actionResult: 'success',
+    }
+  );
+
+  derivWs.emitUserEvent(existing.user_id, 'account_updated', {
+    accountId: id,
+    account_type: cleanType,
+    balance: updated?.balance,
+  });
+
+  res.json({ ok: true, account: updated });
 });
 
 router.patch('/admin/connected-accounts/:id/status', requireDb, requireAdmin, async (req: AuthRequest, res) => {

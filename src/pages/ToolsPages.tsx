@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import {
+  ArrowLeft,
   Calculator,
+  CheckCircle2,
   Copy,
+  MoreVertical,
   RefreshCw,
   Unlink,
   Ban,
@@ -1224,46 +1227,107 @@ export const ReportsPage: React.FC = () => {
   );
 };
 
-// 4. Notifications
+// 4. Notifications (Matches Screenshot 105151)
+function formatRelativeNotifTime(iso: string): string {
+  const ts = new Date(iso).getTime();
+  if (Number.isNaN(ts)) return 'Recent';
+  const diffMin = Math.max(1, Math.floor((Date.now() - ts) / 60000));
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  return `${diffDay}d ago`;
+}
+
 export const NotificationsPage: React.FC = () => {
-  const { notifications, markNotificationRead } = useApp();
+  const { notifications, markNotificationRead, setActiveTab } = useApp();
+  const [menuOpen, setMenuOpen] = useState(false);
 
   return (
-    <div className="max-w-3xl mx-auto px-4 sm:px-8 py-6 space-y-5">
-      <div className="flex items-center justify-between">
-        <h1 className="font-display text-2xl font-bold flex items-center gap-2">
-          <Bell className="w-6 h-6 text-[#FF444F]" /> Notifications
-        </h1>
-        <button
-          type="button"
-          onClick={() => markNotificationRead('all')}
-          className="px-4 py-2 rounded-full bg-[#F4F5F7] dark:bg-[#181C25] text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-        >
-          <CheckCheck className="w-4 h-4 text-[#00A878]" /> Mark all read
-        </button>
-      </div>
+    <div className="min-h-[85vh] bg-[#0E0F13] text-white">
+      <div className="max-w-2xl mx-auto px-5 pt-4 pb-10">
+        <div className="flex items-center justify-between mb-5 relative">
+          <button
+            type="button"
+            onClick={() => setActiveTab('home')}
+            aria-label="Back to Home"
+            className="w-9 h-9 rounded-full bg-[#242833] hover:bg-[#2E3342] flex items-center justify-center cursor-pointer"
+          >
+            <ArrowLeft className="w-[18px] h-[18px] text-white" />
+          </button>
 
-      <div className="space-y-3">
-        {notifications.length === 0 ? (
-          <p className="text-sm text-slate-500 text-center py-8">No notifications yet.</p>
-        ) : (
-          notifications.map((n) => (
-            <div
-              key={n.id}
-              onClick={() => !n.is_read && markNotificationRead(n.id)}
-              className={`p-4 rounded-2xl border cursor-pointer transition-colors ${
-                n.is_read
-                  ? 'bg-white dark:bg-[#181C25] border-slate-200 dark:border-[#2A2F3D]'
-                  : 'bg-[#FF444F]/5 border-[#FF444F]/30'
-              }`}
-            >
-              <div className="flex items-center justify-between mb-1">
-                <p className="text-sm font-bold">{n.title}</p>
-                <span className="text-[11px] text-slate-400">{new Date(n.created_at).toLocaleString()}</span>
-              </div>
-              <p className="text-xs text-slate-600 dark:text-slate-300">{n.message}</p>
+          <button
+            type="button"
+            onClick={() => setMenuOpen((o) => !o)}
+            aria-label="Notification actions"
+            className="w-9 h-9 rounded-full bg-[#242833] hover:bg-[#2E3342] flex items-center justify-center cursor-pointer"
+          >
+            <MoreVertical className="w-[18px] h-[18px] text-white" />
+          </button>
+
+          {menuOpen && (
+            <div className="absolute right-0 top-11 z-20 bg-[#181B22] border border-white/10 rounded-2xl shadow-xl py-1.5 w-44">
+              <button
+                type="button"
+                onClick={() => {
+                  markNotificationRead('all');
+                  setMenuOpen(false);
+                }}
+                className="w-full px-4 py-2.5 text-left text-xs font-semibold text-white hover:bg-white/5 flex items-center gap-2 cursor-pointer"
+              >
+                <CheckCheck className="w-4 h-4 text-[#17B978]" />
+                <span>Mark all as read</span>
+              </button>
             </div>
-          ))
+          )}
+        </div>
+
+        <h1 className="font-display text-[22px] font-bold tracking-tight text-white mb-4">Notifications</h1>
+
+        {notifications.length === 0 ? (
+          <p className="text-sm text-[#9BA3B0] text-center py-14">No notifications yet.</p>
+        ) : (
+          <div className="divide-y divide-white/[0.08]">
+            {notifications.map((n) => {
+              const titleLower = String(n.title || '').toLowerCase();
+              const isSuccess = titleLower.includes('successful') || titleLower.includes('completed') || titleLower.includes('settled');
+              return (
+                <button
+                  key={n.id}
+                  type="button"
+                  onClick={() => !n.is_read && markNotificationRead(n.id)}
+                  className="w-full py-4 flex items-start gap-3.5 text-left hover:bg-white/[0.02] transition-colors cursor-pointer"
+                >
+                  <div className="relative shrink-0 mt-0.5">
+                    <span
+                      className={`w-9 h-9 rounded-full flex items-center justify-center border ${
+                        isSuccess
+                          ? 'bg-[#0E241C] border-[#17B978]/50 text-[#17B978]'
+                          : 'bg-[#121D2D] border-[#2563EB]/55 text-[#3B82F6]'
+                      }`}
+                    >
+                      {isSuccess ? (
+                        <CheckCircle2 className="w-4 h-4" />
+                      ) : (
+                        <span className="w-5 h-5 rounded-full border border-[#3B82F6] flex items-center justify-center text-[11px] font-bold leading-none">
+                          i
+                        </span>
+                      )}
+                    </span>
+                    {!n.is_read && (
+                      <span className="absolute -top-0.5 right-0 w-2 h-2 rounded-full bg-[#FF444F] ring-2 ring-[#0E0F13]" />
+                    )}
+                  </div>
+
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[14px] font-bold text-white leading-snug">{n.title}</p>
+                    <p className="text-[13px] text-[#C7CDD6] mt-1 leading-relaxed whitespace-pre-line">{n.message}</p>
+                    <p className="text-[12px] text-[#8E95A2] mt-1.5">{formatRelativeNotifTime(n.created_at)}</p>
+                  </div>
+                </button>
+              );
+            })}
+          </div>
         )}
       </div>
     </div>
