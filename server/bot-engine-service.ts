@@ -41,6 +41,7 @@ export interface BotJournalEntry {
 
 export interface BotTelemetry {
   running: boolean;
+  runId?: string;
   runState?: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
   strategyName: string;
   strategyType: string;
@@ -70,6 +71,7 @@ export interface BotTelemetry {
 
 interface InternalBotSession extends BotTelemetry {
   userId: number;
+  runId: string;
   barrier: string;
   duration: number;
   durationUnit: string;
@@ -492,6 +494,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       accountMode: session.accountMode,
       strategyKey: session.strategyType,
       isAnalyserSynced: session.analyserSync,
+      notes: `run:${session.runId}`,
       source: 'bot',
     });
 
@@ -547,6 +550,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 function serializeTelemetry(s: InternalBotSession): BotTelemetry {
   return {
     running: s.running,
+    runId: s.runId,
     runState: s.runState,
     strategyName: s.strategyName,
     strategyType: s.strategyType,
@@ -637,9 +641,11 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     matchingAcc && !resolvedIsDbLocked ? 'deriv' : 'virtual';
 
   const initialTradeSide = String(cfg.tradeSide || cfg.contractType || 'CALL').toUpperCase();
+  const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
 
   const session: InternalBotSession = {
     userId: cfg.userId,
+    runId,
     running: true,
     strategyName: cfg.strategyName || 'Deriv Bot',
     strategyType: cfg.strategyType || 'Martingale',
@@ -748,6 +754,7 @@ export function getBotStatus(userId: number): BotTelemetry {
   if (session) return serializeTelemetry(session);
   return {
     running: false,
+    runId: '',
     runState: 'idle',
     strategyName: '',
     strategyType: 'Martingale',

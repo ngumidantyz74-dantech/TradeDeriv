@@ -191,7 +191,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [adjustTarget, setAdjustTarget] = useState<{
     user: any;
     accountMode: 'demo' | 'real';
-    walletBucket: 'options' | 'mt5_standard' | 'mt5_gold' | 'exchange_usdt';
+    walletBucket: 'main_usd' | 'options' | 'mt5_standard' | 'mt5_gold' | 'exchange_usdt';
     operation: 'credit' | 'debit' | 'set';
     amount: string;
     reason: string;
@@ -372,14 +372,14 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
       for (const u of ov?.users || []) {
         uMap[u.id] = String(Number(u.virtual_workspace_balance ?? 0).toFixed(2));
         nMap[u.id] = String(u.full_name ?? '');
-        let realOpt = 0;
+        let realMain = 0;
         try {
           const rw = JSON.parse(u.real_wallets_json || '{}');
-          realOpt = Number(rw.options ?? 0);
+          realMain = Number(rw.main_usd ?? 0);
         } catch {
-          realOpt = 0;
+          realMain = 0;
         }
-        rMap[u.id] = String(realOpt.toFixed(2));
+        rMap[u.id] = String(realMain.toFixed(2));
       }
       setUserBalances(uMap);
       setRealBalances(rMap);
@@ -2368,7 +2368,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 setAdjustTarget({
                   user: u,
                   accountMode: 'demo',
-                  walletBucket: 'options',
+                  walletBucket: 'main_usd',
                   operation: 'credit',
                   amount: '100',
                   reason: 'Administrative balance adjustment',
@@ -2385,9 +2385,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 setEditingUser({
                   ...u,
                   password: '',
-                  demo_wallets: parseJson(u.demo_wallets_json, { mt5_standard: 10000, mt5_gold: 10000, exchange_usdt: 10000 }),
-                  real_wallets: parseJson(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
-                  exchange_balances: parseJson(u.exchange_balances_json, { USDT: 10000, USDC: 2500, BTC: 0.15, ETH: 2.5 }),
+                  demo_wallets: parseJson(u.demo_wallets_json, { main_usd: Number(u.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+                  real_wallets: parseJson(u.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+                  exchange_balances: parseJson(u.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
                   real_exchange_balances: parseJson(u.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
                 });
               };
@@ -2628,7 +2628,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       filteredUsers.map((u: any) => {
                         let parsedRw = 0;
                         try {
-                          parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
+                          parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').main_usd ?? 0);
                         } catch {
                           parsedRw = 0;
                         }
@@ -2987,7 +2987,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         {filteredUsers.map((u: any) => {
                           let parsedRw = 0;
                           try {
-                            parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
+                            parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').main_usd ?? 0);
                           } catch {
                             parsedRw = 0;
                           }
@@ -4703,24 +4703,15 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       status: editingUser.status || 'active',
                       password: editingUser.password?.trim().length >= 6 ? editingUser.password.trim() : undefined,
                       virtual_workspace_balance: Number(editingUser.virtual_workspace_balance ?? 0),
-                      demo_wallets: {
-                        mt5_standard: Number(editingUser.demo_wallets?.mt5_standard ?? 0),
-                        mt5_gold: Number(editingUser.demo_wallets?.mt5_gold ?? 0),
-                        exchange_usdt: Number(editingUser.demo_wallets?.exchange_usdt ?? 0),
-                      },
                       real_wallets: {
-                        options: Number(editingUser.real_wallets?.options ?? 0),
-                        mt5_standard: Number(editingUser.real_wallets?.mt5_standard ?? 0),
-                        mt5_gold: Number(editingUser.real_wallets?.mt5_gold ?? 0),
-                        exchange_usdt: Number(editingUser.real_wallets?.exchange_usdt ?? 0),
+                        ...editingUser.real_wallets,
+                        main_usd: Number(editingUser.real_wallets?.main_usd ?? 0),
                       },
-                      exchange_balances: editingUser.exchange_balances,
-                      real_exchange_balances: editingUser.real_exchange_balances,
                     }),
                   });
                   setEditingUser(null);
                   await loadAllAdminData();
-                  flash('Trader profile & all wallets synced to PostgreSQL');
+                  flash('Trader profile & Main USD Wallet updated in PostgreSQL');
                 });
                 setBusyAction(null);
               }}
@@ -4870,20 +4861,30 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         </div>
                       )}
 
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                         <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Real</label>
+                          <label className="block text-[11px] text-[#FF444F] font-semibold mb-1">Main USD Wallet (Editable)</label>
                           <input
                             type="number"
                             step="0.01"
-                            value={editingUser.real_wallets?.options ?? 0}
+                            value={editingUser.real_wallets?.main_usd ?? 0}
                             onChange={(e) =>
                               setEditingUser((p: any) => ({
                                 ...p,
-                                real_wallets: { ...p.real_wallets, options: e.target.value },
+                                real_wallets: { ...p.real_wallets, main_usd: e.target.value },
                               }))
                             }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#FF444F]/50 font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">Options Real (Transfer)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            disabled
+                            value={editingUser.real_wallets?.options ?? 0}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                         <div>
@@ -4891,14 +4892,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <input
                             type="number"
                             step="0.01"
+                            disabled
                             value={editingUser.real_wallets?.mt5_standard ?? 0}
-                            onChange={(e) =>
-                              setEditingUser((p: any) => ({
-                                ...p,
-                                real_wallets: { ...p.real_wallets, mt5_standard: e.target.value },
-                              }))
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                         <div>
@@ -4906,14 +4902,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <input
                             type="number"
                             step="0.01"
+                            disabled
                             value={editingUser.real_wallets?.mt5_gold ?? 0}
-                            onChange={(e) =>
-                              setEditingUser((p: any) => ({
-                                ...p,
-                                real_wallets: { ...p.real_wallets, mt5_gold: e.target.value },
-                              }))
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                         <div>
@@ -4921,17 +4912,15 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <input
                             type="number"
                             step="0.01"
+                            disabled
                             value={editingUser.real_wallets?.exchange_usdt ?? 0}
-                            onChange={(e) =>
-                              setEditingUser((p: any) => ({
-                                ...p,
-                                real_wallets: { ...p.real_wallets, exchange_usdt: e.target.value },
-                              }))
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                       </div>
+                      <p className="text-[10px] text-slate-400">
+                        Only Main USD Wallet is editable by admin; funds move to Options, CFDs, and Exchange exclusively via trader Transfers.
+                      </p>
                     </div>
 
                     <div className="p-4 rounded-xl bg-[#111319] border border-[#00A878]/30 space-y-3">
@@ -4977,15 +4966,25 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                         </div>
                       )}
 
-                      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                         <div>
-                          <label className="block text-[11px] text-slate-400 mb-1">Options &amp; Bot Demo</label>
+                          <label className="block text-[11px] text-[#00A878] font-semibold mb-1">Main USD Demo (Editable)</label>
                           <input
                             type="number"
                             step="0.01"
                             value={editingUser.virtual_workspace_balance ?? 0}
                             onChange={(e) => setEditingUser((p: any) => ({ ...p, virtual_workspace_balance: e.target.value }))}
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#00A878]/50 font-mono-num"
+                          />
+                        </div>
+                        <div>
+                          <label className="block text-[11px] text-slate-400 mb-1">Options Demo (Transfer)</label>
+                          <input
+                            type="number"
+                            step="0.01"
+                            disabled
+                            value={editingUser.demo_wallets?.options ?? 0}
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                         <div>
@@ -4993,14 +4992,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <input
                             type="number"
                             step="0.01"
+                            disabled
                             value={editingUser.demo_wallets?.mt5_standard ?? 0}
-                            onChange={(e) =>
-                              setEditingUser((p: any) => ({
-                                ...p,
-                                demo_wallets: { ...p.demo_wallets, mt5_standard: e.target.value },
-                              }))
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                         <div>
@@ -5008,14 +5002,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <input
                             type="number"
                             step="0.01"
+                            disabled
                             value={editingUser.demo_wallets?.mt5_gold ?? 0}
-                            onChange={(e) =>
-                              setEditingUser((p: any) => ({
-                                ...p,
-                                demo_wallets: { ...p.demo_wallets, mt5_gold: e.target.value },
-                              }))
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                         <div>
@@ -5023,14 +5012,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <input
                             type="number"
                             step="0.01"
+                            disabled
                             value={editingUser.demo_wallets?.exchange_usdt ?? 0}
-                            onChange={(e) =>
-                              setEditingUser((p: any) => ({
-                                ...p,
-                                demo_wallets: { ...p.demo_wallets, exchange_usdt: e.target.value },
-                              }))
-                            }
-                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num"
+                            className="w-full px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num opacity-65 cursor-not-allowed"
                           />
                         </div>
                       </div>
@@ -5203,14 +5187,11 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 <div>
                   <label className="block text-slate-400 mb-1">Wallet Bucket</label>
                   <select
-                    value={adjustTarget.walletBucket}
-                    onChange={(e) => setAdjustTarget((p) => (p ? { ...p, walletBucket: e.target.value as any } : p))}
-                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                    value="main_usd"
+                    disabled
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] opacity-80"
                   >
-                    <option value="options">Options &amp; Bot</option>
-                    <option value="mt5_standard">MT5 Standard</option>
-                    <option value="mt5_gold">MT5 Gold</option>
-                    <option value="exchange_usdt">Exchange USDT</option>
+                    <option value="main_usd">Main USD Wallet (USD)</option>
                   </select>
                 </div>
               </div>

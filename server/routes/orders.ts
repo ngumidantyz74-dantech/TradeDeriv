@@ -384,12 +384,38 @@ router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthReq
     return;
   }
 
+  const u = await queryOne<{ demo_wallets_json: string; virtual_workspace_balance: number }>(
+    'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
+    [req.user!.id]
+  );
+  const dw = (() => {
+    try {
+      return {
+        main_usd: Number(u?.virtual_workspace_balance ?? 10000),
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+        ...JSON.parse(u?.demo_wallets_json || '{}'),
+      };
+    } catch {
+      return {
+        main_usd: Number(u?.virtual_workspace_balance ?? 10000),
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      };
+    }
+  })();
+  dw.options = 10000.0;
+
   await execute(
     `UPDATE users
-     SET virtual_workspace_balance = 10000.00,
+     SET demo_wallets_json = $1,
          updated_at = NOW()
-     WHERE id = $1`,
-    [req.user!.id]
+     WHERE id = $2`,
+    [JSON.stringify(dw), req.user!.id]
   );
   await execute(
     `UPDATE connected_accounts
@@ -399,15 +425,15 @@ router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthReq
      WHERE user_id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)`,
     [req.user!.id]
   );
-  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { virtual_workspace_balance: 10000.0 });
+  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
   derivWs.emitUserEvent(req.user!.id, 'account_updated', { userId: req.user!.id });
   await addNotification(
     req.user!.id,
     'Demo Balance Reset',
-    'Demo Options balance reset to $10,000.00 USD. Real & CFD balances remain untouched.',
+    'Demo Options balance reset to $10,000.00 USD. Main USD Wallet, Real & CFD balances remain untouched.',
     'account'
   );
-  res.json({ ok: true, virtual_workspace_balance: 10000.0 });
+  res.json({ ok: true, demo_wallets: dw, balance: 10000.0 });
 });
 
 // Bots (No password gate)

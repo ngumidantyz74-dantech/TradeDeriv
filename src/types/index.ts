@@ -32,12 +32,15 @@ export interface UserProfile {
   display_theme: 'light' | 'dark';
   virtual_workspace_balance: number;
   real_wallets?: {
+    main_usd?: number;
     options: number;
     mt5_standard: number;
     mt5_gold: number;
     exchange_usdt: number;
   };
   demo_wallets?: {
+    main_usd?: number;
+    options?: number;
     mt5_standard: number;
     mt5_gold: number;
     exchange_usdt: number;

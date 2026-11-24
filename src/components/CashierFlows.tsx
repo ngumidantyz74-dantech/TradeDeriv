@@ -641,7 +641,7 @@ export const TransferScreen: React.FC<{
         currency: 'USD',
         decimals: 2,
         balance: canonical.optionsBal,
-        backendKey: 'USD Wallet',
+        backendKey: 'Options',
         icon: <OptionsSquareBadge size="sm" monochrome />,
       },
       {
@@ -650,7 +650,7 @@ export const TransferScreen: React.FC<{
         label: 'US Dollar',
         currency: 'USD',
         decimals: 2,
-        balance: canonical.optionsBal,
+        balance: canonical.mainUsdBal,
         backendKey: 'USD Wallet',
         icon: <UsCircleFlagIcon size="md" />,
       },
@@ -666,6 +666,7 @@ export const TransferScreen: React.FC<{
       })),
     ];
   }, [
+    canonical.mainUsdBal,
     canonical.mt5GoldBal,
     canonical.mt5StdBal,
     canonical.optionsBal,

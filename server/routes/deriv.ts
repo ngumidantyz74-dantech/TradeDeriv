@@ -207,6 +207,7 @@ async function syncRealDerivWalletForUser(userId: number): Promise<void> {
   if (!userRow) return;
 
   let currentRw: Record<string, number> = {
+    main_usd: 0,
     options: 0,
     mt5_standard: 0,
     mt5_gold: 0,
@@ -246,8 +247,29 @@ async function syncDemoDerivWalletForUser(userId: number): Promise<void> {
   }
 
   const primaryBalance = Number(Number(demoRows[0].last_known_balance || 0).toFixed(2));
-  await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-    primaryBalance,
+  const userRow = await queryOne<{ demo_wallets_json: string | null; virtual_workspace_balance: number }>(
+    'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
+    [userId]
+  );
+  if (!userRow) return;
+
+  let currentDw: Record<string, number> = {
+    main_usd: Number(userRow.virtual_workspace_balance ?? 10000),
+    options: 0,
+    mt5_standard: 0,
+    mt5_gold: 0,
+    exchange_usdt: 0,
+  };
+  try {
+    currentDw = { ...currentDw, ...(JSON.parse(userRow.demo_wallets_json || '{}') || {}) };
+  } catch {
+    // keep default shape
+  }
+
+  if (Number(currentDw.options ?? 0) === primaryBalance) return;
+  currentDw.options = primaryBalance;
+  await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+    JSON.stringify(currentDw),
     userId,
   ]);
 }
@@ -423,9 +445,24 @@ async function ensureUserFromDerivProfile(profile: {
     'Deriv Trader';
   const resolvedPhone = String(profile.phone || '').trim();
   const resolvedCountry = normalizeDerivCountry(profile.country) || 'Kenya';
+  const defaultDemoMain = Number(globalSettings.defaultVirtualBalance ?? 10000);
+  const initialDemoWallets = JSON.stringify({
+    main_usd: defaultDemoMain,
+    options: 0,
+    mt5_standard: 0,
+    mt5_gold: 0,
+    exchange_usdt: 0,
+  });
+  const initialRealWallets = JSON.stringify({
+    main_usd: 0,
+    options: 0,
+    mt5_standard: 0,
+    mt5_gold: 0,
+    exchange_usdt: 0,
+  });
   const created = await queryOne<any>(
-    `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id, last_login_at)
-     VALUES ($1, $2, $3, $4, $5, 'user', 'active', TRUE, $6, $7, $8, NOW())
+    `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, real_wallets_json, demo_wallets_json, deriv_nickname, deriv_client_id, last_login_at)
+     VALUES ($1, $2, $3, $4, $5, 'user', 'active', TRUE, $6, $7, $8, $9, $10, NOW())
      RETURNING ${USER_PROFILE_COLS}`,
     [
       cleanEmail,
@@ -433,7 +470,9 @@ async function ensureUserFromDerivProfile(profile: {
       resolvedName,
       resolvedPhone,
       resolvedCountry,
-      Number(globalSettings.defaultVirtualBalance ?? 10000),
+      defaultDemoMain,
+      initialRealWallets,
+      initialDemoWallets,
       profile.nickname || '',
       maskClientId(profile.clientId || randomId(8)),
     ]

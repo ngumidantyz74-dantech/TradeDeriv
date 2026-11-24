@@ -46,7 +46,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { DepositSheet } from '../components/CashierFlows';
-import { SynthCandleBadge } from '../components/DerivBadges';
+import { SynthCandleBadge, BotContractTypeIcon } from '../components/DerivBadges';
 import { BotBlocklyCanvas } from '../components/BotBlocklyCanvas';
 import {
   createDefaultXmlWorkspaceState,
@@ -155,6 +155,11 @@ function formatJournalTime(iso?: string | null): string {
   const d = iso ? new Date(iso) : new Date();
   const s = d.toISOString();
   return `${s.slice(0, 10)} | ${s.slice(11, 19)} GMT`;
+}
+
+function getOrderRunKey(notes?: string | null): string | null {
+  const m = String(notes || '').match(/run:([^\s|]+)/i);
+  return m?.[1] || null;
 }
 
 export const BotBuilderPage: React.FC = () => {
@@ -414,16 +419,10 @@ export const BotBuilderPage: React.FC = () => {
       const res = await apiFetch<{ telemetry: BotTelemetry | null }>('/api/bots/status');
       const tel = res.telemetry;
       setTelemetry(tel);
-      if (tel?.running && tel.startedAt && tel.accountMode === accountMode) {
-        const startedMs = new Date(tel.startedAt).getTime() - 2000;
-        if (Number.isFinite(startedMs) && startedMs > 0) {
-          setSessionResetAt((prev) => (prev === 0 || prev > startedMs ? startedMs : prev));
-        }
-      }
     } catch {
       // ignore
     }
-  }, [accountMode]);
+  }, []);
 
   useEffect(() => {
     pollStatus();
@@ -583,10 +582,6 @@ export const BotBuilderPage: React.FC = () => {
         method: 'POST',
         body: JSON.stringify(payload),
       });
-      const anchorMs = res.telemetry?.startedAt
-        ? new Date(res.telemetry.startedAt).getTime() - 2000
-        : Date.now() - 2000;
-      setSessionResetAt(anchorMs);
       setDismissedOutcomeKey('');
       setTelemetry(res.telemetry);
       setTelemetryOpen(true);
@@ -639,11 +634,21 @@ export const BotBuilderPage: React.FC = () => {
     const p = pendingXmlImport;
     const cleanName = p.fileName.replace(/\.xml$/i, '');
 
-    updateXmlState((prev) => ({
-      ...prev,
+    const nextSnapshot: BotXmlWorkspaceState = {
+      ...xmlState,
       ...(p.parsedState || {}),
       strategyName: cleanName,
-    }));
+      strategyType: p.parsedState?.strategyType || 'xml_block_flow',
+    };
+
+    updateXmlState(() => nextSnapshot);
+    setAnalyserSync(false);
+
+    const parsedAssignments = nextSnapshot.assignments || xmlState.assignments;
+    const resolvedContract =
+      nextSnapshot.contractTypeSelection !== 'Both'
+        ? nextSnapshot.contractTypeSelection
+        : nextSnapshot.thenPurchase || contractType;
 
     setSavedBots((prev) => [
       {
@@ -651,15 +656,19 @@ export const BotBuilderPage: React.FC = () => {
         name: cleanName,
         lastModified: 'Just now',
         status: 'Local',
-        symbol: p.symbol || symbol,
-        contractType: p.contractType || contractType,
-        stake: p.stake || baseStake,
-        duration: p.duration || xmlState.duration,
-        durationUnit: xmlState.durationUnit,
-        barrier: p.barrier || xmlState.prediction,
-        martingale: p.martingale || xmlState.martingaleFactor,
-        takeProfit: p.takeProfit || takeProfit,
-        stopLoss: p.stopLoss || stopLoss,
+        symbol: nextSnapshot.symbol || symbol,
+        contractType: resolvedContract,
+        stake: getAssignmentVal(parsedAssignments, 'initialStake', baseStake),
+        duration: nextSnapshot.duration || xmlState.duration,
+        durationUnit: nextSnapshot.durationUnit || xmlState.durationUnit,
+        barrier: nextSnapshot.prediction || xmlState.prediction,
+        martingale: nextSnapshot.martingaleFactor || xmlState.martingaleFactor,
+        takeProfit: getAssignmentVal(parsedAssignments, 'profitThreshold', takeProfit),
+        stopLoss: getAssignmentVal(parsedAssignments, 'lossThreshold', stopLoss),
+        winStep: getAssignmentVal(parsedAssignments, 'winStep', winStep),
+        maxWinSteps: getAssignmentVal(parsedAssignments, 'maxWinSteps', maxWinSteps),
+        growthRate: nextSnapshot.growthRate ?? xmlState.growthRate,
+        xmlSnapshot: nextSnapshot,
       },
       ...prev.filter((b) => b.name !== cleanName),
     ]);
@@ -1369,7 +1378,7 @@ export const BotBuilderPage: React.FC = () => {
                             </span>
                           </div>
                           <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#111319] dark:text-white">
-                            <Sparkles className="w-3.5 h-3.5 text-[#FF444F]" />
+                            <BotContractTypeIcon contractType={latestBotOrder.contract_type} className="w-3.5 h-3.5 shrink-0" />
                             {getContractDisplayLabel(latestBotOrder.contract_type)}
                           </span>
                         </div>
@@ -1502,38 +1511,63 @@ export const BotBuilderPage: React.FC = () => {
                   )}
 
                   <div className="divide-y divide-slate-100 dark:divide-white/[0.06]">
-                    {botOrders.slice(0, 40).map((o) => {
+                    {botOrders.slice(0, 40).map((o, idx, arr) => {
                       const live = computeLiveOrderMetrics(o, ticks);
                       const win = live.pnl >= 0;
                       const exitVal = Number(o.exit_price ?? live.currentPrice ?? o.entry_price);
+                      const prevOrder = idx > 0 ? arr[idx - 1] : null;
+                      let hasRunSeparator = false;
+                      if (prevOrder) {
+                        const prevRun = getOrderRunKey(prevOrder.notes);
+                        const currRun = getOrderRunKey(o.notes);
+                        if (prevRun && currRun) {
+                          hasRunSeparator = prevRun !== currRun;
+                        } else if (Boolean(prevRun) !== Boolean(currRun)) {
+                          hasRunSeparator = true;
+                        } else {
+                          const prevTs = new Date(prevOrder.opened_at).getTime();
+                          const currTs = new Date(o.opened_at).getTime();
+                          if (Number.isFinite(prevTs) && Number.isFinite(currTs) && Math.abs(prevTs - currTs) > 45000) {
+                            hasRunSeparator = true;
+                          }
+                        }
+                      }
                       return (
-                        <div key={o.id} className="grid grid-cols-3 items-center px-4 py-2.5 text-[11px]">
-                          <div className="flex items-center gap-2">
-                            <SynthCandleBadge num={getSymbolBadgeNum(o.symbol)} />
-                            <Sparkles className="w-3.5 h-3.5 text-[#FF444F]" />
-                          </div>
-
-                          <div className="flex flex-col items-center font-mono-num tabular-nums space-y-0.5">
+                        <React.Fragment key={o.id}>
+                          {hasRunSeparator && (
+                            <div
+                              aria-hidden="true"
+                              className="h-[6px] w-full bg-[#F2F3F5] dark:bg-[#0E1015]"
+                            />
+                          )}
+                          <div className="grid grid-cols-3 items-center px-4 py-2.5 text-[11px]">
                             <div className="flex items-center gap-2">
-                              <span className="w-2.5 h-2.5 rounded-full border-2 border-[#FF444F] shrink-0" />
-                              <span>{Number(o.entry_price || 0).toFixed(2)}</span>
+                              <SynthCandleBadge num={getSymbolBadgeNum(o.symbol)} />
+                              <BotContractTypeIcon contractType={o.contract_type} className="w-4 h-4 shrink-0" />
                             </div>
-                            <div className="flex items-center gap-2 text-[#525866] dark:text-slate-400">
-                              <span className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF] shrink-0" />
-                              <span>{exitVal.toFixed(2)}</span>
-                            </div>
-                          </div>
 
-                          <div className="text-right font-mono-num tabular-nums space-y-0.5">
-                            <p className="text-[#525866] dark:text-slate-300">
-                              {Number(o.stake || 0).toFixed(2)} USD
-                            </p>
-                            <p className={`font-semibold ${win ? 'text-[#2A9D8F]' : 'text-[#FF444F]'}`}>
-                              {win ? '+' : ''}
-                              {live.pnl.toFixed(2)} USD
-                            </p>
+                            <div className="flex flex-col items-center font-mono-num tabular-nums space-y-0.5">
+                              <div className="flex items-center gap-2">
+                                <span className="w-2.5 h-2.5 rounded-full border-2 border-[#FF444F] shrink-0" />
+                                <span>{Number(o.entry_price || 0).toFixed(2)}</span>
+                              </div>
+                              <div className="flex items-center gap-2 text-[#525866] dark:text-slate-400">
+                                <span className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF] shrink-0" />
+                                <span>{exitVal.toFixed(2)}</span>
+                              </div>
+                            </div>
+
+                            <div className="text-right font-mono-num tabular-nums space-y-0.5">
+                              <p className="text-[#525866] dark:text-slate-300">
+                                {Number(o.stake || 0).toFixed(2)} USD
+                              </p>
+                              <p className={`font-semibold ${win ? 'text-[#2A9D8F]' : 'text-[#FF444F]'}`}>
+                                {win ? '+' : ''}
+                                {live.pnl.toFixed(2)} USD
+                              </p>
+                            </div>
                           </div>
-                        </div>
+                        </React.Fragment>
                       );
                     })}
                   </div>
@@ -1728,7 +1762,7 @@ export const BotBuilderPage: React.FC = () => {
                   >
                     <div className="flex items-center gap-2.5">
                       <SynthCandleBadge num={getSymbolBadgeNum(o.symbol)} />
-                      <Sparkles className="w-4 h-4 text-[#FF444F]" />
+                      <BotContractTypeIcon contractType={o.contract_type} className="w-4 h-4 shrink-0" />
                     </div>
                     <div>
                       <p className="font-bold text-[#111319] dark:text-white text-[11px]">Ref. ID</p>
@@ -1853,7 +1887,10 @@ export const BotBuilderPage: React.FC = () => {
                         </div>
                         <div>
                           <span className="text-slate-500">Duration:</span>{' '}
-                          <strong>{pendingXmlImport.duration || xmlState.duration} ticks</strong>
+                          <strong>
+                            {pendingXmlImport.duration || xmlState.duration}{' '}
+                            {pendingXmlImport.parsedState?.durationUnit || xmlState.durationUnit}
+                          </strong>
                         </div>
                       </div>
                     </div>

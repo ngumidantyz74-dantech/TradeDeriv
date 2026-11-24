@@ -107,6 +107,7 @@ export const PortfolioHub: React.FC = () => {
   }, [loadPortfolioData]);
 
   const {
+    mainUsdBal,
     optionsBal,
     mt5StdBal,
     mt5GoldBal,
@@ -116,7 +117,7 @@ export const PortfolioHub: React.FC = () => {
 
   const activeHeadlineUsd =
     subTab === 'wallet'
-      ? optionsBal
+      ? mainUsdBal
       : subTab === 'partners'
         ? 0
         : subTab === 'p2p'
@@ -243,7 +244,7 @@ export const PortfolioHub: React.FC = () => {
   ].filter((r) => !hideZeroAssets || r.bal > 0);
 
   const walletRows = [
-    { key: 'usd', label: 'USD Wallet', bal: optionsBal, currency: 'USD' },
+    { key: 'usd', label: 'USD Wallet', bal: mainUsdBal, currency: 'USD' },
     { key: 'usdt', label: 'USDT Wallet', bal: exchangeUsdt, currency: 'USDT' },
   ].filter((r) => !hideZeroAssets || r.bal > 0);
 

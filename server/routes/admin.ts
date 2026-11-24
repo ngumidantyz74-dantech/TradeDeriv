@@ -1012,13 +1012,13 @@ router.get('/admin/users/export', requireDb, requireAdmin, requirePermission('us
 
   const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
   const lines = [
-    ['ID', 'Email', 'Full Name', 'Client ID', 'Status', 'Currency', 'Demo USD', 'Real Options USD', 'Ownership Status', 'Originating Device ID', 'Last Login'].join(','),
+    ['ID', 'Email', 'Full Name', 'Client ID', 'Status', 'Currency', 'Demo Main USD', 'Real Main USD', 'Ownership Status', 'Originating Device ID', 'Last Login'].join(','),
     ...rows.map((r: any) => {
-      let realOpt = 0;
+      let realMain = 0;
       try {
-        realOpt = Number(JSON.parse(r.real_wallets_json || '{}').options ?? 0);
+        realMain = Number(JSON.parse(r.real_wallets_json || '{}').main_usd ?? 0);
       } catch {
-        realOpt = 0;
+        realMain = 0;
       }
       return [
         r.id,
@@ -1028,7 +1028,7 @@ router.get('/admin/users/export', requireDb, requireAdmin, requirePermission('us
         esc(r.status),
         esc(r.preferred_currency || 'USD'),
         Number(r.virtual_workspace_balance ?? 0).toFixed(2),
-        realOpt.toFixed(2),
+        realMain.toFixed(2),
         esc(r.ownership_verification_status),
         r.originating_device_id ?? '',
         esc(r.last_login_at || r.created_at),
@@ -1088,12 +1088,27 @@ router.post('/admin/users', requireDb, requireAdmin, requirePermission('users.cr
   const verificationStatus = targetAdminId || targetDeviceId ? 'verified' : 'pending_verification';
 
   try {
+    const initialDemoMain = Number(virtual_workspace_balance);
+    const initialDemoWallets = JSON.stringify({
+      main_usd: initialDemoMain,
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    });
+    const initialRealWallets = JSON.stringify({
+      main_usd: 0,
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    });
     const user = await withTransaction(async (client) => {
       const uRes = await client.query<any>(
         `INSERT INTO users
-          (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id,
+          (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, real_wallets_json, demo_wallets_json, deriv_client_id,
            originating_device_id, assigned_admin_id, ownership_verification_status)
-         VALUES ($1, $2, $3, $4, 'active', TRUE, $5, $6, $7, $8, $9)
+         VALUES ($1, $2, $3, $4, 'active', TRUE, $5, $6, $7, $8, $9, $10, $11)
          RETURNING id, email, full_name, phone, country, role, status, email_verified, preferred_currency,
                    virtual_workspace_balance, deriv_client_id, originating_device_id, assigned_admin_id,
                    ownership_verification_status, created_at`,
@@ -1102,7 +1117,9 @@ router.post('/admin/users', requireDb, requireAdmin, requirePermission('users.cr
           hash,
           full_name,
           ctx.isSuperAdmin ? cleanRole : 'user',
-          Number(virtual_workspace_balance),
+          initialDemoMain,
+          initialRealWallets,
+          initialDemoWallets,
           `TD${randomId(4).toUpperCase()}`,
           targetDeviceId,
           targetAdminId,
@@ -1183,7 +1200,6 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
   const {
     userId,
     accountMode = 'demo',
-    walletBucket = 'options',
     operation = 'credit',
     amount,
     reason = 'Administrative balance adjustment',
@@ -1204,9 +1220,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
   }
 
   const mode = accountMode === 'real' ? 'real' : 'demo';
-  const bucket = ['options', 'mt5_standard', 'mt5_gold', 'exchange_usdt'].includes(String(walletBucket))
-    ? String(walletBucket)
-    : 'options';
+  const bucket = 'main_usd';
   const op = ['credit', 'debit', 'set'].includes(String(operation)) ? String(operation) : 'credit';
 
   try {
@@ -1227,40 +1241,29 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
         }
       };
 
-      const dw = parseWallets(u.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-      const rw = parseWallets(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+      const dw = parseWallets(u.demo_wallets_json, {
+        main_usd: Number(u.virtual_workspace_balance ?? 0),
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      });
+      const rw = parseWallets(u.real_wallets_json, {
+        main_usd: 0,
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      });
 
-      let currentCents = 0;
-      if (mode === 'demo') {
-        currentCents = bucket === 'options' ? toCents(u.virtual_workspace_balance) : toCents(dw[bucket]);
-      } else {
-        currentCents = toCents(rw[bucket]);
-        if (bucket === 'options') {
-          const realDerivAccs = await client.query<{ last_known_balance: number; balance_locked_by_admin: boolean }>(
-            `SELECT last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
-             FROM connected_accounts
-             WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status IN ('active', 'frozen')
-             FOR UPDATE`,
-            [targetUserId]
-          );
-          if (realDerivAccs.rows.length > 0) {
-            const connCents = toCents(
-              realDerivAccs.rows.reduce((sum, a) => sum + Number(a.last_known_balance ?? 0), 0)
-            );
-            const hasUnlocked = realDerivAccs.rows.some((a) => !a.balance_locked_by_admin);
-            if (hasUnlocked || (currentCents === 0 && connCents > 0)) {
-              currentCents = connCents;
-            }
-          }
-        }
-      }
+      const currentCents = mode === 'demo' ? toCents(u.virtual_workspace_balance) : toCents(rw.main_usd);
 
       let nextCents = currentCents;
       if (op === 'credit') {
         nextCents = currentCents + amountCents;
       } else if (op === 'debit') {
         if (currentCents < amountCents) {
-          throw new Error(`Insufficient balance ($${fromCents(currentCents).toFixed(2)}) for debit of $${fromCents(amountCents).toFixed(2)}`);
+          throw new Error(`Insufficient Main USD Wallet balance ($${fromCents(currentCents).toFixed(2)}) for debit of $${fromCents(amountCents).toFixed(2)}`);
         }
         nextCents = currentCents - amountCents;
       } else {
@@ -1271,96 +1274,25 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
       const prevBal = fromCents(currentCents);
       const nextBal = fromCents(nextCents);
 
-      const classifyBucket = (a: { account_type?: string | null; platform?: string | null }) => {
-        const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
-        if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
-        if (s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')) return 'mt5_standard';
-        return 'options';
-      };
-
-      const syncBucketConnectedAccounts = async (isVirt: boolean, targetBucket: string, targetBal: number) => {
-        if (targetBucket !== 'mt5_standard' && targetBucket !== 'mt5_gold') return;
-        const accRes = await client.query<{ id: number; account_type: string; platform: string; last_known_balance: number }>(
-          `SELECT id, account_type, platform, last_known_balance
-           FROM connected_accounts
-           WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
-           ORDER BY id ASC`,
-          [targetUserId, isVirt]
-        );
-        const matching = accRes.rows.filter((a) => classifyBucket(a) === targetBucket);
-        if (matching.length === 0) return;
-        const primary =
-          matching.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
-          matching.find((a) => Number(a.last_known_balance || 0) > 0) ||
-          matching[matching.length - 1];
-        const othersSum = matching
-          .filter((a) => Number(a.id) !== Number(primary.id))
-          .reduce((s, a) => s + Number(a.last_known_balance || 0), 0);
-        if (targetBal >= othersSum) {
-          const nextPrimary = fromCents(toCents(targetBal - othersSum));
-          await client.query(
-            `UPDATE connected_accounts
-             SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-             WHERE id = $2`,
-            [nextPrimary, primary.id]
-          );
-        } else {
-          for (const a of matching) {
-            const val = Number(a.id) === Number(primary.id) ? targetBal : 0;
-            await client.query(
-              `UPDATE connected_accounts
-               SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-               WHERE id = $2`,
-              [val, a.id]
-            );
-          }
-        }
-      };
-
       if (mode === 'demo') {
-        if (bucket === 'options') {
-          await client.query(
-            'UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2',
-            [nextBal, targetUserId]
-          );
-          await client.query(
-            `UPDATE connected_accounts
-             SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-             WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)`,
-            [nextBal, targetUserId]
-          );
-        } else {
-          dw[bucket] = nextBal;
-          await client.query(
-            'UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2',
-            [JSON.stringify(dw), targetUserId]
-          );
-          await syncBucketConnectedAccounts(true, bucket, nextBal);
-        }
+        dw.main_usd = nextBal;
+        await client.query(
+          'UPDATE users SET virtual_workspace_balance = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+          [nextBal, JSON.stringify(dw), targetUserId]
+        );
       } else {
-        rw[bucket] = nextBal;
+        rw.main_usd = nextBal;
         await client.query(
           'UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2',
           [JSON.stringify(rw), targetUserId]
         );
-        if (bucket === 'options') {
-          await client.query(
-            `UPDATE connected_accounts
-             SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-             WHERE user_id = $2 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)`,
-            [nextBal, targetUserId]
-          );
-        } else {
-          await syncBucketConnectedAccounts(false, bucket, nextBal);
-        }
       }
 
       const refId = `${deltaCents >= 0 ? 'DEP' : 'WDR'}-${randomId(4).toUpperCase()}`;
-      const bucketLabel = `${mode.toUpperCase()} ${bucket.replace('_', ' ')}`;
-      const userWalletLabel = bucket === 'options' ? 'USD Wallet' : bucket === 'mt5_standard' ? 'MT5 Standard' : bucket === 'mt5_gold' ? 'MT5 Gold' : 'Deriv Exchange';
+      const bucketLabel = `${mode.toUpperCase()} Main USD Wallet`;
 
       if (deltaCents !== 0) {
-        const txSpec = buildBalanceDeltaTx(deltaCents, userWalletLabel);
+        const txSpec = buildBalanceDeltaTx(deltaCents, 'USD Wallet');
         await client.query(
           `INSERT INTO cashier_transactions
             (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
@@ -1407,7 +1339,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
 
     if (result.mode === 'demo') {
       derivWs.emitUserEvent(targetUserId, 'balance_updated', {
-        virtual_workspace_balance: result.bucket === 'options' ? result.nextBal : undefined,
+        virtual_workspace_balance: result.nextBal,
         demo_wallets: result.dw,
         demoWallets: result.dw,
       });
@@ -1485,8 +1417,6 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
     virtual_workspace_balance !== undefined ||
     demo_wallets !== undefined ||
     real_wallets !== undefined ||
-    exchange_balances !== undefined ||
-    real_exchange_balances !== undefined ||
     status === 'suspended' ||
     status === 'closed' ||
     trading_suspended !== undefined;
@@ -1508,8 +1438,6 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
 
   const parsedDemoWallets = parseWalletPayload(demo_wallets);
   const parsedRealWallets = parseWalletPayload(real_wallets);
-  const parsedExchangeBalances = parseWalletPayload(exchange_balances);
-  const parsedRealExchangeBalances = parseWalletPayload(real_exchange_balances);
 
   let passwordHash: string | null = null;
   if (password && String(password).trim().length >= 6) {
@@ -1521,16 +1449,49 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
     ? String(preferred_currency).trim().toUpperCase().slice(0, 8)
     : null;
   const nextDemoBal =
-    virtual_workspace_balance !== undefined ? fromCents(Math.max(0, toCents(virtual_workspace_balance))) : null;
+    virtual_workspace_balance !== undefined
+      ? fromCents(Math.max(0, toCents(virtual_workspace_balance)))
+      : parsedDemoWallets?.main_usd !== undefined
+        ? fromCents(Math.max(0, toCents(parsedDemoWallets.main_usd)))
+        : null;
+  const nextRealMainBal =
+    parsedRealWallets?.main_usd !== undefined ? fromCents(Math.max(0, toCents(parsedRealWallets.main_usd))) : null;
 
   try {
-    const user = await withTransaction(async (client) => {
+    const out = await withTransaction(async (client) => {
       const existingRes = await client.query<any>(
         'SELECT id, status, virtual_workspace_balance, demo_wallets_json, real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
         [id]
       );
       const existing = existingRes.rows[0];
       if (!existing) throw new Error('User not found');
+
+      // Admin edits ONLY modify Main USD Wallet (main_usd / virtual_workspace_balance).
+      // All trading wallets (options, mt5_standard, mt5_gold, exchange_usdt, connected_accounts) remain untouched.
+      const prevDw = (() => {
+        try {
+          return {
+            main_usd: Number(existing.virtual_workspace_balance ?? 0),
+            options: 0,
+            mt5_standard: 0,
+            mt5_gold: 0,
+            exchange_usdt: 0,
+            ...JSON.parse(existing.demo_wallets_json || '{}'),
+          };
+        } catch {
+          return { main_usd: Number(existing.virtual_workspace_balance ?? 0), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      const prevRw = (() => {
+        try {
+          return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
+        } catch {
+          return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+
+      const mergedDemoWallets = nextDemoBal !== null ? { ...prevDw, main_usd: nextDemoBal } : null;
+      const mergedRealWallets = nextRealMainBal !== null ? { ...prevRw, main_usd: nextRealMainBal } : null;
 
       const updatedRes = await client.query<any>(
         `UPDATE users SET
@@ -1548,10 +1509,8 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
           virtual_workspace_balance = COALESCE($12, virtual_workspace_balance),
           demo_wallets_json = COALESCE($13, demo_wallets_json),
           real_wallets_json = COALESCE($14, real_wallets_json),
-          exchange_balances_json = COALESCE($15, exchange_balances_json),
-          real_exchange_balances_json = COALESCE($16, real_exchange_balances_json),
           updated_at = NOW()
-         WHERE id = $17
+         WHERE id = $15
          RETURNING id, email, full_name, deriv_nickname, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended,
                    locked_until, email_verified, preferred_currency, virtual_workspace_balance, demo_wallets_json,
                    real_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_client_id,
@@ -1571,67 +1530,15 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
           trading_suspended !== undefined ? Boolean(trading_suspended) : null,
           passwordHash,
           nextDemoBal,
-          parsedDemoWallets ? JSON.stringify(parsedDemoWallets) : null,
-          parsedRealWallets ? JSON.stringify(parsedRealWallets) : null,
-          parsedExchangeBalances ? JSON.stringify(parsedExchangeBalances) : null,
-          parsedRealExchangeBalances ? JSON.stringify(parsedRealExchangeBalances) : null,
+          mergedDemoWallets ? JSON.stringify(mergedDemoWallets) : null,
+          mergedRealWallets ? JSON.stringify(mergedRealWallets) : null,
           id,
         ]
       );
       const updated = updatedRes.rows[0];
 
-      const classifyAdminAccBucket = (a: { account_type?: string | null; platform?: string | null }) => {
-        const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
-        if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
-        if (s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')) return 'mt5_standard';
-        return 'options';
-      };
-      const syncCfdWalletToConnected = async (isVirt: boolean, bucket: 'mt5_standard' | 'mt5_gold', targetBal: number) => {
-        const accRes = await client.query<{ id: number; account_type: string; platform: string; last_known_balance: number }>(
-          `SELECT id, account_type, platform, last_known_balance
-           FROM connected_accounts
-           WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
-           ORDER BY id ASC`,
-          [id, isVirt]
-        );
-        const matching = accRes.rows.filter((a) => classifyAdminAccBucket(a) === bucket);
-        if (matching.length === 0) return;
-        const primary =
-          matching.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
-          matching.find((a) => Number(a.last_known_balance || 0) > 0) ||
-          matching[matching.length - 1];
-        const othersSum = matching
-          .filter((a) => Number(a.id) !== Number(primary.id))
-          .reduce((s, a) => s + Number(a.last_known_balance || 0), 0);
-        if (targetBal >= othersSum) {
-          const nextPrimary = fromCents(toCents(targetBal - othersSum));
-          await client.query(
-            `UPDATE connected_accounts
-             SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-             WHERE id = $2`,
-            [nextPrimary, primary.id]
-          );
-        } else {
-          for (const a of matching) {
-            const val = Number(a.id) === Number(primary.id) ? targetBal : 0;
-            await client.query(
-              `UPDATE connected_accounts
-               SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-               WHERE id = $2`,
-              [val, a.id]
-            );
-          }
-        }
-      };
-
       if (nextDemoBal !== null) {
         const deltaCents = toCents(nextDemoBal) - toCents(existing.virtual_workspace_balance);
-        await client.query(
-          `UPDATE connected_accounts
-           SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-           WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)`,
-          [nextDemoBal, id]
-        );
         if (deltaCents !== 0) {
           const txSpec = buildBalanceDeltaTx(deltaCents, 'USD Wallet');
           await client.query(
@@ -1647,151 +1554,15 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
               txSpec.accountTo,
               txSpec.amount,
               txSpec.refId,
-              JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(existing.virtual_workspace_balance)), newBalance: nextDemoBal }),
+              JSON.stringify({ adminUserId: req.user!.id, walletBucket: 'main_usd', previousBalance: fromCents(toCents(existing.virtual_workspace_balance)), newBalance: nextDemoBal }),
             ]
           );
         }
       }
 
-      if (parsedDemoWallets) {
-        const prevDw = (() => {
-          try {
-            return { mt5_standard: 0, mt5_gold: 0, ...JSON.parse(existing.demo_wallets_json || '{}') };
-          } catch {
-            return { mt5_standard: 0, mt5_gold: 0 };
-          }
-        })();
-        if (parsedDemoWallets.mt5_standard !== undefined) {
-          const nextStd = fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_standard)));
-          await syncCfdWalletToConnected(true, 'mt5_standard', nextStd);
-          const stdDeltaCents = toCents(nextStd) - toCents(prevDw.mt5_standard ?? 0);
-          if (stdDeltaCents !== 0) {
-            const txSpec = buildBalanceDeltaTx(stdDeltaCents, 'MT5 Standard');
-            await client.query(
-              `INSERT INTO cashier_transactions
-                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'demo', $9)`,
-              [
-                id,
-                txSpec.txType,
-                txSpec.method,
-                txSpec.provider,
-                txSpec.accountFrom,
-                txSpec.accountTo,
-                txSpec.amount,
-                txSpec.refId,
-                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevDw.mt5_standard ?? 0)), newBalance: nextStd }),
-              ]
-            );
-          }
-        }
-        if (parsedDemoWallets.mt5_gold !== undefined) {
-          const nextGold = fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_gold)));
-          await syncCfdWalletToConnected(true, 'mt5_gold', nextGold);
-          const goldDeltaCents = toCents(nextGold) - toCents(prevDw.mt5_gold ?? 0);
-          if (goldDeltaCents !== 0) {
-            const txSpec = buildBalanceDeltaTx(goldDeltaCents, 'MT5 Gold');
-            await client.query(
-              `INSERT INTO cashier_transactions
-                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'demo', $9)`,
-              [
-                id,
-                txSpec.txType,
-                txSpec.method,
-                txSpec.provider,
-                txSpec.accountFrom,
-                txSpec.accountTo,
-                txSpec.amount,
-                txSpec.refId,
-                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevDw.mt5_gold ?? 0)), newBalance: nextGold }),
-              ]
-            );
-          }
-        }
-      }
-
-      if (parsedRealWallets) {
-        const prevRw = (() => {
-          try {
-            return { options: 0, mt5_standard: 0, mt5_gold: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
-          } catch {
-            return { options: 0, mt5_standard: 0, mt5_gold: 0 };
-          }
-        })();
-        const realDerivAccs = await client.query<{ last_known_balance: number; balance_locked_by_admin: boolean }>(
-          `SELECT last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
-           FROM connected_accounts
-           WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status IN ('active', 'frozen')
-           FOR UPDATE`,
-          [id]
-        );
-        let prevRealOptCents = toCents(prevRw.options ?? 0);
-        if (realDerivAccs.rows.length > 0) {
-          const connCents = toCents(
-            realDerivAccs.rows.reduce((sum, a) => sum + Number(a.last_known_balance ?? 0), 0)
-          );
-          const hasUnlocked = realDerivAccs.rows.some((a) => !a.balance_locked_by_admin);
-          if (hasUnlocked || (prevRealOptCents === 0 && connCents > 0)) {
-            prevRealOptCents = connCents;
-          }
-        }
-        const rwOptions = fromCents(Math.max(0, toCents(parsedRealWallets.options ?? 0)));
-        const realDeltaCents = toCents(rwOptions) - prevRealOptCents;
-        await client.query(
-          `UPDATE connected_accounts
-           SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-           WHERE user_id = $2 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)`,
-          [rwOptions, id]
-        );
-        if (parsedRealWallets.mt5_standard !== undefined) {
-          const nextRealStd = fromCents(Math.max(0, toCents(parsedRealWallets.mt5_standard)));
-          await syncCfdWalletToConnected(false, 'mt5_standard', nextRealStd);
-          const realStdDeltaCents = toCents(nextRealStd) - toCents(prevRw.mt5_standard ?? 0);
-          if (realStdDeltaCents !== 0) {
-            const txSpec = buildBalanceDeltaTx(realStdDeltaCents, 'MT5 Standard');
-            await client.query(
-              `INSERT INTO cashier_transactions
-                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'real', $9)`,
-              [
-                id,
-                txSpec.txType,
-                txSpec.method,
-                txSpec.provider,
-                txSpec.accountFrom,
-                txSpec.accountTo,
-                txSpec.amount,
-                txSpec.refId,
-                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevRw.mt5_standard ?? 0)), newBalance: nextRealStd }),
-              ]
-            );
-          }
-        }
-        if (parsedRealWallets.mt5_gold !== undefined) {
-          const nextRealGold = fromCents(Math.max(0, toCents(parsedRealWallets.mt5_gold)));
-          await syncCfdWalletToConnected(false, 'mt5_gold', nextRealGold);
-          const realGoldDeltaCents = toCents(nextRealGold) - toCents(prevRw.mt5_gold ?? 0);
-          if (realGoldDeltaCents !== 0) {
-            const txSpec = buildBalanceDeltaTx(realGoldDeltaCents, 'MT5 Gold');
-            await client.query(
-              `INSERT INTO cashier_transactions
-                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'real', $9)`,
-              [
-                id,
-                txSpec.txType,
-                txSpec.method,
-                txSpec.provider,
-                txSpec.accountFrom,
-                txSpec.accountTo,
-                txSpec.amount,
-                txSpec.refId,
-                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevRw.mt5_gold ?? 0)), newBalance: nextRealGold }),
-              ]
-            );
-          }
-        }
+      if (nextRealMainBal !== null) {
+        const prevRealMainCents = toCents(prevRw.main_usd ?? 0);
+        const realDeltaCents = toCents(nextRealMainBal) - prevRealMainCents;
         if (realDeltaCents !== 0) {
           const txSpec = buildBalanceDeltaTx(realDeltaCents, 'USD Wallet');
           await client.query(
@@ -1807,7 +1578,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
               txSpec.accountTo,
               txSpec.amount,
               txSpec.refId,
-              JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(prevRealOptCents), newBalance: rwOptions }),
+              JSON.stringify({ adminUserId: req.user!.id, walletBucket: 'main_usd', previousBalance: fromCents(prevRealMainCents), newBalance: nextRealMainBal }),
             ]
           );
         }
@@ -1820,8 +1591,8 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
         [
           req.user!.id,
           String(id),
-          `status:${existing.status}, demo:$${Number(existing.virtual_workspace_balance || 0).toFixed(2)}`,
-          `status:${updated.status}, demo:$${Number(updated.virtual_workspace_balance || 0).toFixed(2)}`,
+          `status:${existing.status}, demo_main:$${Number(existing.virtual_workspace_balance || 0).toFixed(2)}, real_main:$${Number(prevRw.main_usd || 0).toFixed(2)}`,
+          `status:${updated.status}, demo_main:$${Number(updated.virtual_workspace_balance || 0).toFixed(2)}, real_main:$${Number((mergedRealWallets ?? prevRw).main_usd || 0).toFixed(2)}`,
           reqIp(req),
           JSON.stringify({ email: updated.email }),
           ctx.deviceId,
@@ -1830,22 +1601,26 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
         ]
       );
 
-      return updated;
+      return { updated, mergedDemoWallets, mergedRealWallets };
     });
 
     if (nextDemoBal !== null) {
-      derivWs.emitUserEvent(id, 'balance_updated', { virtual_workspace_balance: nextDemoBal });
+      derivWs.emitUserEvent(id, 'balance_updated', {
+        virtual_workspace_balance: nextDemoBal,
+        demo_wallets: out.mergedDemoWallets,
+        demoWallets: out.mergedDemoWallets,
+      });
     }
-    if (parsedDemoWallets) {
-      derivWs.emitUserEvent(id, 'balance_updated', { demo_wallets: parsedDemoWallets, demoWallets: parsedDemoWallets });
-    }
-    if (parsedRealWallets) {
-      derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: parsedRealWallets, realWallets: parsedRealWallets });
+    if (out.mergedRealWallets) {
+      derivWs.emitUserEvent(id, 'balance_updated', {
+        real_wallets: out.mergedRealWallets,
+        realWallets: out.mergedRealWallets,
+      });
     }
     derivWs.emitUserEvent(id, 'account_updated', { userId: id });
     invalidateAuthUserCache(id);
 
-    res.json({ user });
+    res.json({ user: out.updated });
   } catch (err) {
     res.status(err instanceof Error && err.message === 'User not found' ? 404 : 400).json({
       error: err instanceof Error ? err.message : 'Failed to update user',
@@ -1937,27 +1712,29 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, requir
 
   try {
     const out = await withTransaction(async (client) => {
-      const prevRes = await client.query<{ virtual_workspace_balance: number }>(
-        'SELECT virtual_workspace_balance FROM users WHERE id = $1 FOR UPDATE',
+      const prevRes = await client.query<{ virtual_workspace_balance: number; demo_wallets_json: string }>(
+        'SELECT virtual_workspace_balance, demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
         [id]
       );
       if (!prevRes.rows[0]) throw new Error('User not found');
       const prevBal = fromCents(toCents(prevRes.rows[0].virtual_workspace_balance));
       const deltaCents = nextCents - toCents(prevBal);
 
+      const parsedDw = (() => {
+        try {
+          return { main_usd: prevBal, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(prevRes.rows[0].demo_wallets_json || '{}') };
+        } catch {
+          return { main_usd: prevBal, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      parsedDw.main_usd = balance;
+
       const userRes = await client.query<any>(
         `UPDATE users
-         SET virtual_workspace_balance = $1, updated_at = NOW()
-         WHERE id = $2
-         RETURNING id, email, full_name, role, status, virtual_workspace_balance`,
-        [balance, id]
-      );
-
-      await client.query(
-        `UPDATE connected_accounts
-         SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-         WHERE user_id = $2 AND is_virtual = TRUE`,
-        [balance, id]
+         SET virtual_workspace_balance = $1, demo_wallets_json = $2, updated_at = NOW()
+         WHERE id = $3
+         RETURNING id, email, full_name, role, status, virtual_workspace_balance, demo_wallets_json`,
+        [balance, JSON.stringify(parsedDw), id]
       );
 
       if (deltaCents !== 0) {
@@ -1975,7 +1752,7 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, requir
             txSpec.accountTo,
             txSpec.amount,
             txSpec.refId,
-            JSON.stringify({ adminUserId: req.user!.id, previousBalance: prevBal, newBalance: balance }),
+            JSON.stringify({ adminUserId: req.user!.id, walletBucket: 'main_usd', previousBalance: prevBal, newBalance: balance }),
           ]
         );
       }
@@ -1984,15 +1761,19 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, requir
         `INSERT INTO administrator_audit_logs
           (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
          VALUES ($1, 'update_virtual_balance', 'users', $2, $3, $4, $5, 'success', $6)`,
-        [req.user!.id, String(id), `$${prevBal.toFixed(2)}`, `$${balance.toFixed(2)}`, reqIp(req), JSON.stringify({ prevBal, balance })]
+        [req.user!.id, String(id), `$${prevBal.toFixed(2)}`, `$${balance.toFixed(2)}`, reqIp(req), JSON.stringify({ walletBucket: 'main_usd', prevBal, balance })]
       );
 
-      return userRes.rows[0];
+      return { user: userRes.rows[0], demoWallets: parsedDw };
     });
 
-    derivWs.emitUserEvent(id, 'balance_updated', { virtual_workspace_balance: balance });
+    derivWs.emitUserEvent(id, 'balance_updated', {
+      virtual_workspace_balance: balance,
+      demo_wallets: out.demoWallets,
+      demoWallets: out.demoWallets,
+    });
     invalidateAuthUserCache(id);
-    res.json({ ok: true, user: out });
+    res.json({ ok: true, user: out.user });
   } catch (err) {
     res.status(err instanceof Error && err.message === 'User not found' ? 404 : 400).json({
       error: err instanceof Error ? err.message : 'Failed to update demo balance',
@@ -2019,42 +1800,20 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
 
       const parsed = (() => {
         try {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
+          return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
         } catch {
-          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+          return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
         }
       })();
-      const realDerivAccs = await client.query<{ last_known_balance: number; balance_locked_by_admin: boolean }>(
-        `SELECT last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
-         FROM connected_accounts
-         WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status IN ('active', 'frozen')
-         FOR UPDATE`,
-        [id]
-      );
-      let prevCents = toCents(parsed.options);
-      if (realDerivAccs.rows.length > 0) {
-        const connCents = toCents(
-          realDerivAccs.rows.reduce((sum, a) => sum + Number(a.last_known_balance ?? 0), 0)
-        );
-        const hasUnlocked = realDerivAccs.rows.some((a) => !a.balance_locked_by_admin);
-        if (hasUnlocked || (prevCents === 0 && connCents > 0)) {
-          prevCents = connCents;
-        }
-      }
+      const prevCents = toCents(parsed.main_usd ?? 0);
       const prevBal = fromCents(prevCents);
       const deltaCents = nextCents - prevCents;
-      parsed.options = balance;
+      parsed.main_usd = balance;
 
       await client.query('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
         JSON.stringify(parsed),
         id,
       ]);
-      await client.query(
-        `UPDATE connected_accounts
-         SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-         WHERE user_id = $2 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)`,
-        [balance, id]
-      );
 
       if (deltaCents !== 0) {
         const txSpec = buildBalanceDeltaTx(deltaCents, 'USD Wallet');
@@ -2071,7 +1830,7 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
             txSpec.accountTo,
             txSpec.amount,
             txSpec.refId,
-            JSON.stringify({ adminUserId: req.user!.id, previousBalance: prevBal, newBalance: balance }),
+            JSON.stringify({ adminUserId: req.user!.id, walletBucket: 'main_usd', previousBalance: prevBal, newBalance: balance }),
           ]
         );
       }
@@ -2080,19 +1839,12 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
         `INSERT INTO administrator_audit_logs
           (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
          VALUES ($1, 'update_real_balance', 'users', $2, $3, $4, $5, 'success', $6)`,
-        [req.user!.id, String(id), `$${prevBal.toFixed(2)}`, `$${balance.toFixed(2)}`, reqIp(req), JSON.stringify({ prevBal, balance })]
+        [req.user!.id, String(id), `$${prevBal.toFixed(2)}`, `$${balance.toFixed(2)}`, reqIp(req), JSON.stringify({ walletBucket: 'main_usd', prevBal, balance })]
       );
 
       return parsed;
     });
 
-    const syncedAccounts = await query<any>(
-      "SELECT id FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv'",
-      [id]
-    );
-    for (const acc of syncedAccounts) {
-      derivWs.emitUserEvent(id, 'account_updated', { accountId: acc.id, balance: rw.options });
-    }
     derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: rw, realWallets: rw });
     invalidateAuthUserCache(id);
     res.json({ ok: true, real_wallets: rw });
@@ -2313,19 +2065,32 @@ async function syncUserAccountsFromActualDeriv(
     demo_wallets_json: string;
   }>('SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1', [userId]);
 
-  let finalDemoOptions = Number(userRow?.virtual_workspace_balance ?? 10000);
-  const rw = (() => {
-    try {
-      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow?.real_wallets_json || '{}') };
-    } catch {
-      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-    }
-  })();
   const dw = (() => {
     try {
-      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow?.demo_wallets_json || '{}') };
+      return {
+        main_usd: Number(userRow?.virtual_workspace_balance ?? 10000),
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+        ...JSON.parse(userRow?.demo_wallets_json || '{}'),
+      };
     } catch {
-      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      return {
+        main_usd: Number(userRow?.virtual_workspace_balance ?? 10000),
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      };
+    }
+  })();
+  let finalDemoOptions = Number(dw.options ?? 0);
+  const rw = (() => {
+    try {
+      return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow?.real_wallets_json || '{}') };
+    } catch {
+      return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
     }
   })();
 
@@ -2356,10 +2121,7 @@ async function syncUserAccountsFromActualDeriv(
 
     if (demoOpts.length > 0) {
       finalDemoOptions = Number(Number(demoOpts[0].last_known_balance ?? finalDemoOptions).toFixed(2));
-      await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-        finalDemoOptions,
-        userId,
-      ]);
+      dw.options = finalDemoOptions;
     }
     if (demoStd.length > 0) {
       dw.mt5_standard = Number(demoStd.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2));
@@ -2367,7 +2129,7 @@ async function syncUserAccountsFromActualDeriv(
     if (demoGold.length > 0) {
       dw.mt5_gold = Number(demoGold.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2));
     }
-    if (demoStd.length > 0 || demoGold.length > 0) {
+    if (demoOpts.length > 0 || demoStd.length > 0 || demoGold.length > 0) {
       await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
         JSON.stringify(dw),
         userId,
@@ -2377,7 +2139,7 @@ async function syncUserAccountsFromActualDeriv(
 
   invalidateAuthUserCache(userId);
   derivWs.emitUserEvent(userId, 'balance_updated', {
-    virtual_workspace_balance: finalDemoOptions,
+    virtual_workspace_balance: Number(userRow?.virtual_workspace_balance ?? dw.main_usd ?? 10000),
     real_wallets: rw,
     realWallets: rw,
     demo_wallets: dw,
@@ -2599,8 +2361,20 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
 
       if (updated.is_virtual) {
         if (accBucket === 'options') {
-          await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-            balance,
+          const uRes = await client.query<{ demo_wallets_json: string }>(
+            'SELECT demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+            [updated.user_id]
+          );
+          const dw = (() => {
+            try {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(uRes.rows[0]?.demo_wallets_json || '{}') };
+            } catch {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          dw.options = balance;
+          await client.query('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(dw),
             updated.user_id,
           ]);
         } else {
@@ -2822,8 +2596,20 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePe
 
       if (acc.is_virtual) {
         if (accBucket === 'options') {
-          await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-            nextBal,
+          const uRes = await client.query<{ demo_wallets_json: string }>(
+            'SELECT demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+            [acc.user_id]
+          );
+          const dw = (() => {
+            try {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(uRes.rows[0]?.demo_wallets_json || '{}') };
+            } catch {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          dw.options = nextBal;
+          await client.query('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(dw),
             acc.user_id,
           ]);
         } else {
@@ -3117,28 +2903,20 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requi
         currentAcc.user_id,
       ]);
       derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { real_wallets: rw, realWallets: rw });
-    } else if (account.is_virtual) {
-      if (bucket === 'options') {
-        await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-          finalBal,
-          currentAcc.user_id,
-        ]);
-        derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { virtual_workspace_balance: finalBal });
-      } else if (userRow) {
-        const dw = (() => {
-          try {
-            return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow.demo_wallets_json || '{}') };
-          } catch {
-            return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-          }
-        })();
-        dw[bucket] = finalBal;
-        await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-          JSON.stringify(dw),
-          currentAcc.user_id,
-        ]);
-        derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
-      }
+    } else if (account.is_virtual && userRow) {
+      const dw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow.demo_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      dw[bucket] = finalBal;
+      await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(dw),
+        currentAcc.user_id,
+      ]);
+      derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
     }
     invalidateAuthUserCache(currentAcc.user_id);
   }

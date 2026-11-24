@@ -557,7 +557,7 @@ export const ExchangeHub: React.FC = () => {
           </section>
 
           {/* Deriv Wallet Banner */}
-          {canonical.optionsBal > 0 && (
+          {canonical.mainUsdBal > 0 && (
             <div className="px-4 sm:px-8 mt-4">
               <button
                 type="button"

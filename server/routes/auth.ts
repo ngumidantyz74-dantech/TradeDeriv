@@ -44,12 +44,15 @@ export function formatPublicUser(u: any) {
     display_theme: u.display_theme || 'light',
     virtual_workspace_balance: Number(u.virtual_workspace_balance ?? 10000),
     real_wallets: parseWalletJson(u.real_wallets_json, {
+      main_usd: 0,
       options: 0,
       mt5_standard: 0,
       mt5_gold: 0,
       exchange_usdt: 0,
     }),
     demo_wallets: parseWalletJson(u.demo_wallets_json, {
+      main_usd: Number(u.virtual_workspace_balance ?? 10000),
+      options: 0,
       mt5_standard: 0,
       mt5_gold: 0,
       exchange_usdt: 0,
@@ -111,9 +114,24 @@ router.post('/auth/register', requireDb, async (req, res) => {
     const defaultBalance = Number(globalSettings.defaultVirtualBalance ?? 10000);
     const clientCode = `TD${randomId(4).toUpperCase()}`;
 
+    const initialDemoWallets = JSON.stringify({
+      main_usd: defaultBalance,
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    });
+    const initialRealWallets = JSON.stringify({
+      main_usd: 0,
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    });
+
     const newUser = await queryOne<any>(
-      `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, email_verification_token, virtual_workspace_balance, deriv_client_id)
-       VALUES ($1, $2, $3, $4, $5, 'user', 'active', FALSE, $6, $7, $8)
+      `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, email_verification_token, virtual_workspace_balance, real_wallets_json, demo_wallets_json, deriv_client_id)
+       VALUES ($1, $2, $3, $4, $5, 'user', 'active', FALSE, $6, $7, $8, $9, $10)
        RETURNING ${USER_PUBLIC_COLS}`,
       [
         cleanEmail,
@@ -123,6 +141,8 @@ router.post('/auth/register', requireDb, async (req, res) => {
         String(country || 'Kenya'),
         verifyToken,
         defaultBalance,
+        initialRealWallets,
+        initialDemoWallets,
         clientCode,
       ]
     );

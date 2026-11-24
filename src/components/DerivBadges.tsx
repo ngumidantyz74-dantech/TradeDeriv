@@ -366,3 +366,108 @@ export const DxnCandlesGraphic: React.FC = () => (
   </div>
 );
 
+export const BotContractTypeIcon: React.FC<{
+  contractType?: string | null;
+  className?: string;
+}> = ({ contractType, className = 'w-4 h-4 shrink-0' }) => {
+  const u = String(contractType || '').toUpperCase();
+
+  // Matches / Differs: 8-spoke red radial starburst
+  if (u === 'DIGITMATCH' || u === 'DIGITDIFF') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <line x1="10" y1="2.2" x2="10" y2="6.2" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="10" y1="13.8" x2="10" y2="17.8" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="2.2" y1="10" x2="6.2" y2="10" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="13.8" y1="10" x2="17.8" y2="10" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="4.5" y1="4.5" x2="7.3" y2="7.3" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="12.7" y1="12.7" x2="15.5" y2="15.5" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="15.5" y1="4.5" x2="12.7" y2="7.3" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+        <line x1="7.3" y1="12.7" x2="4.5" y2="15.5" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+      </svg>
+    );
+  }
+
+  // Even / Odd: 2x2 rounded grid (top-left & bottom-right dark, top-right & bottom-left red)
+  if (u === 'DIGITEVEN' || u === 'DIGITODD') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.4" className="fill-[#333333] dark:fill-[#CBD5E1]" />
+        <rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.4" fill="#FF444F" />
+        <rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.4" fill="#FF444F" />
+        <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.4" className="fill-[#333333] dark:fill-[#CBD5E1]" />
+      </svg>
+    );
+  }
+
+  // Over / Under: red diagonal up-right arrow directly above a horizontal baseline
+  if (u === 'DIGITOVER' || u === 'DIGITUNDER') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <path
+          d="M4.5 11.5L14.5 4.2M9.5 4.2H14.5V9.2"
+          stroke="#FF444F"
+          strokeWidth="2.1"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+        <line
+          x1="3.5"
+          y1="16"
+          x2="16.5"
+          y2="16"
+          strokeWidth="2"
+          strokeLinecap="round"
+          className="stroke-[#333333] dark:stroke-[#CBD5E1]"
+        />
+      </svg>
+    );
+  }
+
+  // Fall: clean red diagonal down-right arrow (no baseline)
+  if (u === 'PUT' || u === 'PUTE' || u === 'MULTDOWN') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <path
+          d="M4.5 5L15 15M15 9.5V15H9.5"
+          stroke="#FF444F"
+          strokeWidth="2.2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  // Accumulators: bounded growth wave
+  if (u === 'ACCU') {
+    return (
+      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+        <line x1="3" y1="5" x2="17" y2="5" stroke="#00B5C8" strokeWidth="1.9" strokeLinecap="round" />
+        <line x1="3" y1="15" x2="17" y2="15" stroke="#00B5C8" strokeWidth="1.9" strokeLinecap="round" />
+        <path
+          d="M4 11.2L7.5 8.5L11.5 11.8L16 7.8"
+          stroke="#FF444F"
+          strokeWidth="2"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+        />
+      </svg>
+    );
+  }
+
+  // Rise / default CALL: clean red diagonal up-right arrow (no baseline)
+  return (
+    <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+      <path
+        d="M4.5 15L15 5M9.5 5H15V10.5"
+        stroke="#FF444F"
+        strokeWidth="2.2"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+      />
+    </svg>
+  );
+};
+
+

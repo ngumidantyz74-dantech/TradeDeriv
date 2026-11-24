@@ -567,8 +567,8 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE connected_accounts ADD COLUMN IF NOT EXISTS scopes TEXT DEFAULT 'trade account_manage';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS virtual_workspace_balance DOUBLE PRECISION NOT NULL DEFAULT 10000.00;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}';
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS real_wallets_json TEXT NOT NULL DEFAULT '{"options":0,"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}';
-      ALTER TABLE users ADD COLUMN IF NOT EXISTS demo_wallets_json TEXT NOT NULL DEFAULT '{"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS real_wallets_json TEXT NOT NULL DEFAULT '{"main_usd":0,"options":0,"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS demo_wallets_json TEXT NOT NULL DEFAULT '{"main_usd":10000,"options":0,"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS real_exchange_balances_json TEXT NOT NULL DEFAULT '{"USDT":0,"USDC":0,"BTC":0,"ETH":0,"LTC":0,"DOGE":0,"XRP":0,"SOL":0,"ADA":0,"TRX":0}';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_nickname TEXT DEFAULT '';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deriv_client_id TEXT DEFAULT '';
@@ -595,6 +595,21 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS originating_device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS ownership_verification_status TEXT NOT NULL DEFAULT 'pending_verification';
+    `);
+
+    // Backfill separated main_usd / options keys on existing users without overwriting existing wallet buckets
+    await client.query(`
+      UPDATE users
+      SET real_wallets_json = (
+        jsonb_build_object('main_usd', 0, 'options', 0, 'mt5_standard', 0, 'mt5_gold', 0, 'exchange_usdt', 0) || COALESCE(NULLIF(real_wallets_json, '')::jsonb, '{}'::jsonb)
+      )::text
+      WHERE real_wallets_json IS NULL OR real_wallets_json = '' OR NOT (real_wallets_json::jsonb ? 'main_usd');
+
+      UPDATE users
+      SET demo_wallets_json = (
+        jsonb_build_object('main_usd', COALESCE(virtual_workspace_balance, 10000.00), 'options', 0, 'mt5_standard', 0, 'mt5_gold', 0, 'exchange_usdt', 0) || COALESCE(NULLIF(demo_wallets_json, '')::jsonb, '{}'::jsonb)
+      )::text
+      WHERE demo_wallets_json IS NULL OR demo_wallets_json = '' OR NOT (demo_wallets_json::jsonb ? 'main_usd') OR NOT (demo_wallets_json::jsonb ? 'options');
     `);
 
     // Auto-heal misclassified DOT.../VR... demo Deriv accounts from earlier OAuth saves
@@ -1169,12 +1184,57 @@ export async function setSetting(key: string, value: unknown): Promise<void> {
   );
 }
 
+function escapeHtmlText(raw: string): string {
+  return String(raw || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export async function addNotification(userId: number, title: string, message: string, category = 'system'): Promise<void> {
   if (!pool) return;
   await execute(
     'INSERT INTO notifications (user_id, title, message, category) VALUES ($1, $2, $3, $4)',
     [userId, title, message, category]
   );
+
+  // Fire-and-forget Brevo transactional email copy for active users with valid real email
+  void (async () => {
+    try {
+      const user = await queryOne<{ email: string; full_name: string; status: string }>(
+        'SELECT email, full_name, status FROM users WHERE id = $1',
+        [userId]
+      );
+      if (!user || user.status !== 'active') return;
+      const cleanEmail = String(user.email || '').trim();
+      if (!cleanEmail || !cleanEmail.includes('@') || cleanEmail.endsWith('.local')) return;
+
+      const { sendTransactionalEmail } = await import('./email-service.ts');
+      const safeTitle = escapeHtmlText(title);
+      const safeMessage = escapeHtmlText(message);
+      const safeCategory = escapeHtmlText(category.toUpperCase());
+      const safeName = escapeHtmlText(user.full_name || 'Trader');
+
+      await sendTransactionalEmail({
+        to: cleanEmail,
+        toName: user.full_name || cleanEmail,
+        template: 'system_alert',
+        subject: title,
+        htmlContent: `<div style="font-family:Inter,Arial,sans-serif;max-width:560px;margin:0 auto;padding:24px;background:#ffffff;border:1px solid #e2e8f0;border-radius:12px;">
+          <div style="font-size:11px;font-weight:700;letter-spacing:0.08em;color:#FF444F;margin-bottom:8px;">${safeCategory} NOTIFICATION</div>
+          <h2 style="margin:0 0 12px;font-size:18px;color:#0f172a;">${safeTitle}</h2>
+          <p style="margin:0 0 12px;font-size:14px;line-height:1.5;color:#334155;">Hello ${safeName},</p>
+          <p style="margin:0 0 16px;font-size:14px;line-height:1.6;color:#334155;">${safeMessage}</p>
+          <hr style="border:none;border-top:1px solid #e2e8f0;margin:16px 0;" />
+          <p style="margin:0;font-size:12px;color:#64748b;">Automated account notification from your trading workspace.</p>
+        </div>`,
+      });
+    } catch {
+      // Never block app flows if Brevo dispatch fails
+    }
+  })();
 }
 
 export async function logSecurityEvent(

@@ -360,16 +360,16 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   let resolvedConnectedAccountId: number | null = null;
   const userRealWallets = (() => {
     try {
-      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.real_wallets_json || '{}') };
+      return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.real_wallets_json || '{}') };
     } catch {
-      return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      return { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
     }
   })();
   const userDemoWallets = (() => {
     try {
-      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.demo_wallets_json || '{}') };
+      return { main_usd: Number(user.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.demo_wallets_json || '{}') };
     } catch {
-      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      return { main_usd: Number(user.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
     }
   })();
 
@@ -431,7 +431,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     const shownRealBal =
       isRealMode
         ? Number(matchingAcc?.last_known_balance ?? userRealWallets.options ?? 0)
-        : Number(matchingAcc?.last_known_balance ?? user.virtual_workspace_balance ?? 0);
+        : Number(matchingAcc?.last_known_balance ?? userDemoWallets.options ?? 0);
 
     const creds = await getDecryptedAccountToken(targetAccId, input.userId);
     if (!creds) {
@@ -587,8 +587,9 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             [liveBal, creds.account.id]
           );
           if (creds.account.is_virtual) {
-            await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-              liveBal,
+            const dwNext = { ...userDemoWallets, options: liveBal };
+            await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+              JSON.stringify(dwNext),
               input.userId,
             ]);
             invalidateAuthUserCache(input.userId);
@@ -597,7 +598,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
               balance: liveBal,
             });
             derivWs.emitUserEvent(input.userId, 'balance_updated', {
-              virtual_workspace_balance: liveBal,
+              demo_wallets: dwNext,
+              demoWallets: dwNext,
             });
           } else {
             const rwNext = { ...userRealWallets, options: liveBal };
@@ -766,21 +768,43 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       invalidateAuthUserCache(input.userId);
     } else {
       accountMode = 'demo';
-      if (user.virtual_workspace_balance < stake) {
+      const dw = { ...userDemoWallets };
+      const demoAccRow = resolvedConnectedAccountId
+        ? await queryOne<{ id: number; last_known_balance: number; balance_locked_by_admin: boolean }>(
+            'SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1',
+            [resolvedConnectedAccountId]
+          )
+        : await queryOne<{ id: number; last_known_balance: number; balance_locked_by_admin: boolean }>(
+            "SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active' ORDER BY id ASC LIMIT 1",
+            [input.userId]
+          );
+
+      const availDemoOptions =
+        demoAccRow && !demoAccRow.balance_locked_by_admin
+          ? Math.max(Number(demoAccRow.last_known_balance || 0), Number(dw.options || 0))
+          : Number(dw.options || 0);
+      if (availDemoOptions < stake) {
         throw new Error(
-          `Insufficient Demo balance ($${user.virtual_workspace_balance.toFixed(2)} available, $${stake.toFixed(2)} required)`
+          `Insufficient Demo Options balance ($${availDemoOptions.toFixed(2)} available, $${stake.toFixed(2)} required). Transfer funds from USD Wallet to Options first.`
         );
       }
-      const newBal = Number((user.virtual_workspace_balance - stake).toFixed(2));
-      await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-        newBal,
+      const newBal = Number((availDemoOptions - stake).toFixed(2));
+      dw.options = newBal;
+      await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(dw),
         input.userId,
       ]);
-      await execute(
-        "UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)",
-        [newBal, input.userId]
-      ).catch(() => {});
-      derivWs.emitUserEvent(input.userId, 'balance_updated', { virtual_workspace_balance: newBal });
+      if (demoAccRow) {
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+          [newBal, demoAccRow.id]
+        ).catch(() => {});
+        derivWs.emitUserEvent(input.userId, 'account_updated', {
+          accountId: demoAccRow.id,
+          balance: newBal,
+        });
+      }
+      derivWs.emitUserEvent(input.userId, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
       invalidateAuthUserCache(input.userId);
     }
   }
@@ -981,13 +1005,25 @@ async function monitorDerivOpenContract(
             [liveBal, creds.account.id]
           );
           if (creds.account.is_virtual) {
-            await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-              liveBal,
+            const u = await queryOne<{ demo_wallets_json: string; virtual_workspace_balance: number }>(
+              'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
+              [userId]
+            );
+            const dw = (() => {
+              try {
+                return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
+              } catch {
+                return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+              }
+            })();
+            dw.options = liveBal;
+            await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+              JSON.stringify(dw),
               userId,
             ]);
             invalidateAuthUserCache(userId);
             derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
-            derivWs.emitUserEvent(userId, 'balance_updated', { virtual_workspace_balance: liveBal });
+            derivWs.emitUserEvent(userId, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
           } else {
             const u = await queryOne<{ real_wallets_json: string }>(
               'SELECT real_wallets_json FROM users WHERE id = $1',
@@ -1230,24 +1266,40 @@ export async function creditSettledPayoutToUser(
     invalidateAuthUserCache(userId);
     derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
   } else {
-    await execute(
-      'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-      [creditAmount, userId]
-    );
-    const updatedUser = await queryOne<{ virtual_workspace_balance: number }>(
-      'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+    const u = await queryOne<{ demo_wallets_json: string; virtual_workspace_balance: number }>(
+      'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
       [userId]
     );
-    if (updatedUser) {
+    const dw = (() => {
+      try {
+        return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
+      } catch {
+        return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      }
+    })();
+    dw.options = Number((Number(dw.options || 0) + creditAmount).toFixed(2));
+    await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+      JSON.stringify(dw),
+      userId,
+    ]);
+    const demoAcc = connectedAccountId
+      ? await queryOne<{ id: number }>("SELECT id FROM connected_accounts WHERE id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)", [connectedAccountId])
+      : await queryOne<{ id: number }>(
+          "SELECT id FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active' ORDER BY id ASC LIMIT 1",
+          [userId]
+        );
+    if (demoAcc) {
       await execute(
-        "UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)",
-        [updatedUser.virtual_workspace_balance, userId]
+        'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+        [dw.options, demoAcc.id]
       ).catch(() => {});
-      invalidateAuthUserCache(userId);
-      derivWs.emitUserEvent(userId, 'balance_updated', {
-        virtual_workspace_balance: updatedUser.virtual_workspace_balance,
-      });
+      derivWs.emitUserEvent(userId, 'account_updated', { accountId: demoAcc.id, balance: dw.options });
     }
+    invalidateAuthUserCache(userId);
+    derivWs.emitUserEvent(userId, 'balance_updated', {
+      demo_wallets: dw,
+      demoWallets: dw,
+    });
   }
 }
 
@@ -1406,8 +1458,20 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
             [liveBal, creds.account.id]
           );
           if (creds.account.is_virtual) {
-            await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-              liveBal,
+            const u = await queryOne<{ demo_wallets_json: string; virtual_workspace_balance: number }>(
+              'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
+              [order.user_id]
+            );
+            const dw = (() => {
+              try {
+                return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
+              } catch {
+                return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+              }
+            })();
+            dw.options = liveBal;
+            await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+              JSON.stringify(dw),
               order.user_id,
             ]);
             invalidateAuthUserCache(order.user_id);
@@ -1416,7 +1480,8 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
               balance: liveBal,
             });
             derivWs.emitUserEvent(order.user_id, 'balance_updated', {
-              virtual_workspace_balance: liveBal,
+              demo_wallets: dw,
+              demoWallets: dw,
             });
           } else {
             const u = await queryOne<{ real_wallets_json: string }>(

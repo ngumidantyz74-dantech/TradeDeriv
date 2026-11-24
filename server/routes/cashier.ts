@@ -1,13 +1,13 @@
 import { Router } from 'express';
 import { pool, query, queryOne, execute, requireDb, addNotification } from '../db.ts';
 import { randomId, decryptToken } from '../crypto.ts';
-import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
+import { requireAuth, invalidateAuthUserCache, type AuthRequest } from '../middleware/auth.ts';
 import { derivWs, derivRestRequest } from '../deriv-client.ts';
 
 const router = Router();
 
 type ModeKey = 'real' | 'demo';
-type WalletBucket = 'options' | 'mt5_standard' | 'mt5_gold' | 'exchange_usdt';
+type WalletBucket = 'main_usd' | 'options' | 'mt5_standard' | 'mt5_gold' | 'exchange_usdt';
 
 function parseJsonObj<T>(raw: string | null | undefined, fallback: T): T {
   try {
@@ -19,25 +19,32 @@ function parseJsonObj<T>(raw: string | null | undefined, fallback: T): T {
 
 function normalizeWalletBucket(label: string): WalletBucket {
   const s = String(label || '').trim().toLowerCase();
+  if (s === 'main_usd' || s.includes('usd wallet') || s.includes('us dollar') || s === 'main wallet' || s === 'wallet') {
+    return 'main_usd';
+  }
   if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
   if (s.includes('standard') || s.includes('mt5') || s.includes('zero') || s.includes('fin') || s.includes('cfd')) {
     return 'mt5_standard';
   }
   if (s.includes('exchange') || s.includes('dxn') || s.includes('usdt')) return 'exchange_usdt';
-  return 'options';
+  if (s.includes('option') || s === 'options' || s.startsWith('cr') || s.startsWith('vr')) return 'options';
+  return 'main_usd';
 }
 
 function bucketDisplayName(bucket: WalletBucket): string {
   switch (bucket) {
+    case 'main_usd':
+      return 'USD Wallet';
+    case 'options':
+      return 'Options';
     case 'mt5_standard':
       return 'MT5 Standard';
     case 'mt5_gold':
       return 'MT5 Gold';
     case 'exchange_usdt':
       return 'Deriv Exchange';
-    case 'options':
     default:
-      return 'USD Wallet / Options';
+      return 'USD Wallet';
   }
 }
 
@@ -72,12 +79,15 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
       );
 
   const realWallets = parseJsonObj(user?.real_wallets_json, {
+    main_usd: 0,
     options: 0,
     mt5_standard: 0,
     mt5_gold: 0,
     exchange_usdt: 0,
   });
   const demoWallets = parseJsonObj(user?.demo_wallets_json, {
+    main_usd: Number(user?.virtual_workspace_balance ?? 0),
+    options: 0,
     mt5_standard: 0,
     mt5_gold: 0,
     exchange_usdt: 0,
@@ -88,14 +98,16 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
   const realAccounts = accounts.filter((a) => !a.is_virtual);
   const demoAccounts = accounts.filter((a) => a.is_virtual);
 
-  const realOptionsBal = realAccounts.some((a) => a.platform === 'deriv')
-    ? realAccounts
-        .filter((a) => a.platform === 'deriv')
-        .reduce((acc, a) => acc + Number(a.last_known_balance ?? a.balance ?? 0), 0)
-    : Number(realWallets.options || 0);
+  const realMainUsd = Number(Number(realWallets.main_usd || 0).toFixed(2));
+  const realOptionsAccs = realAccounts.filter((a) => a.platform === 'deriv' || !a.platform);
+  const realOptionsBal =
+    realOptionsAccs.length > 0 && !realOptionsAccs.some((a) => Boolean(a.balance_locked_by_admin))
+      ? Number(realOptionsAccs.reduce((acc, a) => acc + Number(a.last_known_balance ?? a.balance ?? 0), 0).toFixed(2))
+      : Number(realWallets.options || 0);
 
   const totalRealUsd = Number(
     (
+      realMainUsd +
       realOptionsBal +
       Number(realWallets.mt5_standard || 0) +
       Number(realWallets.mt5_gold || 0) +
@@ -103,9 +115,16 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
     ).toFixed(2)
   );
 
-  const demoOptionsBal = Number(user?.virtual_workspace_balance ?? 0);
+  const demoMainUsd = Number(Number(user?.virtual_workspace_balance ?? demoWallets.main_usd ?? 0).toFixed(2));
+  const demoOptionsAccs = demoAccounts.filter((a) => a.platform === 'deriv' || !a.platform);
+  const demoOptionsBal =
+    demoOptionsAccs.length > 0 && !demoOptionsAccs.some((a) => Boolean(a.balance_locked_by_admin))
+      ? Number(demoOptionsAccs.reduce((acc, a) => acc + Number(a.last_known_balance ?? a.balance ?? 0), 0).toFixed(2))
+      : Number(demoWallets.options || 0);
+
   const totalDemoUsd = Number(
     (
+      demoMainUsd +
       demoOptionsBal +
       Number(demoWallets.mt5_standard || 0) +
       Number(demoWallets.mt5_gold || 0) +
@@ -114,9 +133,9 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
   );
 
   res.json({
-    virtualWorkspaceBalance: demoOptionsBal,
-    realWallets: { ...realWallets, options: realOptionsBal },
-    demoWallets: { ...demoWallets, options: demoOptionsBal },
+    virtualWorkspaceBalance: demoMainUsd,
+    realWallets: { ...realWallets, main_usd: realMainUsd, options: realOptionsBal },
+    demoWallets: { ...demoWallets, main_usd: demoMainUsd, options: demoOptionsBal },
     totalRealUsd,
     totalDemoUsd,
     exchangeBalances,
@@ -255,94 +274,96 @@ router.post('/cashier/deposit', requireDb, requireAuth, async (req: AuthRequest,
     }
   }
 
-  const user = await queryOne<any>(
-    'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json, exchange_balances_json, real_exchange_balances_json FROM users WHERE id = $1',
-    [req.user!.id]
-  );
-
-  const upperCur = String(currency).toUpperCase();
-  const isCryptoStable = upperCur === 'USDT' || upperCur === 'USDC';
-
-  if (mode === 'real') {
-    const rw = parseJsonObj(user?.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-    const rex = parseJsonObj(user?.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
-    if (isCryptoStable) {
-      rex[upperCur] = Number(((rex[upperCur] || 0) + amt).toFixed(6));
-      rw.exchange_usdt = Number(((rw.exchange_usdt || 0) + (upperCur === 'USDT' ? amt : 0)).toFixed(2));
-      await execute(
-        'UPDATE users SET real_exchange_balances_json = $1, real_wallets_json = $2, updated_at = NOW() WHERE id = $3',
-        [JSON.stringify(rex), JSON.stringify(rw), req.user!.id]
-      );
-    } else {
-      rw.options = Number((Number(rw.options || 0) + amt).toFixed(2));
-      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-        JSON.stringify(rw),
-        req.user!.id,
-      ]);
-      await execute(
-        `UPDATE connected_accounts
-         SET balance = ROUND((balance + $1)::numeric, 2)::double precision,
-             last_known_balance = ROUND((last_known_balance + $1)::numeric, 2)::double precision,
-             updated_at = NOW()
-         WHERE id = (
-           SELECT id FROM connected_accounts
-           WHERE user_id = $2 AND is_virtual = FALSE AND platform = 'deriv' AND status = 'active'
-           ORDER BY id ASC LIMIT 1
-         )`,
-        [amt, req.user!.id]
-      );
-    }
-  } else {
-    const dw = parseJsonObj(user?.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-    const dex = parseJsonObj(user?.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
-    if (isCryptoStable) {
-      dex[upperCur] = Number(((dex[upperCur] || 0) + amt).toFixed(6));
-      dw.exchange_usdt = Number(((dw.exchange_usdt || 0) + (upperCur === 'USDT' ? amt : 0)).toFixed(2));
-      await execute(
-        'UPDATE users SET exchange_balances_json = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3',
-        [JSON.stringify(dex), JSON.stringify(dw), req.user!.id]
-      );
-    } else {
-      await execute(
-        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-        [amt, req.user!.id]
-      );
-    }
+  if (!pool) {
+    res.status(503).json({ error: 'Database unavailable' });
+    return;
   }
 
   const ref = `DEP-${randomId(4).toUpperCase()}`;
-  const tx = await queryOne(
-    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-     VALUES ($1, 'deposit', $2, $3, $4, $5, $6, $7, 'completed', $8, $9)
-     RETURNING ${CASHIER_TX_COLS}`,
-    [
-      req.user!.id,
-      method,
-      provider,
-      isCryptoStable ? 'Deriv Exchange' : 'USD Wallet',
-      amt,
-      currency,
-      ref,
-      mode,
-      JSON.stringify({ cashierUrl, accountMode: mode }),
-    ]
-  );
+  const client = await pool.connect();
+  let tx: any;
+  let freshUser: any;
+  try {
+    await client.query('BEGIN');
+    const uRes = await client.query<any>(
+      'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+      [req.user!.id]
+    );
+    const user = uRes.rows[0];
+    if (!user) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
 
-  const freshUser = await queryOne<any>(
-    'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
-    [req.user!.id]
-  );
+    if (mode === 'real') {
+      const rw = parseJsonObj(user.real_wallets_json, {
+        main_usd: 0,
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      });
+      rw.main_usd = Number((Number(rw.main_usd || 0) + amt).toFixed(2));
+      const updated = await client.query<any>(
+        'UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [JSON.stringify(rw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    } else {
+      const nextMain = Number((Number(user.virtual_workspace_balance || 0) + amt).toFixed(2));
+      const dw = parseJsonObj(user.demo_wallets_json, {
+        main_usd: nextMain,
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      });
+      dw.main_usd = nextMain;
+      const updated = await client.query<any>(
+        'UPDATE users SET virtual_workspace_balance = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [nextMain, JSON.stringify(dw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    }
+
+    const txRes = await client.query(
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+       VALUES ($1, 'deposit', $2, $3, 'USD Wallet', $4, $5, $6, 'completed', $7, $8)
+       RETURNING ${CASHIER_TX_COLS}`,
+      [
+        req.user!.id,
+        method,
+        provider,
+        amt,
+        currency,
+        ref,
+        mode,
+        JSON.stringify({ cashierUrl, accountMode: mode, walletBucket: 'main_usd' }),
+      ]
+    );
+    tx = txRes.rows[0];
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Deposit failed' });
+    return;
+  } finally {
+    client.release();
+  }
+
+  invalidateAuthUserCache(req.user!.id);
   derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
     mode,
     amount: amt,
     virtual_workspace_balance: freshUser?.virtual_workspace_balance,
-    real_wallets: parseJsonObj(freshUser?.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
-    demo_wallets: parseJsonObj(freshUser?.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+    real_wallets: parseJsonObj(freshUser?.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+    demo_wallets: parseJsonObj(freshUser?.demo_wallets_json, { main_usd: Number(freshUser?.virtual_workspace_balance ?? 0), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
   });
   await addNotification(
     req.user!.id,
     'Deposit Processed',
-    `[${mode.toUpperCase()}] ${amt.toFixed(2)} ${currency} via ${method} (Ref: ${ref})`,
+    `[${mode.toUpperCase()}] ${amt.toFixed(2)} ${currency} credited to Main USD Wallet via ${method} (Ref: ${ref})`,
     'cashier'
   );
   res.json({ transaction: tx, cashierUrl });
@@ -388,43 +409,9 @@ router.post('/cashier/withdraw', requireDb, requireAuth, async (req: AuthRequest
     return;
   }
 
-  const user = await queryOne<any>('SELECT virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1', [
-    req.user!.id,
-  ]);
-
-  if (mode === 'real') {
-    const realAcc = await queryOne<any>(
-      "SELECT id, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv' AND status = 'active' ORDER BY id ASC LIMIT 1",
-      [req.user!.id]
-    );
-    const rw = parseJsonObj(user?.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-    const avail = realAcc ? Number(realAcc.last_known_balance || 0) : Number(rw.options || 0);
-    if (avail < amt) {
-      res.status(400).json({ error: `Insufficient Real USD Wallet balance ($${avail.toFixed(2)} available)` });
-      return;
-    }
-    const nextAvail = Number((avail - amt).toFixed(2));
-    rw.options = nextAvail;
-    await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-      JSON.stringify(rw),
-      req.user!.id,
-    ]);
-    if (realAcc) {
-      await execute('UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2', [
-        nextAvail,
-        realAcc.id,
-      ]);
-    }
-  } else {
-    const avail = Number(user?.virtual_workspace_balance || 0);
-    if (avail < amt) {
-      res.status(400).json({ error: `Insufficient Demo USD Wallet balance ($${avail.toFixed(2)} available)` });
-      return;
-    }
-    await execute(
-      'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance - $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-      [amt, req.user!.id]
-    );
+  if (!pool) {
+    res.status(503).json({ error: 'Database unavailable' });
+    return;
   }
 
   const token = await getUserAuthToken(req.user!.id);
@@ -443,18 +430,97 @@ router.post('/cashier/withdraw', requireDb, requireAuth, async (req: AuthRequest
   }
 
   const ref = `WDR-${randomId(4).toUpperCase()}`;
-  const tx = await queryOne(
-    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, amount, currency, reference_id, status, account_mode, metadata_json)
-     VALUES ($1, 'withdrawal', $2, 'deriv', 'USD Wallet', $3, $4, $5, 'completed', $6, $7)
-     RETURNING ${CASHIER_TX_COLS}`,
-    [req.user!.id, method, amt, currency, ref, mode, JSON.stringify({ cashierUrl, accountMode: mode })]
-  );
+  const client = await pool.connect();
+  let tx: any;
+  let freshUser: any;
+  try {
+    await client.query('BEGIN');
+    const uRes = await client.query<any>(
+      'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+      [req.user!.id]
+    );
+    const user = uRes.rows[0];
+    if (!user) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
 
-  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { mode, amount: -amt });
+    if (mode === 'real') {
+      const rw = parseJsonObj(user.real_wallets_json, {
+        main_usd: 0,
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      });
+      const avail = Number(rw.main_usd || 0);
+      if (avail + 1e-9 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Insufficient Real Main USD Wallet balance ($${avail.toFixed(2)} available). Transfer funds from Options, CFDs, or Exchange to USD Wallet first.`,
+        });
+        return;
+      }
+      rw.main_usd = Number(Math.max(0, avail - amt).toFixed(2));
+      const updated = await client.query<any>(
+        'UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [JSON.stringify(rw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    } else {
+      const avail = Number(user.virtual_workspace_balance || 0);
+      if (avail + 1e-9 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Insufficient Demo Main USD Wallet balance ($${avail.toFixed(2)} available). Transfer funds from Options, CFDs, or Exchange to USD Wallet first.`,
+        });
+        return;
+      }
+      const nextMain = Number(Math.max(0, avail - amt).toFixed(2));
+      const dw = parseJsonObj(user.demo_wallets_json, {
+        main_usd: nextMain,
+        options: 0,
+        mt5_standard: 0,
+        mt5_gold: 0,
+        exchange_usdt: 0,
+      });
+      dw.main_usd = nextMain;
+      const updated = await client.query<any>(
+        'UPDATE users SET virtual_workspace_balance = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [nextMain, JSON.stringify(dw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    }
+
+    const txRes = await client.query(
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, amount, currency, reference_id, status, account_mode, metadata_json)
+       VALUES ($1, 'withdrawal', $2, 'deriv', 'USD Wallet', $3, $4, $5, 'completed', $6, $7)
+       RETURNING ${CASHIER_TX_COLS}`,
+      [req.user!.id, method, amt, currency, ref, mode, JSON.stringify({ cashierUrl, accountMode: mode, walletBucket: 'main_usd' })]
+    );
+    tx = txRes.rows[0];
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Withdrawal failed' });
+    return;
+  } finally {
+    client.release();
+  }
+
+  invalidateAuthUserCache(req.user!.id);
+  derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
+    mode,
+    amount: -amt,
+    virtual_workspace_balance: freshUser?.virtual_workspace_balance,
+    real_wallets: parseJsonObj(freshUser?.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+    demo_wallets: parseJsonObj(freshUser?.demo_wallets_json, { main_usd: Number(freshUser?.virtual_workspace_balance ?? 0), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+  });
   await addNotification(
     req.user!.id,
     'Withdrawal Submitted',
-    `[${mode.toUpperCase()}] ${amt.toFixed(2)} ${currency} via ${method} (Ref: ${ref})`,
+    `[${mode.toUpperCase()}] ${amt.toFixed(2)} ${currency} withdrawn from Main USD Wallet via ${method} (Ref: ${ref})`,
     'cashier'
   );
   res.json({ transaction: tx, cashierUrl });
@@ -565,11 +631,12 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     };
 
     const findMatchingConnectedAccount = (bucket: WalletBucket, preferredId?: number | null, labelHint?: string) => {
+      if (bucket === 'main_usd' || bucket === 'exchange_usdt') return null;
       if (preferredId) {
         const byId = modeAccounts.find((a) => Number(a.id) === preferredId);
-        if (byId) return byId;
+        if (byId && accBucketOf(byId) === bucket) return byId;
       }
-      if (bucket === 'options') return modeAccounts.find((a) => a.platform === 'deriv' || !a.platform);
+      if (bucket === 'options') return modeAccounts.find((a) => a.platform === 'deriv' || !a.platform) || null;
       const candidates = modeAccounts.filter((a) => accBucketOf(a) === bucket);
       if (candidates.length === 0) return null;
       const hint = String(labelHint || '').toLowerCase();
@@ -587,8 +654,20 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
       );
     };
 
-    const rw = parseJsonObj(user.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-    const dw = parseJsonObj(user.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+    const rw = parseJsonObj(user.real_wallets_json, {
+      main_usd: 0,
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    });
+    const dw = parseJsonObj(user.demo_wallets_json, {
+      main_usd: Number(user.virtual_workspace_balance ?? 0),
+      options: 0,
+      mt5_standard: 0,
+      mt5_gold: 0,
+      exchange_usdt: 0,
+    });
     const dex = parseJsonObj(user.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
     const rex = parseJsonObj(user.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
 
@@ -597,6 +676,7 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
 
     const getBucketBalance = (bucket: WalletBucket, matchedAcc?: any): number => {
       if (mode === 'real') {
+        if (bucket === 'main_usd') return Number(rw.main_usd ?? 0);
         if (bucket === 'options') {
           return matchedAcc ? Number(matchedAcc.last_known_balance ?? 0) : Number(rw.options ?? 0);
         }
@@ -606,7 +686,10 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
         }
         return Number(rw[bucket] ?? 0);
       } else {
-        if (bucket === 'options') return Number(user.virtual_workspace_balance ?? 0);
+        if (bucket === 'main_usd') return Number(user.virtual_workspace_balance ?? dw.main_usd ?? 0);
+        if (bucket === 'options') {
+          return matchedAcc ? Number(matchedAcc.last_known_balance ?? 0) : Number(dw.options ?? 0);
+        }
         if (bucket === 'exchange_usdt') return Number(dex.USDT ?? dw.exchange_usdt ?? 0);
         if (matchedAcc && (Number(matchedAcc.last_known_balance ?? 0) > 0 || isDistinctAccountIdTransfer || Number(dw[bucket] ?? 0) === 0)) {
           return Number(matchedAcc.last_known_balance ?? 0);
@@ -629,6 +712,10 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
 
     const applyBucketUpdate = async (bucket: WalletBucket, nextVal: number, matchedAcc: any) => {
       if (mode === 'real') {
+        if (bucket === 'main_usd') {
+          rw.main_usd = nextVal;
+          return;
+        }
         if (matchedAcc) {
           await client.query(
             'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
@@ -647,33 +734,27 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
           rex.USDT = nextVal;
         }
       } else {
-        if (bucket === 'options') {
+        if (bucket === 'main_usd') {
           user.virtual_workspace_balance = nextVal;
-          if (matchedAcc) {
-            await client.query(
-              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-              [nextVal, matchedAcc.id]
-            );
-            matchedAcc.last_known_balance = nextVal;
-          }
+          dw.main_usd = nextVal;
+          return;
+        }
+        if (matchedAcc) {
+          await client.query(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+            [nextVal, matchedAcc.id]
+          );
+          matchedAcc.last_known_balance = nextVal;
+          const bucketAccs = modeAccounts.filter((a) => accBucketOf(a) === bucket);
+          dw[bucket] =
+            bucketAccs.length > 0 && (bucket === 'mt5_standard' || bucket === 'mt5_gold')
+              ? Number(bucketAccs.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2))
+              : nextVal;
         } else {
-          if (matchedAcc) {
-            await client.query(
-              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-              [nextVal, matchedAcc.id]
-            );
-            matchedAcc.last_known_balance = nextVal;
-            const bucketAccs = modeAccounts.filter((a) => accBucketOf(a) === bucket);
-            dw[bucket] =
-              bucketAccs.length > 0 && (bucket === 'mt5_standard' || bucket === 'mt5_gold')
-                ? Number(bucketAccs.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2))
-                : nextVal;
-          } else {
-            dw[bucket] = nextVal;
-          }
-          if (bucket === 'exchange_usdt') {
-            dex.USDT = nextVal;
-          }
+          dw[bucket] = nextVal;
+        }
+        if (bucket === 'exchange_usdt') {
+          dex.USDT = nextVal;
         }
       }
     };
@@ -702,6 +783,7 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     );
 
     await client.query('COMMIT');
+    invalidateAuthUserCache(req.user!.id);
 
     derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
       mode,
@@ -725,8 +807,9 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     res.json({
       transaction: txRes.rows[0],
       accountMode: mode,
+      virtualWorkspaceBalance: user.virtual_workspace_balance,
       realWallets: rw,
-      demoWallets: { ...dw, options: user.virtual_workspace_balance },
+      demoWallets: dw,
     });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
@@ -798,42 +881,77 @@ router.post('/cashier/payment-agents/withdraw', requireDb, requireAuth, async (r
     return;
   }
 
-  const user = await queryOne<any>('SELECT virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1', [
-    req.user!.id,
-  ]);
-  if (mode === 'real') {
-    const rw = parseJsonObj(user?.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-    const realAcc = await queryOne<any>(
-      "SELECT id, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv' AND status = 'active' ORDER BY id ASC LIMIT 1",
+  if (!pool) {
+    res.status(503).json({ error: 'Database unavailable' });
+    return;
+  }
+
+  const ref = `PAW-${randomId(4).toUpperCase()}`;
+  const client = await pool.connect();
+  let tx: any;
+  let freshUser: any;
+  try {
+    await client.query('BEGIN');
+    const uRes = await client.query<any>(
+      'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
       [req.user!.id]
     );
-    const avail = realAcc ? Number(realAcc.last_known_balance || 0) : Number(rw.options || 0);
-    if (avail < amt) {
-      res.status(400).json({ error: `Insufficient Real USD Wallet balance ($${avail.toFixed(2)})` });
+    const user = uRes.rows[0];
+    if (!user) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'User not found' });
       return;
     }
-    const nextVal = Number((avail - amt).toFixed(2));
-    rw.options = nextVal;
-    await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-      JSON.stringify(rw),
-      req.user!.id,
-    ]);
-    if (realAcc) {
-      await execute('UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2', [
-        nextVal,
-        realAcc.id,
-      ]);
+
+    if (mode === 'real') {
+      const rw = parseJsonObj(user.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+      const avail = Number(rw.main_usd || 0);
+      if (avail + 1e-9 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Insufficient Real Main USD Wallet balance ($${avail.toFixed(2)} available). Transfer funds from Options, CFDs, or Exchange to USD Wallet first.`,
+        });
+        return;
+      }
+      rw.main_usd = Number(Math.max(0, avail - amt).toFixed(2));
+      const updated = await client.query<any>(
+        'UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [JSON.stringify(rw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    } else {
+      const avail = Number(user.virtual_workspace_balance || 0);
+      if (avail + 1e-9 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Insufficient Demo Main USD Wallet balance ($${avail.toFixed(2)} available). Transfer funds from Options, CFDs, or Exchange to USD Wallet first.`,
+        });
+        return;
+      }
+      const nextMain = Number(Math.max(0, avail - amt).toFixed(2));
+      const dw = parseJsonObj(user.demo_wallets_json, { main_usd: nextMain, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+      dw.main_usd = nextMain;
+      const updated = await client.query<any>(
+        'UPDATE users SET virtual_workspace_balance = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [nextMain, JSON.stringify(dw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
     }
-  } else {
-    const avail = Number(user?.virtual_workspace_balance || 0);
-    if (avail < amt) {
-      res.status(400).json({ error: `Insufficient Demo USD Wallet balance ($${avail.toFixed(2)})` });
-      return;
-    }
-    await execute(
-      'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance - $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-      [amt, req.user!.id]
+
+    const txRes = await client.query(
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
+       VALUES ($1, 'withdrawal', 'Payment Agent (M-Pesa)', 'paymentagent', 'USD Wallet', $2, $3, $4, $5, 'completed', $6)
+       RETURNING ${CASHIER_TX_COLS}`,
+      [req.user!.id, paymentagent_loginid, amt, currency, ref, mode]
     );
+    tx = txRes.rows[0];
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Payment agent withdrawal failed' });
+    return;
+  } finally {
+    client.release();
   }
 
   const token = await getUserAuthToken(req.user!.id);
@@ -856,15 +974,14 @@ router.post('/cashier/payment-agents/withdraw', requireDb, requireAuth, async (r
     }
   }
 
-  const ref = `PAW-${randomId(4).toUpperCase()}`;
-  const tx = await queryOne(
-    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
-     VALUES ($1, 'withdrawal', 'Payment Agent (M-Pesa)', 'paymentagent', 'USD Wallet', $2, $3, $4, $5, 'completed', $6)
-     RETURNING ${CASHIER_TX_COLS}`,
-    [req.user!.id, paymentagent_loginid, amt, currency, ref, mode]
-  );
-
-  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { mode, amount: -amt });
+  invalidateAuthUserCache(req.user!.id);
+  derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
+    mode,
+    amount: -amt,
+    virtual_workspace_balance: freshUser?.virtual_workspace_balance,
+    real_wallets: parseJsonObj(freshUser?.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+    demo_wallets: parseJsonObj(freshUser?.demo_wallets_json, { main_usd: Number(freshUser?.virtual_workspace_balance ?? 0), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+  });
   res.json({ transaction: tx });
 });
 
@@ -895,37 +1012,98 @@ router.post('/cashier/p2p/orders', requireDb, requireAuth, async (req: AuthReque
   const { advert_id, amount, type = 'buy', accountMode = 'demo' } = req.body || {};
   const mode: ModeKey = accountMode === 'real' ? 'real' : 'demo';
   const amt = Number(amount);
+  const p2pType = String(type).toLowerCase() === 'sell' ? 'sell' : 'buy';
   if (!advert_id || Number.isNaN(amt) || amt <= 0) {
     res.status(400).json({ error: 'Advert ID and positive amount required' });
     return;
   }
 
-  if (type === 'buy') {
-    if (mode === 'real') {
-      const user = await queryOne<any>('SELECT real_wallets_json FROM users WHERE id = $1', [req.user!.id]);
-      const rw = parseJsonObj(user?.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-      rw.options = Number((Number(rw.options || 0) + amt).toFixed(2));
-      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-        JSON.stringify(rw),
-        req.user!.id,
-      ]);
-    } else {
-      await execute(
-        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance + $1)::numeric, 2)::double precision WHERE id = $2',
-        [amt, req.user!.id]
-      );
-    }
+  if (!pool) {
+    res.status(503).json({ error: 'Database unavailable' });
+    return;
   }
 
   const ref = `P2P-${randomId(4).toUpperCase()}`;
-  const order = await queryOne(
-    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-     VALUES ($1, 'p2p', $2, 'deriv_p2p', $3, $4, 'USD', $5, 'completed', $6, $7)
-     RETURNING ${CASHIER_TX_COLS}`,
-    [req.user!.id, `P2P ${String(type).toUpperCase()}`, String(advert_id), amt, ref, mode, JSON.stringify({ advert_id, type, accountMode: mode })]
-  );
+  const client = await pool.connect();
+  let order: any;
+  let freshUser: any;
+  try {
+    await client.query('BEGIN');
+    const uRes = await client.query<any>(
+      'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+      [req.user!.id]
+    );
+    const user = uRes.rows[0];
+    if (!user) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
 
-  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { mode, amount: type === 'buy' ? amt : 0 });
+    if (mode === 'real') {
+      const rw = parseJsonObj(user.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+      const avail = Number(rw.main_usd || 0);
+      if (p2pType === 'sell' && avail + 1e-9 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({ error: `Insufficient Real Main USD Wallet balance ($${avail.toFixed(2)} available). Transfer funds to USD Wallet first.` });
+        return;
+      }
+      rw.main_usd = Number((p2pType === 'buy' ? avail + amt : Math.max(0, avail - amt)).toFixed(2));
+      const updated = await client.query<any>(
+        'UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [JSON.stringify(rw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    } else {
+      const avail = Number(user.virtual_workspace_balance || 0);
+      if (p2pType === 'sell' && avail + 1e-9 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({ error: `Insufficient Demo Main USD Wallet balance ($${avail.toFixed(2)} available). Transfer funds to USD Wallet first.` });
+        return;
+      }
+      const nextMain = Number((p2pType === 'buy' ? avail + amt : Math.max(0, avail - amt)).toFixed(2));
+      const dw = parseJsonObj(user.demo_wallets_json, { main_usd: nextMain, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+      dw.main_usd = nextMain;
+      const updated = await client.query<any>(
+        'UPDATE users SET virtual_workspace_balance = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3 RETURNING virtual_workspace_balance, real_wallets_json, demo_wallets_json',
+        [nextMain, JSON.stringify(dw), req.user!.id]
+      );
+      freshUser = updated.rows[0];
+    }
+
+    const txRes = await client.query(
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+       VALUES ($1, 'p2p', $2, 'deriv_p2p', $3, $4, $5, 'USD', $6, 'completed', $7, $8)
+       RETURNING ${CASHIER_TX_COLS}`,
+      [
+        req.user!.id,
+        `P2P ${p2pType.toUpperCase()}`,
+        p2pType === 'sell' ? 'USD Wallet' : String(advert_id),
+        p2pType === 'buy' ? 'USD Wallet' : String(advert_id),
+        amt,
+        ref,
+        mode,
+        JSON.stringify({ advert_id, type: p2pType, accountMode: mode, walletBucket: 'main_usd' }),
+      ]
+    );
+    order = txRes.rows[0];
+    await client.query('COMMIT');
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err instanceof Error ? err.message : 'P2P order failed' });
+    return;
+  } finally {
+    client.release();
+  }
+
+  invalidateAuthUserCache(req.user!.id);
+  derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
+    mode,
+    amount: p2pType === 'buy' ? amt : -amt,
+    virtual_workspace_balance: freshUser?.virtual_workspace_balance,
+    real_wallets: parseJsonObj(freshUser?.real_wallets_json, { main_usd: 0, options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+    demo_wallets: parseJsonObj(freshUser?.demo_wallets_json, { main_usd: Number(freshUser?.virtual_workspace_balance ?? 0), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+  });
   res.json({ order });
 });
 

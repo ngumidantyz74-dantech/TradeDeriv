@@ -95,6 +95,7 @@ export function getCfdAccountBucket(
 }
 
 export interface CanonicalBalances {
+  mainUsdBal: number;
   optionsBal: number;
   mt5StdBal: number;
   mt5GoldBal: number;
@@ -121,14 +122,21 @@ export function getCanonicalBalances(
   const stdAccs = cfdModeAccounts.filter((a) => getCfdAccountBucket(a) === 'mt5_standard');
   const goldAccs = cfdModeAccounts.filter((a) => getCfdAccountBucket(a) === 'mt5_gold');
 
-  // When Admin edits Real Balance, users.real_wallets.options AND real deriv connected_accounts are synced.
-  // Always honor real_wallets.options if admin-locked or if no active deriv options account exists.
+  // Main USD Wallet: strictly separate from Options/CFDs/Exchange; Admin edits ONLY this wallet
+  const mainUsdBal =
+    accountMode === 'real'
+      ? Number(user?.real_wallets?.main_usd ?? 0)
+      : Number(user?.virtual_workspace_balance ?? user?.demo_wallets?.main_usd ?? 10000);
+
+  // Options & Bot Trading Account: completely independent from Main USD Wallet (moves only via Transfer or trade settlement)
   const optionsBal =
     accountMode === 'real'
       ? optionsAcc?.balance_locked_by_admin || !optionsAcc
         ? Number(user?.real_wallets?.options ?? optionsAcc?.balance ?? 0)
         : Number(optionsAcc.balance ?? user?.real_wallets?.options ?? 0)
-      : Number(user?.virtual_workspace_balance ?? optionsAcc?.balance ?? 10000);
+      : optionsAcc?.balance_locked_by_admin || !optionsAcc
+        ? Number(user?.demo_wallets?.options ?? optionsAcc?.balance ?? 0)
+        : Number(optionsAcc.balance ?? user?.demo_wallets?.options ?? 0);
 
   const walletStd =
     accountMode === 'real'
@@ -172,7 +180,7 @@ export function getCanonicalBalances(
     ).toFixed(2)
   );
 
-  const totalPortfolioUsd = Number((optionsBal + cfdsTotalBal + exchangeUsdt).toFixed(2));
+  const totalPortfolioUsd = Number((mainUsdBal + optionsBal + cfdsTotalBal + exchangeUsdt).toFixed(2));
 
   let activeTradingBalance: number;
   if (tradingScope === 'cfd') {
@@ -196,17 +204,16 @@ export function getCanonicalBalances(
     }
   } else {
     activeTradingBalance =
-      accountMode === 'real'
-        ? activeConnectedAccount &&
-          !activeConnectedAccount.is_virtual &&
-          !isCfdConnectedAccount(activeConnectedAccount) &&
-          !activeConnectedAccount.balance_locked_by_admin
-          ? Number(activeConnectedAccount.balance ?? optionsBal)
-          : optionsBal
+      activeConnectedAccount &&
+      (accountMode === 'demo' ? Boolean(activeConnectedAccount.is_virtual) : !activeConnectedAccount.is_virtual) &&
+      !isCfdConnectedAccount(activeConnectedAccount) &&
+      !activeConnectedAccount.balance_locked_by_admin
+        ? Number(activeConnectedAccount.balance ?? optionsBal)
         : optionsBal;
   }
 
   return {
+    mainUsdBal,
     optionsBal,
     mt5StdBal,
     mt5GoldBal,

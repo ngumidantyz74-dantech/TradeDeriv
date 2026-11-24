@@ -607,73 +607,538 @@ ${notifyItemsXml}
 </xml>`;
 }
 
+function normalizeMarketName(raw?: string | null): BlockMarketName | undefined {
+  if (!raw) return undefined;
+  const low = raw.trim().toLowerCase();
+  if (low === 'derived' || low === 'synthetic_index' || low === 'synthetics' || low === 'volidx') return 'Derived';
+  if (low === 'forex' || low === 'fx') return 'Forex';
+  if (low === 'stock indices' || low === 'indices' || low === 'stock_indices') return 'Stock Indices';
+  if (low === 'commodities' || low === 'commodity') return 'Commodities';
+  if (low === 'cryptocurrencies' || low === 'cryptocurrency' || low === 'crypto') return 'Cryptocurrencies';
+  const exact = BLOCK_MARKETS.find((m) => m.toLowerCase() === low);
+  return exact;
+}
+
+function normalizeSubmarketName(raw?: string | null, market?: BlockMarketName): string | undefined {
+  if (!raw) return undefined;
+  const low = raw.trim().toLowerCase();
+  const map: Record<string, string> = {
+    random_index: 'Continuous Indices',
+    continuous_indices: 'Continuous Indices',
+    random_daily: 'Daily Reset Indices',
+    daily_reset_indices: 'Daily Reset Indices',
+    crash_index: 'Crash/Boom Indices',
+    crash_boom: 'Crash/Boom Indices',
+    jump_index: 'Jump Indices',
+    range_break: 'Range Break Indices',
+    forex_basket: 'Forex Basket',
+    commodity_basket: 'Commodities Basket',
+    step_index: 'Step Indices',
+    major_pairs: 'Major Pairs',
+    minor_pairs: 'Minor Pairs',
+    americas: 'American Indices',
+    american_indices: 'American Indices',
+    europe: 'European Indices',
+    european_indices: 'European Indices',
+    asia: 'Asian Indices',
+    asian_indices: 'Asian Indices',
+    metals: 'Metals',
+    energy: 'Energy',
+    non_financial: 'Cryptocurrencies',
+    cryptocurrencies: 'Cryptocurrencies',
+  };
+  if (map[low]) return map[low];
+  if (market && BLOCK_SUBMARKETS[market]) {
+    const matched = BLOCK_SUBMARKETS[market].find((s) => s.toLowerCase() === low);
+    if (matched) return matched;
+  }
+  return raw.trim();
+}
+
+function normalizeCandleInterval(raw?: string | null): string | undefined {
+  if (!raw) return undefined;
+  const val = raw.trim().toLowerCase();
+  const map: Record<string, string> = {
+    '0': '1t',
+    '1t': '1t',
+    '60': '1m',
+    '1m': '1m',
+    '120': '2m',
+    '2m': '2m',
+    '180': '3m',
+    '3m': '3m',
+    '300': '5m',
+    '5m': '5m',
+    '600': '10m',
+    '10m': '10m',
+    '900': '15m',
+    '15m': '15m',
+    '1800': '30m',
+    '30m': '30m',
+    '3600': '1h',
+    '1h': '1h',
+  };
+  return map[val] || (CANDLE_INTERVALS.some((c) => c.value === val) ? val : undefined);
+}
+
+function normalizeTradeTypeAndCategory(
+  rawCat?: string | null,
+  rawSub?: string | null,
+  rawContract?: string | null
+): { tradeCategory?: TradeCategoryName; tradeSubtype?: string } {
+  const ct = String(rawContract || '').trim().toUpperCase();
+  if (ct && ct !== 'BOTH') {
+    return inferTradeCategoryFromContract(ct);
+  }
+  const sub = String(rawSub || '').trim().toLowerCase();
+  if (sub.includes('match') || sub.includes('differ')) {
+    return { tradeCategory: 'Digits', tradeSubtype: 'Matches/Differs' };
+  }
+  if (sub.includes('even') || sub.includes('odd')) {
+    return { tradeCategory: 'Digits', tradeSubtype: 'Even/Odd' };
+  }
+  if (sub.includes('over') || sub.includes('under')) {
+    return { tradeCategory: 'Digits', tradeSubtype: 'Over/Under' };
+  }
+  if (sub.includes('accu')) {
+    return { tradeCategory: 'Options', tradeSubtype: 'Accumulators' };
+  }
+  if (sub.includes('mult')) {
+    return { tradeCategory: 'Multipliers', tradeSubtype: 'Up/Down' };
+  }
+  if (sub.includes('rise') || sub.includes('fall') || sub.includes('callput')) {
+    return { tradeCategory: 'Up/Down', tradeSubtype: 'Rise/Fall' };
+  }
+  const cat = String(rawCat || '').trim().toLowerCase();
+  if (cat.includes('digit')) return { tradeCategory: 'Digits', tradeSubtype: 'Matches/Differs' };
+  if (cat.includes('accu') || cat === 'options') return { tradeCategory: 'Options', tradeSubtype: 'Accumulators' };
+  if (cat.includes('mult')) return { tradeCategory: 'Multipliers', tradeSubtype: 'Up/Down' };
+  if (cat.includes('up') || cat.includes('callput')) return { tradeCategory: 'Up/Down', tradeSubtype: 'Rise/Fall' };
+  return {};
+}
+
 export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspaceState): Partial<BotXmlWorkspaceState> {
   const xml = String(xmlText || '');
-  const getField = (name: string): string | undefined => {
-    const m = xml.match(new RegExp(`<field\\s+name=["']${name}["'][^>]*>([^<]+)<\\/field>`, 'i'));
-    return m?.[1]?.trim();
+  const out: Partial<BotXmlWorkspaceState> = {};
+
+  const parseWithRegexFallback = (): Partial<BotXmlWorkspaceState> => {
+    const getField = (name: string): string | undefined => {
+      const m = xml.match(new RegExp(`<field\\s+name=["']${name}["'][^>]*>([^<]+)<\\/field>`, 'i'));
+      return m?.[1]?.trim();
+    };
+    const res: Partial<BotXmlWorkspaceState> = {};
+    const symbol = getField('SYMBOL_LIST');
+    if (symbol) {
+      res.symbol = symbol;
+      const inferred = inferMarketFromSymbol(symbol);
+      res.market = normalizeMarketName(getField('MARKET_LIST')) || inferred.market;
+      res.submarket = normalizeSubmarketName(getField('SUBMARKET_LIST'), res.market) || inferred.submarket;
+    }
+    const typeList = getField('TYPE_LIST') || getField('PURCHASE_LIST') || getField('THEN_PURCHASE');
+    if (typeList) {
+      const normType = typeList.toLowerCase() === 'both' ? 'Both' : typeList.toUpperCase();
+      const inf = normalizeTradeTypeAndCategory(getField('TRADETYPECAT_LIST'), getField('TRADETYPE_LIST'), normType);
+      if (inf.tradeCategory) res.tradeCategory = inf.tradeCategory;
+      if (inf.tradeSubtype) res.tradeSubtype = inf.tradeSubtype;
+      res.contractTypeSelection = normType;
+      if (normType !== 'Both') res.thenPurchase = normType;
+    }
+    const dur = getField('DURATION');
+    if (dur) res.duration = dur;
+    const durUnit = getField('DURATIONTYPE_LIST') || getField('DURATION_TYPE');
+    if (durUnit) res.durationUnit = durUnit;
+    const pred = getField('PREDICTION');
+    if (pred) res.prediction = pred;
+    const mart = getField('MARTINGALE');
+    if (mart) res.martingaleFactor = mart;
+    const candle = normalizeCandleInterval(getField('CANDLEINTERVAL_LIST'));
+    if (candle) res.candleInterval = candle;
+    return res;
   };
 
-  const out: Partial<BotXmlWorkspaceState> = {};
-  const symbol = getField('SYMBOL_LIST');
-  if (symbol) {
-    out.symbol = symbol;
-    const inferred = inferMarketFromSymbol(symbol);
-    out.market = (getField('MARKET_LIST') as BlockMarketName) || inferred.market;
-    out.submarket = getField('SUBMARKET_LIST') || inferred.submarket;
+  if (typeof DOMParser === 'undefined') {
+    return parseWithRegexFallback();
   }
 
-  const typeList = getField('TYPE_LIST') || getField('PURCHASE_LIST') || getField('THEN_PURCHASE');
-  if (typeList) {
-    if (typeList !== 'Both') {
-      const inf = inferTradeCategoryFromContract(typeList);
-      out.tradeCategory = (getField('TRADETYPECAT_LIST') as TradeCategoryName) || inf.tradeCategory;
-      out.tradeSubtype = getField('TRADETYPE_LIST') || inf.tradeSubtype;
-      out.thenPurchase = typeList;
-      out.contractTypeSelection = typeList;
+  try {
+    const doc = new DOMParser().parseFromString(xml, 'text/xml');
+    if (!doc || doc.getElementsByTagName('parsererror').length > 0) {
+      return parseWithRegexFallback();
+    }
+
+    // Build variable id -> variable name dictionary from <variables>
+    const varIdToName = new Map<string, string>();
+    const varEls = Array.from(doc.getElementsByTagName('variable'));
+    for (const vEl of varEls) {
+      const id = vEl.getAttribute('id');
+      const name = (vEl.textContent || '').trim();
+      if (id && name) varIdToName.set(id, name);
+    }
+
+    const getDirectFields = (el: Element): Map<string, string> => {
+      const fields = new Map<string, string>();
+      for (const child of Array.from(el.children)) {
+        if (child.tagName.toLowerCase() === 'field') {
+          const n = child.getAttribute('name');
+          const t = (child.textContent || '').trim();
+          if (n) fields.set(n.toUpperCase(), t);
+        }
+      }
+      return fields;
+    };
+
+    const extractValueText = (valEl: Element | null | undefined): string | undefined => {
+      if (!valEl) return undefined;
+      const innerBlock = Array.from(valEl.children).find((c) => {
+        const t = c.tagName.toLowerCase();
+        return t === 'block' || t === 'shadow';
+      });
+      if (!innerBlock) return undefined;
+      const bType = (innerBlock.getAttribute('type') || '').toLowerCase();
+      const fields = getDirectFields(innerBlock);
+      if (bType === 'math_number' || bType === 'math_integer' || bType === 'math_positive_number') {
+        return fields.get('NUM');
+      }
+      if (bType === 'text') {
+        return fields.get('TEXT');
+      }
+      if (bType === 'logic_boolean') {
+        return fields.get('BOOL');
+      }
+      if (bType === 'variables_get') {
+        const varField = Array.from(innerBlock.children).find(
+          (c) => c.tagName.toLowerCase() === 'field' && c.getAttribute('name')?.toUpperCase() === 'VAR'
+        );
+        const varId = varField?.getAttribute('id');
+        return (varId && varIdToName.get(varId)) || (varField?.textContent || '').trim() || undefined;
+      }
+      return fields.get('NUM') || fields.get('TEXT') || fields.get('VAR') || fields.get('BOOL');
+    };
+
+    const getDirectValues = (el: Element): Map<string, string> => {
+      const vals = new Map<string, string>();
+      for (const child of Array.from(el.children)) {
+        if (child.tagName.toLowerCase() === 'value') {
+          const n = child.getAttribute('name');
+          const v = extractValueText(child);
+          if (n && v !== undefined) vals.set(n.toUpperCase(), v);
+        }
+      }
+      return vals;
+    };
+
+    const allFieldValues = new Map<string, string>();
+    for (const fEl of Array.from(doc.getElementsByTagName('field'))) {
+      const n = fEl.getAttribute('name');
+      const v = (fEl.textContent || '').trim();
+      if (n && v && !allFieldValues.has(n.toUpperCase())) {
+        allFieldValues.set(n.toUpperCase(), v);
+      }
+    }
+
+    const blocks = Array.from(doc.getElementsByTagName('block'));
+    const tradeDefBlock = blocks.find((b) => {
+      const t = (b.getAttribute('type') || '').toLowerCase();
+      return t === 'trade_definition' || t === 'trade';
+    });
+
+    // Collect fields across trade_definition & its nested trade_definition_* sub-blocks
+    const tradeFields = new Map<string, string>();
+    const tradeValues = new Map<string, string>();
+    for (const b of blocks) {
+      const bType = (b.getAttribute('type') || '').toLowerCase();
+      if (
+        bType === 'trade_definition' ||
+        bType === 'trade' ||
+        bType.startsWith('trade_definition_') ||
+        bType === 'tradeoptions'
+      ) {
+        getDirectFields(b).forEach((v, k) => {
+          if (v !== '') tradeFields.set(k, v);
+        });
+        getDirectValues(b).forEach((v, k) => {
+          if (v !== '') tradeValues.set(k, v);
+        });
+      }
+    }
+
+    const pickTradeParam = (...keys: string[]): string | undefined => {
+      for (const k of keys) {
+        const uk = k.toUpperCase();
+        if (tradeValues.has(uk)) return tradeValues.get(uk);
+        if (tradeFields.has(uk)) return tradeFields.get(uk);
+        if (allFieldValues.has(uk)) return allFieldValues.get(uk);
+      }
+      return undefined;
+    };
+
+    const symbol = pickTradeParam('SYMBOL_LIST');
+    if (symbol) {
+      out.symbol = symbol;
+      const inferred = inferMarketFromSymbol(symbol);
+      out.market = normalizeMarketName(pickTradeParam('MARKET_LIST')) || inferred.market;
+      out.submarket = normalizeSubmarketName(pickTradeParam('SUBMARKET_LIST'), out.market) || inferred.submarket;
     } else {
-      const cat = getField('TRADETYPECAT_LIST') as TradeCategoryName | undefined;
-      const sub = getField('TRADETYPE_LIST');
-      if (cat) out.tradeCategory = cat;
-      if (sub) out.tradeSubtype = sub;
-      out.contractTypeSelection = 'Both';
+      const mkt = normalizeMarketName(pickTradeParam('MARKET_LIST'));
+      if (mkt) out.market = mkt;
+      const subMkt = normalizeSubmarketName(pickTradeParam('SUBMARKET_LIST'), out.market);
+      if (subMkt) out.submarket = subMkt;
     }
-  }
 
-  const dur = getField('DURATION');
-  if (dur) out.duration = dur;
-  const durUnit = getField('DURATIONTYPE_LIST') || getField('DURATION_TYPE');
-  if (durUnit) out.durationUnit = durUnit;
-  const pred = getField('PREDICTION');
-  if (pred) out.prediction = pred;
-  const mart = getField('MARTINGALE');
-  if (mart) out.martingaleFactor = mart;
-  const candle = getField('CANDLEINTERVAL_LIST');
-  if (candle) out.candleInterval = candle;
+    const rawTypeList = pickTradeParam('TYPE_LIST');
+    const rawCat = pickTradeParam('TRADETYPECAT_LIST');
+    const rawSub = pickTradeParam('TRADETYPE_LIST');
+    const purchaseBlocks = blocks.filter((b) => (b.getAttribute('type') || '').toLowerCase() === 'purchase');
+    const purchaseChoices = purchaseBlocks
+      .map((pb) => getDirectFields(pb).get('PURCHASE_LIST')?.toUpperCase())
+      .filter((x): x is string => Boolean(x));
 
-  let assignments = [...baseState.assignments];
-  const amt = getField('AMOUNT');
-  if (amt) assignments = setAssignmentVal(assignments, 'initialStake', amt);
-  const tp = getField('TAKE_PROFIT');
-  if (tp) assignments = setAssignmentVal(assignments, 'profitThreshold', tp);
-  const sl = getField('STOP_LOSS');
-  if (sl) assignments = setAssignmentVal(assignments, 'lossThreshold', sl);
+    const normTypeList = rawTypeList
+      ? rawTypeList.toLowerCase() === 'both'
+        ? 'Both'
+        : rawTypeList.toUpperCase()
+      : purchaseChoices[0] || pickTradeParam('THEN_PURCHASE')?.toUpperCase();
 
-  // Also parse <block type="variables_set"> tags
-  const varSetRegex =
-    /<block\s+type=["']variables_set["'][^>]*>[\s\S]*?<field\s+name=["']VAR["'][^>]*>([^<]+)<\/field>[\s\S]*?<field\s+name=["'](?:NUM|TEXT|VAR)["'][^>]*>([^<]+)<\/field>/gi;
-  let m: RegExpExecArray | null;
-  while ((m = varSetRegex.exec(xml)) !== null) {
-    const varName = m[1].trim();
-    const val = m[2].trim();
-    if (assignments.some((a) => a.variable === varName)) {
-      assignments = setAssignmentVal(assignments, varName, val);
+    const inferredCatSub = normalizeTradeTypeAndCategory(
+      rawCat,
+      rawSub,
+      normTypeList !== 'Both' ? normTypeList : purchaseChoices[0]
+    );
+    if (inferredCatSub.tradeCategory) out.tradeCategory = inferredCatSub.tradeCategory;
+    if (inferredCatSub.tradeSubtype) out.tradeSubtype = inferredCatSub.tradeSubtype;
+
+    const effCat = out.tradeCategory || baseState.tradeCategory;
+    const effSub = out.tradeSubtype || baseState.tradeSubtype;
+    const subtypeDef = resolveSubtypeDef(effCat, effSub);
+
+    if (normTypeList) {
+      out.contractTypeSelection = normTypeList === 'Both' ? 'Both' : normTypeList;
     }
+
+    if (purchaseChoices.length > 0) {
+      out.thenPurchase = purchaseChoices[0];
+      out.elsePurchase =
+        purchaseChoices[1] ||
+        subtypeDef.legs.find((l) => l.value !== purchaseChoices[0])?.value ||
+        purchaseChoices[0];
+      out.elseEnabled = purchaseChoices.length > 1 || Boolean(out.elsePurchase);
+    } else if (normTypeList && normTypeList !== 'Both') {
+      out.thenPurchase = normTypeList;
+      out.elsePurchase = subtypeDef.legs.find((l) => l.value !== normTypeList)?.value || normTypeList;
+    } else if (subtypeDef.legs.length > 0) {
+      out.thenPurchase = pickTradeParam('THEN_PURCHASE')?.toUpperCase() || subtypeDef.legs[0].value;
+      out.elsePurchase =
+        pickTradeParam('ELSE_PURCHASE')?.toUpperCase() ||
+        subtypeDef.legs[1]?.value ||
+        subtypeDef.legs[0].value;
+    }
+
+    const candle = normalizeCandleInterval(pickTradeParam('CANDLEINTERVAL_LIST'));
+    if (candle) out.candleInterval = candle;
+
+    const timeMachine = pickTradeParam('TIME_MACHINE_ENABLED');
+    if (timeMachine !== undefined) {
+      out.restartBuySellOnError = ['true', '1', 'yes'].includes(timeMachine.toLowerCase());
+    }
+    const restartErr = pickTradeParam('RESTARTONERROR');
+    if (restartErr !== undefined) {
+      out.restartLastTradeOnError = ['true', '1', 'yes'].includes(restartErr.toLowerCase());
+    }
+
+    const dur = pickTradeParam('DURATION');
+    if (dur && Number.isFinite(Number(dur))) out.duration = dur;
+
+    const durUnit = pickTradeParam('DURATIONTYPE_LIST', 'DURATION_TYPE');
+    if (durUnit && DURATION_UNITS.some((d) => d.value === durUnit.toLowerCase())) {
+      out.durationUnit = durUnit.toLowerCase();
+    }
+
+    const pred = pickTradeParam('PREDICTION');
+    if (pred && Number.isFinite(Number(pred))) out.prediction = pred;
+
+    const grRaw = pickTradeParam('GROWTHRATE', 'GROWTH_RATE');
+    if (grRaw && Number.isFinite(Number(grRaw))) {
+      const n = Number(grRaw);
+      out.growthRate = n > 0.1 ? Number((n / 100).toFixed(2)) : n;
+    }
+
+    const mart = pickTradeParam('MARTINGALE');
+    if (mart && Number.isFinite(Number(mart))) out.martingaleFactor = mart;
+
+    const maxTr = pickTradeParam('MAX_TRADES');
+    if (maxTr && Number.isFinite(Number(maxTr))) out.maxTrades = maxTr;
+
+    // Parse initial variable assignments & initialization blocks
+    let assignments = [...baseState.assignments];
+
+    const amt = pickTradeParam('AMOUNT', 'STAKE');
+    if (amt && Number.isFinite(Number(amt))) {
+      assignments = setAssignmentVal(assignments, 'initialStake', amt);
+    }
+    const tp = pickTradeParam('TAKE_PROFIT');
+    if (tp && Number.isFinite(Number(tp))) {
+      assignments = setAssignmentVal(assignments, 'profitThreshold', tp);
+    }
+    const sl = pickTradeParam('STOP_LOSS');
+    if (sl && Number.isFinite(Number(sl))) {
+      assignments = setAssignmentVal(assignments, 'lossThreshold', sl);
+    }
+
+    const varAliasMap: Record<string, string> = {
+      initialstake: 'initialStake',
+      initial_stake: 'initialStake',
+      stake: 'initialStake',
+      amount: 'initialStake',
+      base_stake: 'initialStake',
+      basestake: 'initialStake',
+      winstep: 'winStep',
+      win_step: 'winStep',
+      maxwinsteps: 'maxWinSteps',
+      max_win_steps: 'maxWinSteps',
+      profitthreshold: 'profitThreshold',
+      profit_threshold: 'profitThreshold',
+      takeprofit: 'profitThreshold',
+      take_profit: 'profitThreshold',
+      targetprofit: 'profitThreshold',
+      target_profit: 'profitThreshold',
+      lossthreshold: 'lossThreshold',
+      loss_threshold: 'lossThreshold',
+      stoploss: 'lossThreshold',
+      stop_loss: 'lossThreshold',
+      maxloss: 'lossThreshold',
+      max_loss: 'lossThreshold',
+      tradeside: 'tradeSide',
+      trade_side: 'tradeSide',
+      nextstake: 'nextStake',
+      next_stake: 'nextStake',
+      winstreak: 'winStreak',
+      lossstreak: 'lossStreak',
+      totalprofit: 'totalProfit',
+      lastprofit: 'lastProfit',
+      resultiswin: 'resultIsWin',
+    };
+
+    const varSetBlocks = blocks.filter((b) => (b.getAttribute('type') || '').toLowerCase() === 'variables_set');
+    for (const vs of varSetBlocks) {
+      const varField = Array.from(vs.children).find(
+        (c) => c.tagName.toLowerCase() === 'field' && c.getAttribute('name')?.toUpperCase() === 'VAR'
+      );
+      const varId = varField?.getAttribute('id');
+      const rawName = (varId && varIdToName.get(varId)) || (varField?.textContent || '').trim();
+      if (!rawName) continue;
+
+      const valueChild = Array.from(vs.children).find(
+        (c) => c.tagName.toLowerCase() === 'value' && c.getAttribute('name')?.toUpperCase() === 'VALUE'
+      );
+      const val = extractValueText(valueChild);
+      const lowName = rawName.toLowerCase();
+
+      if (lowName === 'martingale' || lowName === 'martingale_factor' || lowName === 'martingalefactor' || lowName === 'multiplier') {
+        if (val && Number.isFinite(Number(val))) out.martingaleFactor = val;
+        continue;
+      }
+      if (lowName === 'max_trades' || lowName === 'maxtrades') {
+        if (val && Number.isFinite(Number(val))) out.maxTrades = val;
+        continue;
+      }
+      if (lowName === 'prediction' || lowName === 'barrier') {
+        if (val && Number.isFinite(Number(val))) out.prediction = val;
+        continue;
+      }
+
+      const mappedVar = varAliasMap[lowName] || (BOT_VARIABLES.includes(rawName) ? rawName : undefined);
+      if (mappedVar && val !== undefined) {
+        assignments = setAssignmentVal(assignments, mappedVar, val);
+      }
+
+      // Check notify text_join mutation inside variables_set if present
+      const mutation = Array.from(vs.children).find((c) => c.tagName.toLowerCase() === 'mutation');
+      if (mutation) {
+        const items = Array.from(mutation.children).filter((c) => c.tagName.toLowerCase() === 'item');
+        if (items.length > 0) {
+          out.notifyVar = rawName;
+          out.notifyParts = items.map((it, idx) => ({
+            id: `xml-p-${idx}`,
+            kind: ((it.getAttribute('kind') as 'text' | 'var' | 'fn') || 'text'),
+            value: (it.textContent || '').trim(),
+          }));
+        }
+      }
+    }
+
+    // Sync tradeSide assignment with chosen thenPurchase if XML did not set tradeSide explicitly
+    const explicitSide = assignments.find((a) => a.variable === 'tradeSide')?.value;
+    if (out.thenPurchase && (!explicitSide || explicitSide === baseState.thenPurchase)) {
+      assignments = setAssignmentVal(assignments, 'tradeSide', out.thenPurchase);
+    }
+    out.assignments = assignments;
+
+    // Parse before_purchase notify / controls_if blocks
+    const notifyBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'notify');
+    if (notifyBlock) {
+      const nf = getDirectFields(notifyBlock);
+      const nColor = nf.get('NOTIFICATION_TYPE')?.toLowerCase();
+      if (nColor === 'blue' || nColor === 'green' || nColor === 'yellow' || nColor === 'red') {
+        out.notifyColor = nColor;
+      }
+      const nSound = nf.get('NOTIFICATION_SOUND');
+      if (
+        nSound === 'Silent' ||
+        nSound === 'Announcement' ||
+        nSound === 'Earned money' ||
+        nSound === 'Job done' ||
+        nSound === 'Severe error'
+      ) {
+        out.notifySound = nSound;
+      }
+      const msgVar = nf.get('MSG_VAR');
+      if (msgVar) out.notifyVar = msgVar;
+    }
+
+    const beforeBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'before_purchase');
+    if (beforeBlock) {
+      const bpControlsIf = Array.from(beforeBlock.getElementsByTagName('block')).find(
+        (b) => (b.getAttribute('type') || '').toLowerCase() === 'controls_if'
+      );
+      if (bpControlsIf) {
+        const cf = getDirectFields(bpControlsIf);
+        if (cf.get('LEFT_VAR')) out.ifLeftVar = cf.get('LEFT_VAR')!;
+        const op = cf.get('OP')?.toUpperCase();
+        if (op === 'EQ' || op === 'NEQ' || op === 'GT' || op === 'LT' || op === 'GTE' || op === 'LTE') {
+          out.ifOperator = op;
+        }
+        if (cf.get('RIGHT_VAL')) out.ifCompareValue = cf.get('RIGHT_VAL')!;
+        if (cf.get('THEN_PURCHASE')) out.thenPurchase = cf.get('THEN_PURCHASE')!.toUpperCase();
+        if (cf.get('ELSE_ENABLED')) out.elseEnabled = cf.get('ELSE_ENABLED')!.toUpperCase() === 'TRUE';
+        if (cf.get('ELSE_PURCHASE')) out.elsePurchase = cf.get('ELSE_PURCHASE')!.toUpperCase();
+      }
+    }
+
+    // Parse after_purchase restart settings
+    const afterBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'after_purchase');
+    if (afterBlock) {
+      const updBlock = Array.from(afterBlock.getElementsByTagName('block')).find(
+        (b) => (b.getAttribute('type') || '').toLowerCase() === 'update_stake_and_side'
+      );
+      if (updBlock) {
+        const cr = getDirectFields(updBlock).get('CHECK_RESULT')?.toLowerCase();
+        if (cr === 'win' || cr === 'loss') out.restartResultCheck = cr;
+      }
+      const apIf = Array.from(afterBlock.getElementsByTagName('block')).find(
+        (b) => (b.getAttribute('type') || '').toLowerCase() === 'controls_if'
+      );
+      if (apIf) {
+        const af = getDirectFields(apIf);
+        const det = af.get('CONTRACT_DETAIL')?.toLowerCase();
+        if (det === 'profit' || det === 'payout' || det === 'buy_price') out.restartDetailField = det;
+        if (af.get('ELSE_ENABLED')) out.restartElseEnabled = af.get('ELSE_ENABLED')!.toUpperCase() === 'TRUE';
+      }
+    }
+
+    // Ignore unused tradeDefBlock check warning by ensuring parsed ok
+    void tradeDefBlock;
+    return out;
+  } catch {
+    return parseWithRegexFallback();
   }
-  out.assignments = assignments;
-
-  const gr = getField('GROWTHRATE');
-  if (gr && Number.isFinite(Number(gr))) out.growthRate = Number(gr);
-
-  return out;
 }
