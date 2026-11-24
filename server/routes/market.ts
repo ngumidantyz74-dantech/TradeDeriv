@@ -16,6 +16,14 @@ import { randomId } from '../crypto.ts';
 const router = Router();
 
 let lastSymbolsSync = 0;
+const INSTRUMENTS_CACHE_TTL_MS = 5 * 60 * 1000;
+let cachedInstrumentRows: any[] | null = null;
+let instrumentsCachedAt = 0;
+
+export function invalidateInstrumentsCache(): void {
+  cachedInstrumentRows = null;
+  instrumentsCachedAt = 0;
+}
 
 router.use((_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -31,8 +39,8 @@ router.get('/market/instruments', async (_req, res) => {
     try {
       await ensureDatabaseSchema();
 
-      // Attempt non-blocking live active_symbols refresh every 10 minutes
-      if (Date.now() - lastSymbolsSync > 10 * 60 * 1000) {
+      // Attempt non-blocking live active_symbols refresh at most every 30 minutes
+      if (Date.now() - lastSymbolsSync > 30 * 60 * 1000) {
         lastSymbolsSync = Date.now();
         derivWs
           .request<{ active_symbols?: Array<any> }>({ active_symbols: 'brief' }, 4500)
@@ -62,19 +70,26 @@ router.get('/market/instruments', async (_req, res) => {
                 [s.symbol, s.display_name, cat, m, s.submarket || '', Number(s.pip || 0.01)]
               );
             }
+            invalidateInstrumentsCache();
           })
           .catch(() => {
             // Curated DB catalog already covers 75+ instruments
           });
       }
 
-      const rows = await query<any>(
-        `SELECT m.*, c.price, c.change_pct, c.sparkline_json
-         FROM market_instruments m
-         LEFT JOIN market_data_cache c ON m.symbol = c.symbol
-         WHERE m.is_active = TRUE
-         ORDER BY m.category, m.display_name`
-      );
+      if (!cachedInstrumentRows || Date.now() - instrumentsCachedAt > INSTRUMENTS_CACHE_TTL_MS) {
+        cachedInstrumentRows = await query<any>(
+          `SELECT m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
+                  c.price, c.change_pct
+           FROM market_instruments m
+           LEFT JOIN market_data_cache c ON m.symbol = c.symbol
+           WHERE m.is_active = TRUE
+           ORDER BY m.category, m.display_name
+           LIMIT 250`
+        );
+        instrumentsCachedAt = Date.now();
+      }
+      const rows = cachedInstrumentRows;
 
       const instruments = rows
         .map((r) => {
@@ -82,14 +97,7 @@ router.get('/market/instruments', async (_req, res) => {
           const price = live?.quote ?? r.price ?? 1000;
           const spread = r.spread || 0.15;
           const liveSpark = derivWs.getSparkline(r.symbol, 24);
-          let sparkline: number[] = liveSpark.length >= 2 ? liveSpark : [];
-          if (sparkline.length < 2) {
-            try {
-              sparkline = JSON.parse(r.sparkline_json || '[]');
-            } catch {
-              sparkline = [price];
-            }
-          }
+          const sparkline = liveSpark.length >= 2 ? liveSpark : [price];
           const changePct = liveSpark.length >= 2 ? derivWs.getChangePct(r.symbol) : r.change_pct ?? 0;
           return {
             symbol: r.symbol,
@@ -384,7 +392,12 @@ router.delete('/watchlists/:symbol', requireDb, requireAuth, async (req: AuthReq
 
 // Notifications
 router.get('/notifications', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const rows = await query('SELECT * FROM notifications WHERE user_id = $1 ORDER BY id DESC LIMIT 50', [req.user!.id]);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 30)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+  const rows = await query(
+    'SELECT id, user_id, title, message, category, is_read, created_at FROM notifications WHERE user_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
+    [req.user!.id, limit, offset]
+  );
   res.json({ notifications: rows });
 });
 

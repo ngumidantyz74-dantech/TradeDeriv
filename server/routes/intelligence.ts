@@ -540,7 +540,10 @@ router.post('/intelligence/copilot', requireDb, requireAuth, async (req: AuthReq
       "SELECT id, symbol, side, contract_type, stake, entry_price, current_price, pnl, sl_price, tp_price, execution_mode FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' LIMIT 15",
       [req.user!.id]
     );
-    const risk = await queryOne<any>('SELECT * FROM risk_settings WHERE user_id = $1', [req.user!.id]);
+    const risk = await queryOne<any>(
+      'SELECT risk_per_trade_pct, daily_loss_limit_usd, max_exposure_usd, max_consecutive_losses, cooldown_minutes, enforce_limits, cooldown_until FROM risk_settings WHERE user_id = $1',
+      [req.user!.id]
+    );
 
     const groundedPayload = {
       symbol: String(symbol),
@@ -641,13 +644,21 @@ router.post('/intelligence/copilot', requireDb, requireAuth, async (req: AuthReq
   }
 });
 
+const USER_STRATEGY_COLS =
+  'id, user_id, strategy_key, name, enabled, execution_mode, symbol, timeframe, config_json, risk_json, updated_at';
+
 // 5. Strategy Catalog, User Config & Real Deriv Backtester
 router.get('/strategies/catalog', async (_req, res) => {
+  res.setHeader('Cache-Control', 'public, max-age=300, stale-while-revalidate=600');
   res.json({ strategies: STRATEGY_CATALOG });
 });
 
 router.get('/strategies/user', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const rows = await query<any>('SELECT * FROM user_strategies WHERE user_id = $1 ORDER BY id ASC', [req.user!.id]);
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 50)));
+  const rows = await query<any>(
+    `SELECT ${USER_STRATEGY_COLS} FROM user_strategies WHERE user_id = $1 ORDER BY id ASC LIMIT $2`,
+    [req.user!.id, limit]
+  );
   res.json({ strategies: rows });
 });
 
@@ -670,7 +681,7 @@ router.put('/strategies/user', requireDb, requireAuth, async (req: AuthRequest, 
        config_json = EXCLUDED.config_json,
        risk_json = EXCLUDED.risk_json,
        updated_at = NOW()
-     RETURNING *`,
+     RETURNING ${USER_STRATEGY_COLS}`,
     [
       req.user!.id,
       String(strategyKey),
@@ -742,9 +753,15 @@ router.post('/strategies/backtest', requireDb, requireAuth, async (req: AuthRequ
 });
 
 router.get('/strategies/backtests', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const limit = Math.min(50, Math.max(1, Number(req.query.limit || 20)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
   const runs = await query(
-    'SELECT * FROM strategy_backtest_runs WHERE user_id = $1 ORDER BY id DESC LIMIT 20',
-    [req.user!.id]
+    `SELECT id, user_id, strategy_key, symbol, granularity, candle_count, spread_cost_pct,
+            in_sample_json, out_of_sample_json, full_metrics_json, created_at
+     FROM strategy_backtest_runs
+     WHERE user_id = $1
+     ORDER BY id DESC LIMIT $2 OFFSET $3`,
+    [req.user!.id, limit, offset]
   );
   res.json({ runs });
 });
@@ -805,13 +822,16 @@ function computeOrderCohortStats(orders: any[]) {
 }
 
 router.get('/analytics/performance', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const limit = Math.min(500, Math.max(20, Number(req.query.limit || 500)));
   const orders = await query<any>(
-    `SELECT vo.*, COALESCE(ca.is_virtual, TRUE) as acc_is_virtual
+    `SELECT vo.id, vo.symbol, vo.status, vo.pnl, vo.stake, vo.opened_at, vo.closed_at,
+            vo.account_mode, vo.execution_mode, vo.strategy_key, vo.source,
+            COALESCE(ca.is_virtual, TRUE) as acc_is_virtual
      FROM virtual_orders vo
      LEFT JOIN connected_accounts ca ON vo.connected_account_id = ca.id
      WHERE vo.user_id = $1
-     ORDER BY vo.opened_at DESC LIMIT 1000`,
-    [req.user!.id]
+     ORDER BY vo.opened_at DESC LIMIT $2`,
+    [req.user!.id, limit]
   );
 
   const realOrders = orders.filter(
@@ -874,13 +894,16 @@ router.get('/analytics/performance', requireDb, requireAuth, async (req: AuthReq
   });
 });
 
+const RISK_SETTINGS_COLS =
+  'user_id, risk_per_trade_pct, daily_loss_limit_usd, max_exposure_usd, max_consecutive_losses, cooldown_minutes, enforce_limits, cooldown_until, updated_at';
+
 // 7. Risk Management Centre
 router.get('/risk/settings', requireDb, requireAuth, async (req: AuthRequest, res) => {
   await execute(
     'INSERT INTO risk_settings (user_id) VALUES ($1) ON CONFLICT (user_id) DO NOTHING',
     [req.user!.id]
   );
-  const settings = await queryOne<any>('SELECT * FROM risk_settings WHERE user_id = $1', [req.user!.id]);
+  const settings = await queryOne<any>(`SELECT ${RISK_SETTINGS_COLS} FROM risk_settings WHERE user_id = $1`, [req.user!.id]);
   const todayPnlRow = await queryOne<{ daily_pnl: number }>(
     `SELECT COALESCE(SUM(pnl), 0) as daily_pnl FROM virtual_orders WHERE user_id = $1 AND status = 'CLOSED' AND closed_at >= CURRENT_DATE`,
     [req.user!.id]
@@ -925,7 +948,7 @@ router.put('/risk/settings', requireDb, requireAuth, async (req: AuthRequest, re
       cooldown_minutes = EXCLUDED.cooldown_minutes,
       enforce_limits = EXCLUDED.enforce_limits,
       updated_at = NOW()
-    RETURNING *`,
+    RETURNING ${RISK_SETTINGS_COLS}`,
     [
       req.user!.id,
       Math.max(0.1, Math.min(25, Number(b.risk_per_trade_pct ?? 2.0))),
@@ -944,15 +967,23 @@ router.post('/risk/reset-cooldown', requireDb, requireAuth, async (req: AuthRequ
   res.json({ ok: true });
 });
 
+const JOURNAL_COLS =
+  'id, user_id, order_id, symbol, side, strategy_key, timeframe, rationale, emotions, discipline_score, lessons, image_url, tags_json, created_at, updated_at';
+
 // 8. Trading Journal CRUD
 router.get('/journal', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
   const entries = await query<any>(
-    `SELECT j.*, o.pnl as order_pnl, o.entry_price as order_entry_price, o.exit_price as order_exit_price, o.status as order_status
+    `SELECT j.id, j.user_id, j.order_id, j.symbol, j.side, j.strategy_key, j.timeframe,
+            j.rationale, j.emotions, j.discipline_score, j.lessons, j.image_url, j.tags_json,
+            j.created_at, j.updated_at,
+            o.pnl as order_pnl, o.entry_price as order_entry_price, o.exit_price as order_exit_price, o.status as order_status
      FROM trading_journal_entries j
      LEFT JOIN virtual_orders o ON j.order_id = o.id
      WHERE j.user_id = $1
-     ORDER BY j.created_at DESC LIMIT 200`,
-    [req.user!.id]
+     ORDER BY j.created_at DESC LIMIT $2 OFFSET $3`,
+    [req.user!.id, limit, offset]
   );
   res.json({ entries });
 });
@@ -967,7 +998,7 @@ router.post('/journal', requireDb, requireAuth, async (req: AuthRequest, res) =>
     `INSERT INTO trading_journal_entries (
       user_id, order_id, symbol, side, strategy_key, timeframe, rationale, emotions, discipline_score, lessons, image_url, tags_json
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-    RETURNING *`,
+    RETURNING ${JOURNAL_COLS}`,
     [
       req.user!.id,
       b.order_id ? Number(b.order_id) : null,
@@ -999,7 +1030,7 @@ router.put('/journal/:id', requireDb, requireAuth, async (req: AuthRequest, res)
       tags_json = COALESCE($6, tags_json),
       updated_at = NOW()
      WHERE id = $7 AND user_id = $8
-     RETURNING *`,
+     RETURNING ${JOURNAL_COLS}`,
     [
       b.rationale ?? null,
       b.emotions ?? null,
@@ -1026,11 +1057,50 @@ router.delete('/journal/:id', requireDb, requireAuth, async (req: AuthRequest, r
   res.json({ ok: true });
 });
 
-// 9. Smart Alerts CRUD + Live Tick Evaluator
+// 9. Smart Alerts CRUD + Zero-Egress In-Memory Tick Evaluator
+const ALERT_COLS = 'id, user_id, symbol, alert_type, condition_json, message, status, triggered_at, created_at';
+let activeAlertsHydrated = false;
+let activeAlertsHydrating: Promise<void> | null = null;
+let lastAlertsSyncAt = 0;
+const activeAlertsBySymbol = new Map<string, any[]>();
+
+export function invalidateActiveAlertsCache(): void {
+  activeAlertsHydrated = false;
+  lastAlertsSyncAt = 0;
+}
+
+async function ensureActiveAlertsHydrated(): Promise<void> {
+  if (activeAlertsHydrated && Date.now() - lastAlertsSyncAt < 120_000) return;
+  if (activeAlertsHydrating) return activeAlertsHydrating;
+  activeAlertsHydrating = (async () => {
+    try {
+      const rows = await query<any>(
+        `SELECT ${ALERT_COLS} FROM smart_alerts WHERE status = 'active' ORDER BY id DESC LIMIT 200`
+      );
+      activeAlertsBySymbol.clear();
+      for (const a of rows) {
+        const list = activeAlertsBySymbol.get(a.symbol) || [];
+        list.push(a);
+        activeAlertsBySymbol.set(a.symbol, list);
+      }
+      activeAlertsHydrated = true;
+      lastAlertsSyncAt = Date.now();
+    } catch {
+      // ignore if DB not yet ready
+    } finally {
+      activeAlertsHydrating = null;
+    }
+  })();
+  return activeAlertsHydrating;
+}
+
 router.get('/alerts', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const alerts = await query('SELECT * FROM smart_alerts WHERE user_id = $1 ORDER BY id DESC LIMIT 100', [
-    req.user!.id,
-  ]);
+  const limit = Math.min(100, Math.max(1, Number(req.query.limit || 50)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+  const alerts = await query(
+    `SELECT ${ALERT_COLS} FROM smart_alerts WHERE user_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
+    [req.user!.id, limit, offset]
+  );
   res.json({ alerts });
 });
 
@@ -1044,7 +1114,7 @@ router.post('/alerts', requireDb, requireAuth, async (req: AuthRequest, res) => 
   const alert = await queryOne<any>(
     `INSERT INTO smart_alerts (user_id, symbol, alert_type, condition_json, message, status)
      VALUES ($1, $2, $3, $4, $5, 'active')
-     RETURNING *`,
+     RETURNING ${ALERT_COLS}`,
     [
       req.user!.id,
       String(b.symbol),
@@ -1053,15 +1123,17 @@ router.post('/alerts', requireDb, requireAuth, async (req: AuthRequest, res) => 
       String(b.message || `${b.symbol} ${b.alertType} triggered`),
     ]
   );
+  invalidateActiveAlertsCache();
   res.status(201).json({ alert });
 });
 
 router.patch('/alerts/:id', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const status = String(req.body?.status || 'active');
   const alert = await queryOne<any>(
-    'UPDATE smart_alerts SET status = $1 WHERE id = $2 AND user_id = $3 RETURNING *',
+    `UPDATE smart_alerts SET status = $1 WHERE id = $2 AND user_id = $3 RETURNING ${ALERT_COLS}`,
     [status, Number(req.params.id), req.user!.id]
   );
+  invalidateActiveAlertsCache();
   res.json({ alert });
 });
 
@@ -1070,6 +1142,7 @@ router.delete('/alerts/:id', requireDb, requireAuth, async (req: AuthRequest, re
     Number(req.params.id),
     req.user!.id,
   ]);
+  invalidateActiveAlertsCache();
   res.json({ ok: true });
 });
 
@@ -1078,11 +1151,11 @@ export async function evaluateSmartAlertsForTick(tick: TickData): Promise<void> 
   if (Date.now() - lastAlertCheckAt < 1500) return;
   lastAlertCheckAt = Date.now();
   try {
-    const active = await query<any>(
-      "SELECT * FROM smart_alerts WHERE symbol = $1 AND status = 'active' LIMIT 50",
-      [tick.symbol]
-    );
-    for (const a of active) {
+    await ensureActiveAlertsHydrated();
+    const active = activeAlertsBySymbol.get(tick.symbol);
+    if (!active || active.length === 0) return;
+
+    for (const a of [...active]) {
       let cond: any = {};
       try {
         cond = JSON.parse(a.condition_json || '{}');
@@ -1095,6 +1168,7 @@ export async function evaluateSmartAlertsForTick(tick: TickData): Promise<void> 
       if (a.alert_type === 'price_below' && Number.isFinite(target) && tick.quote <= target) triggered = true;
       if (triggered) {
         await execute("UPDATE smart_alerts SET status = 'triggered', triggered_at = NOW() WHERE id = $1", [a.id]);
+        invalidateActiveAlertsCache();
         await addNotification(a.user_id, `Alert: ${a.symbol}`, `${a.message} @ ${tick.quote}`, 'alert');
         derivWs.emitUserEvent(a.user_id, 'alert_triggered', { ...a, triggerPrice: tick.quote });
       }
@@ -1106,7 +1180,14 @@ export async function evaluateSmartAlertsForTick(tick: TickData): Promise<void> 
 
 // 10. Workspace Preferences & Chart Drawings Persistence
 router.get('/workspace/preferences', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const row = await queryOne<any>('SELECT * FROM user_workspace_preferences WHERE user_id = $1', [req.user!.id]);
+  const row = await queryOne<{
+    layout_json: string;
+    chart_drawings_json: string;
+    chart_indicators_json: string;
+  }>(
+    'SELECT layout_json, chart_drawings_json, chart_indicators_json FROM user_workspace_preferences WHERE user_id = $1',
+    [req.user!.id]
+  );
   if (!row) {
     res.json({ layout: {}, chartDrawings: {}, chartIndicators: {} });
     return;
@@ -1127,7 +1208,14 @@ router.get('/workspace/preferences', requireDb, requireAuth, async (req: AuthReq
 
 router.put('/workspace/preferences', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const { layout, chartDrawings, chartIndicators } = req.body || {};
-  const current = await queryOne<any>('SELECT * FROM user_workspace_preferences WHERE user_id = $1', [req.user!.id]);
+  const current = await queryOne<{
+    layout_json: string;
+    chart_drawings_json: string;
+    chart_indicators_json: string;
+  }>(
+    'SELECT layout_json, chart_drawings_json, chart_indicators_json FROM user_workspace_preferences WHERE user_id = $1',
+    [req.user!.id]
+  );
   const nextLayout = layout !== undefined ? JSON.stringify(layout) : current?.layout_json || '{}';
   const nextDrawings = chartDrawings !== undefined ? JSON.stringify(chartDrawings) : current?.chart_drawings_json || '{}';
   const nextInd = chartIndicators !== undefined ? JSON.stringify(chartIndicators) : current?.chart_indicators_json || '{}';

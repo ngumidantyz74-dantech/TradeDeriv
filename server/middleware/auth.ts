@@ -120,6 +120,50 @@ function passesCsrfOriginCheck(req: Request): boolean {
   return false;
 }
 
+interface CachedAuthUser {
+  id: number;
+  email: string;
+  role: string;
+  status: string;
+  locked_until: string | null;
+  cachedAt: number;
+}
+
+const AUTH_CACHE_TTL_MS = 10_000;
+const authUserCache = new Map<number, CachedAuthUser>();
+
+export function invalidateAuthUserCache(userId?: number): void {
+  if (userId !== undefined) {
+    authUserCache.delete(userId);
+  } else {
+    authUserCache.clear();
+  }
+}
+
+async function getAuthUserRecord(userId: number): Promise<CachedAuthUser | null> {
+  const cached = authUserCache.get(userId);
+  if (cached && Date.now() - cached.cachedAt < AUTH_CACHE_TTL_MS) {
+    return cached;
+  }
+  const dbUser = await queryOne<{
+    id: number;
+    email: string;
+    role: string;
+    status: string;
+    locked_until: string | null;
+  }>('SELECT id, email, role, status, locked_until FROM users WHERE id = $1', [userId]);
+  if (!dbUser) {
+    authUserCache.delete(userId);
+    return null;
+  }
+  const entry: CachedAuthUser = { ...dbUser, cachedAt: Date.now() };
+  if (authUserCache.size > 1000) {
+    authUserCache.clear();
+  }
+  authUserCache.set(userId, entry);
+  return entry;
+}
+
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
   const { token: rawToken } = extractRawToken(req, false);
 
@@ -130,16 +174,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   try {
     const decoded = jwt.verify(rawToken, config.jwtSecret) as AuthUserPayload;
-    const dbUser = await queryOne<{
-      id: number;
-      email: string;
-      role: string;
-      status: string;
-      locked_until: string | null;
-    }>(
-      'SELECT id, email, role, status, locked_until FROM users WHERE id = $1',
-      [decoded.id]
-    );
+    const dbUser = await getAuthUserRecord(decoded.id);
 
     if (!dbUser) {
       res.status(401).json({ error: 'User account not found' });
@@ -176,16 +211,7 @@ export async function requireAdmin(req: AuthRequest, res: Response, next: NextFu
 
   try {
     const decoded = jwt.verify(rawToken, config.jwtSecret) as AuthUserPayload;
-    const dbUser = await queryOne<{
-      id: number;
-      email: string;
-      role: string;
-      status: string;
-      locked_until: string | null;
-    }>(
-      'SELECT id, email, role, status, locked_until FROM users WHERE id = $1',
-      [decoded.id]
-    );
+    const dbUser = await getAuthUserRecord(decoded.id);
 
     if (!dbUser || dbUser.status === 'suspended' || dbUser.status === 'closed') {
       res.status(401).json({ error: 'Admin account unavailable' });

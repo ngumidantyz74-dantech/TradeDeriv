@@ -124,9 +124,14 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
   });
 });
 
+const CASHIER_TX_COLS =
+  'id, user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, created_at';
+
 router.get('/cashier/transactions', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const txType = typeof req.query.tx_type === 'string' ? req.query.tx_type : '';
   const mode = req.query.accountMode === 'real' ? 'real' : req.query.accountMode === 'demo' ? 'demo' : '';
+  const limit = Math.min(150, Math.max(1, Number(req.query.limit || 40)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
   const clauses = ['user_id = $1'];
   const params: any[] = [req.user!.id];
   if (txType) {
@@ -137,8 +142,9 @@ router.get('/cashier/transactions', requireDb, requireAuth, async (req: AuthRequ
     params.push(mode);
     clauses.push(`COALESCE(account_mode, 'demo') = $${params.length}`);
   }
+  params.push(limit, offset);
   const rows = await query(
-    `SELECT * FROM cashier_transactions WHERE ${clauses.join(' AND ')} ORDER BY id DESC LIMIT 100`,
+    `SELECT ${CASHIER_TX_COLS} FROM cashier_transactions WHERE ${clauses.join(' AND ')} ORDER BY id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
   res.json({ transactions: rows });
@@ -233,7 +239,7 @@ router.post('/cashier/deposit', requireDb, requireAuth, async (req: AuthRequest,
   const tx = await queryOne(
     `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
      VALUES ($1, 'deposit', $2, $3, $4, $5, $6, $7, 'completed', $8, $9)
-     RETURNING *`,
+     RETURNING ${CASHIER_TX_COLS}`,
     [
       req.user!.id,
       method,
@@ -355,7 +361,7 @@ router.post('/cashier/withdraw', requireDb, requireAuth, async (req: AuthRequest
   const tx = await queryOne(
     `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, amount, currency, reference_id, status, account_mode, metadata_json)
      VALUES ($1, 'withdrawal', $2, 'deriv', 'USD Wallet', $3, $4, $5, 'completed', $6, $7)
-     RETURNING *`,
+     RETURNING ${CASHIER_TX_COLS}`,
     [req.user!.id, method, amt, currency, ref, mode, JSON.stringify({ cashierUrl, accountMode: mode })]
   );
 
@@ -564,7 +570,7 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     const txRes = await client.query(
       `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
        VALUES ($1, 'transfer', 'Internal Platform Transfer', 'deriv', $2, $3, $4, $5, $6, 'completed', $7)
-       RETURNING *`,
+       RETURNING ${CASHIER_TX_COLS}`,
       [req.user!.id, bucketDisplayName(fromBucket), bucketDisplayName(toBucket), amt, currency, ref, mode]
     );
 
@@ -724,7 +730,7 @@ router.post('/cashier/payment-agents/withdraw', requireDb, requireAuth, async (r
   const tx = await queryOne(
     `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
      VALUES ($1, 'withdrawal', 'Payment Agent (M-Pesa)', 'paymentagent', 'USD Wallet', $2, $3, $4, $5, 'completed', $6)
-     RETURNING *`,
+     RETURNING ${CASHIER_TX_COLS}`,
     [req.user!.id, paymentagent_loginid, amt, currency, ref, mode]
   );
 
@@ -785,7 +791,7 @@ router.post('/cashier/p2p/orders', requireDb, requireAuth, async (req: AuthReque
   const order = await queryOne(
     `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
      VALUES ($1, 'p2p', $2, 'deriv_p2p', $3, $4, 'USD', $5, 'completed', $6, $7)
-     RETURNING *`,
+     RETURNING ${CASHIER_TX_COLS}`,
     [req.user!.id, `P2P ${String(type).toUpperCase()}`, String(advert_id), amt, ref, mode, JSON.stringify({ advert_id, type, accountMode: mode })]
   );
 

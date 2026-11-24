@@ -115,6 +115,7 @@ export class DerivWebSocketClient {
   private latestTicks = new Map<string, TickData>();
   private tickHistoryBuffers = new Map<string, number[]>();
   private exchangePairsState = new Map<string, LiveExchangePair>();
+  private dbCheckedSymbols = new Set<string>();
 
   constructor() {
     this.seedInitialPricesFromCatalog();
@@ -444,7 +445,7 @@ export class DerivWebSocketClient {
     if (this.quoteKeepaliveTimer) clearInterval(this.quoteKeepaliveTimer);
     this.quoteKeepaliveTimer = setInterval(async () => {
       try {
-        if (Date.now() - this.lastOpenOrderSyncAt >= 10000) {
+        if (Date.now() - this.lastOpenOrderSyncAt >= 300_000) {
           this.lastOpenOrderSyncAt = Date.now();
           await this.syncOpenOrderSymbols();
         }
@@ -476,7 +477,8 @@ export class DerivWebSocketClient {
   public async ensureSymbolSubscribed(symbol: string): Promise<void> {
     if (!symbol) return;
     this.subscribedSymbols.add(symbol);
-    if (!this.latestTicks.has(symbol)) {
+    if (!this.latestTicks.has(symbol) && !this.dbCheckedSymbols.has(symbol)) {
+      this.dbCheckedSymbols.add(symbol);
       let row: { pip_size: number; spread: number } | null = null;
       let cache: { price: number } | null = null;
       if (pool) {

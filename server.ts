@@ -91,6 +91,7 @@ async function bootstrapServer() {
           getSetting<{ items?: any[] }>('announcements', { items: [] }),
           getSetting<any>('commissions', {}),
         ]);
+        res.setHeader('Cache-Control', 'public, max-age=30, stale-while-revalidate=60');
         res.json({
           branding,
           global,

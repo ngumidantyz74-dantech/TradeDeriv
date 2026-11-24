@@ -22,6 +22,9 @@ import { sendTransactionalEmail } from '../email-service.ts';
 const router = Router();
 const usedStateJtis = new Map<string, number>();
 
+const USER_PROFILE_COLS =
+  'id, email, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id, last_login_at, updated_at, created_at';
+
 export function isVirtualDerivAccount(
   loginId: string,
   accountType = '',
@@ -223,7 +226,7 @@ async function syncDerivProfileOnExistingUser(
       last_login_at = NOW(),
       updated_at = NOW()
      WHERE id = $6
-     RETURNING *`,
+     RETURNING ${USER_PROFILE_COLS}`,
     [
       shouldUpdateName ? incomingName : '',
       shouldUpdatePhone ? incomingPhone : '',
@@ -253,7 +256,7 @@ async function ensureUserFromDerivProfile(profile: {
 }): Promise<{ user: any; isNew: boolean; preserveExistingBalances: boolean }> {
   if (profile.preferredUserId) {
     const existingById = await queryOne<any>(
-      "SELECT * FROM users WHERE id = $1 AND role NOT IN ('owner', 'admin')",
+      `SELECT ${USER_PROFILE_COLS} FROM users WHERE id = $1 AND role NOT IN ('owner', 'admin')`,
       [profile.preferredUserId]
     );
     if (existingById) {
@@ -266,7 +269,7 @@ async function ensureUserFromDerivProfile(profile: {
   const candidateEmail = profile.email ? profile.email.trim().toLowerCase() : '';
   if (candidateEmail) {
     const existingByEmail = await queryOne<any>(
-      "SELECT * FROM users WHERE LOWER(email) = $1 AND role NOT IN ('owner', 'admin')",
+      `SELECT ${USER_PROFILE_COLS} FROM users WHERE LOWER(email) = $1 AND role NOT IN ('owner', 'admin')`,
       [candidateEmail]
     );
     if (existingByEmail) {
@@ -286,7 +289,9 @@ async function ensureUserFromDerivProfile(profile: {
       [loginIds]
     );
     if (existingConn) {
-      const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [existingConn.user_id]);
+      const existingUser = await queryOne<any>(`SELECT ${USER_PROFILE_COLS} FROM users WHERE id = $1`, [
+        existingConn.user_id,
+      ]);
       if (existingUser) {
         const synced = await syncDerivProfileOnExistingUser(existingUser, profile);
         return { user: synced, isNew: false, preserveExistingBalances: true };
@@ -308,7 +313,7 @@ async function ensureUserFromDerivProfile(profile: {
   ).toLowerCase();
 
   const existingFallback = await queryOne<any>(
-    "SELECT * FROM users WHERE LOWER(email) = $1 AND role NOT IN ('owner', 'admin')",
+    `SELECT ${USER_PROFILE_COLS} FROM users WHERE LOWER(email) = $1 AND role NOT IN ('owner', 'admin')`,
     [cleanEmail]
   );
   if (existingFallback) {
@@ -328,7 +333,7 @@ async function ensureUserFromDerivProfile(profile: {
   const created = await queryOne<any>(
     `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id)
      VALUES ($1, $2, $3, $4, $5, 'user', 'active', TRUE, $6, $7, $8)
-     RETURNING *`,
+     RETURNING ${USER_PROFILE_COLS}`,
     [
       cleanEmail,
       hash,
@@ -794,7 +799,7 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
         const gs = settingsResp?.get_settings || {};
         const authMeta = settingsResp?._authorize || {};
         const gsName = `${gs.first_name || ''} ${gs.last_name || ''}`.trim() || cleanDerivFullName(authMeta.fullname);
-        const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+        const existingUser = await queryOne<any>(`SELECT ${USER_PROFILE_COLS} FROM users WHERE id = $1`, [req.user!.id]);
         await syncDerivProfileOnExistingUser(existingUser, {
           fullName: gsName,
           phone: gs.phone || '',
@@ -867,7 +872,7 @@ router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, r
       const gs = settingsResp?.get_settings || {};
       const authMeta = settingsResp?._authorize || authResp?._authorize || {};
       const gsName = `${gs.first_name || ''} ${gs.last_name || ''}`.trim() || cleanDerivFullName(authMeta.fullname);
-      const existingUser = await queryOne<any>('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+      const existingUser = await queryOne<any>(`SELECT ${USER_PROFILE_COLS} FROM users WHERE id = $1`, [req.user!.id]);
       await syncDerivProfileOnExistingUser(existingUser, {
         fullName: gsName,
         phone: gs.phone || '',
@@ -966,10 +971,10 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
 
 router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const accId = Number(req.params.id);
-  const acc = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1 AND user_id = $2', [
-    accId,
-    req.user!.id,
-  ]);
+  const acc = await queryOne<{ id: number; balance_locked_by_admin: boolean }>(
+    'SELECT id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2',
+    [accId, req.user!.id]
+  );
   if (!acc) {
     res.status(404).json({ error: 'Account not found' });
     return;
@@ -1034,10 +1039,10 @@ router.post('/deriv/accounts/:id/revoke', requireDb, requireAuth, async (req: Au
 
 router.get('/deriv/statement/:accountId', requireDb, requireAuth, async (req: AuthRequest, res) => {
   const accId = Number(req.params.accountId);
-  const acc = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1 AND user_id = $2', [
-    accId,
-    req.user!.id,
-  ]);
+  const acc = await queryOne<{ id: number }>(
+    'SELECT id FROM connected_accounts WHERE id = $1 AND user_id = $2',
+    [accId, req.user!.id]
+  );
   if (!acc) {
     res.status(404).json({ error: 'Account not found' });
     return;

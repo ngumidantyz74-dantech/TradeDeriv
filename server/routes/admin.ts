@@ -20,13 +20,20 @@ import {
   signUserToken,
   signAdminReauthToken,
   verifyAdminReauthToken,
+  invalidateAuthUserCache,
   type AuthRequest,
 } from '../middleware/auth.ts';
 import { derivWs, derivRestRequest, getActiveDerivAppId } from '../deriv-client.ts';
 import { isVirtualDerivAccount } from './deriv.ts';
 import { closeOrderById } from '../trade-execution.ts';
+import { invalidateInstrumentsCache } from './market.ts';
+import { invalidateBotStrategiesCache } from './orders.ts';
 
 const router = Router();
+
+const ADMIN_ORDER_COLS = `vo.id, vo.user_id, vo.symbol, vo.side, vo.contract_type, vo.lots, vo.stake, vo.multiplier, vo.entry_price, vo.current_price, vo.exit_price, vo.pnl, vo.sl_usd, vo.tp_usd, vo.sl_price, vo.tp_price, vo.barrier, vo.duration, vo.duration_unit, vo.execution_mode, vo.connected_account_id, vo.account_mode, vo.source, vo.strategy_key, vo.timeframe, vo.notes, vo.deriv_contract_id, vo.status, vo.opened_at, vo.closed_at`;
+const BOT_STRATEGY_COLS = `id, name, slug, category, symbol, contract_type, description, win_rate_est, rating, is_premium, is_active, config_json, updated_at, created_at`;
+const ACCOUNT_COLS = `id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual, last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin, status, scopes, created_at, updated_at`;
 
 const toCents = (val: unknown): number => {
   const n = Number(val ?? 0);
@@ -123,7 +130,10 @@ router.post('/admin/login', requireDb, async (req, res) => {
     return;
   }
 
-  const user = await queryOne<any>("SELECT * FROM users WHERE email = $1 AND role IN ('admin', 'owner')", [cleanEmail]);
+  const user = await queryOne<any>(
+    "SELECT id, email, full_name, role, status, password_hash FROM users WHERE email = $1 AND role IN ('admin', 'owner')",
+    [cleanEmail]
+  );
   if (!user) {
     await execute(
       'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
@@ -335,7 +345,7 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
             COALESCE(last_login_at, updated_at, created_at) as last_login_at, created_at
      FROM users
      WHERE role NOT IN ('owner', 'admin')
-     ORDER BY COALESCE(last_login_at, updated_at, created_at) DESC, id DESC LIMIT 200`
+     ORDER BY COALESCE(last_login_at, updated_at, created_at) DESC, id DESC LIMIT 100`
   );
   const connectedAccounts = await query(
     `SELECT ca.id, ca.user_id, ca.deriv_login_id, ca.deriv_account_id, ca.account_type, ca.platform, ca.currency,
@@ -347,21 +357,23 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
      FROM connected_accounts ca
      JOIN users u ON ca.user_id = u.id
      WHERE u.role NOT IN ('owner', 'admin')
-     ORDER BY COALESCE(u.last_login_at, ca.updated_at, ca.created_at) DESC, ca.id DESC LIMIT 200`
+     ORDER BY COALESCE(u.last_login_at, ca.updated_at, ca.created_at) DESC, ca.id DESC LIMIT 120`
   );
-  const strategies = await query('SELECT * FROM bot_strategies ORDER BY id DESC');
+  const strategies = await query(`SELECT ${BOT_STRATEGY_COLS} FROM bot_strategies ORDER BY id DESC LIMIT 100`);
   const orders = await query(
-    `SELECT vo.*, u.email as user_email
+    `SELECT ${ADMIN_ORDER_COLS}, u.email as user_email
      FROM virtual_orders vo
      JOIN users u ON vo.user_id = u.id
      WHERE u.role NOT IN ('owner', 'admin')
-     ORDER BY vo.id DESC LIMIT 200`
+     ORDER BY vo.id DESC LIMIT 60`
   );
   const rawInstruments = await query(
-    `SELECT m.*, c.price, c.change_pct
+    `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
+            m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
      FROM market_instruments m
      LEFT JOIN market_data_cache c ON m.symbol = c.symbol
-     ORDER BY m.category, m.display_name`
+     ORDER BY m.category, m.display_name
+     LIMIT 250`
   );
   const latestTicks = derivWs.getAllLatestTicks();
   const instruments = rawInstruments.map((inst: any) => ({
@@ -370,12 +382,16 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
     change_pct: derivWs.getChangePct(inst.symbol),
   }));
   const auditLogs = await query(
-    `SELECT l.*, a.email as admin_email, a.full_name as admin_name
+    `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
+            l.ip_address, l.action_result, l.details_json, l.created_at,
+            a.email as admin_email, a.full_name as admin_name
      FROM administrator_audit_logs l
      LEFT JOIN users a ON l.admin_user_id = a.id
-     ORDER BY l.id DESC LIMIT 150`
+     ORDER BY l.id DESC LIMIT 50`
   );
-  const emailLogs = await query('SELECT * FROM email_logs ORDER BY id DESC LIMIT 100');
+  const emailLogs = await query(
+    'SELECT id, recipient_email, subject, template, status, error_message, created_at FROM email_logs ORDER BY id DESC LIMIT 40'
+  );
   const branding = await getSetting('branding', {});
   const global = await getSetting('global', {});
   const commissions = await getSetting('commissions', {});
@@ -714,9 +730,16 @@ router.get('/admin/users/:id/activity', requireDb, requireAdmin, async (req, res
        FROM users WHERE id = $1`,
       [id]
     ),
-    query('SELECT * FROM connected_accounts WHERE user_id = $1 ORDER BY id DESC', [id]),
-    query('SELECT * FROM virtual_orders WHERE user_id = $1 ORDER BY id DESC LIMIT 50', [id]),
-    query('SELECT * FROM cashier_transactions WHERE user_id = $1 ORDER BY id DESC LIMIT 50', [id]),
+    query(`SELECT ${ACCOUNT_COLS} FROM connected_accounts WHERE user_id = $1 ORDER BY id DESC LIMIT 30`, [id]),
+    query(
+      `SELECT ${ADMIN_ORDER_COLS} FROM virtual_orders vo WHERE vo.user_id = $1 ORDER BY vo.id DESC LIMIT 40`,
+      [id]
+    ),
+    query(
+      `SELECT id, user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, created_at
+       FROM cashier_transactions WHERE user_id = $1 ORDER BY id DESC LIMIT 40`,
+      [id]
+    ),
   ]);
   if (!user) {
     res.status(404).json({ error: 'User not found' });
@@ -940,7 +963,10 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
 
   try {
     const user = await withTransaction(async (client) => {
-      const existingRes = await client.query<any>('SELECT * FROM users WHERE id = $1 FOR UPDATE', [id]);
+      const existingRes = await client.query<any>(
+        'SELECT id, status, virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+        [id]
+      );
       const existing = existingRes.rows[0];
       if (!existing) throw new Error('User not found');
 
@@ -1074,6 +1100,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
       derivWs.emitUserEvent(id, 'balance_updated', { real_wallets, realWallets: real_wallets });
     }
     derivWs.emitUserEvent(id, 'account_updated', { userId: id });
+    invalidateAuthUserCache(id);
 
     res.json({ user });
   } catch (err) {
@@ -1088,6 +1115,7 @@ router.patch('/admin/users/:id/role', requireDb, requireAdmin, async (req: AuthR
   const role = String(req.body?.role || 'user');
   const prev = await queryOne<{ role: string }>('SELECT role FROM users WHERE id = $1', [id]);
   await execute('UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2', [role, id]);
+  invalidateAuthUserCache(id);
   await logAdminAction(req.user!.id, 'update_user_role', 'users', String(id), { role }, {
     previousValue: prev?.role || '',
     newValue: role,
@@ -1105,6 +1133,7 @@ router.patch('/admin/users/:id/status', requireDb, requireAdmin, async (req: Aut
   }
   const prev = await queryOne<{ status: string }>('SELECT status FROM users WHERE id = $1', [id]);
   await execute('UPDATE users SET status = $1, updated_at = NOW() WHERE id = $2', [status, id]);
+  invalidateAuthUserCache(id);
   await logAdminAction(req.user!.id, 'update_user_status', 'users', String(id), { status }, {
     previousValue: prev?.status || '',
     newValue: status,
@@ -1132,6 +1161,7 @@ router.patch('/admin/users/:id/trading-access', requireDb, requireAdmin, async (
     'UPDATE users SET trading_suspended = $1, locked_until = $2, updated_at = NOW() WHERE id = $3',
     [nextSuspended, nextLocked, id]
   );
+  invalidateAuthUserCache(id);
   await logAdminAction(
     req.user!.id,
     nextSuspended ? 'freeze_user_trading' : 'unfreeze_user_trading',
@@ -1304,6 +1334,7 @@ router.delete('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReque
   }
   const prev = await queryOne<{ email: string }>('SELECT email FROM users WHERE id = $1', [id]);
   await execute('DELETE FROM users WHERE id = $1', [id]);
+  invalidateAuthUserCache(id);
   await logAdminAction(req.user!.id, 'delete_user', 'users', String(id), { email: prev?.email }, {
     previousValue: prev?.email || '',
     newValue: 'deleted',
@@ -1347,7 +1378,7 @@ router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, async 
         END,
         status = 'active',
         updated_at = NOW()
-      RETURNING *`,
+      RETURNING ${ACCOUNT_COLS.replace('last_known_balance as balance, ', '')}`,
       [Number(userId), loginid, accountType, currency, isVirtual, balance]
     );
 
@@ -1382,7 +1413,10 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, a
 
   try {
     const account = await withTransaction(async (client) => {
-      const prevRes = await client.query<any>('SELECT * FROM connected_accounts WHERE id = $1 FOR UPDATE', [id]);
+      const prevRes = await client.query<any>(
+        'SELECT id, balance, last_known_balance FROM connected_accounts WHERE id = $1 FOR UPDATE',
+        [id]
+      );
       const prevAcc = prevRes.rows[0];
       if (!prevAcc) throw new Error('Connected account not found');
       const prevBal = fromCents(toCents(prevAcc.last_known_balance ?? prevAcc.balance));
@@ -1494,7 +1528,10 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, async (re
 
   if (balance !== undefined && !checkReauthHeader(req, res)) return;
 
-  const existing = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1', [id]);
+  const existing = await queryOne<any>(
+    'SELECT id, user_id, account_type, currency FROM connected_accounts WHERE id = $1',
+    [id]
+  );
   if (!existing) {
     res.status(404).json({ error: 'Connected account not found' });
     return;
@@ -1589,7 +1626,10 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, async
   // Explicit Admin "Sync Live" unlocks the DB balance override and fetches fresh live balance from Deriv
   await execute('UPDATE connected_accounts SET balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $1', [id]);
 
-  const currentAcc = await queryOne<any>('SELECT * FROM connected_accounts WHERE id = $1', [id]);
+  const currentAcc = await queryOne<any>(
+    'SELECT id, deriv_login_id FROM connected_accounts WHERE id = $1',
+    [id]
+  );
   if (!currentAcc) {
     res.status(404).json({ error: 'Connected account not found' });
     return;
@@ -1676,7 +1716,7 @@ router.post('/admin/strategies', requireDb, requireAdmin, async (req: AuthReques
   const strategy = await queryOne<any>(
     `INSERT INTO bot_strategies (name, slug, category, symbol, contract_type, description, win_rate_est, rating, is_premium, is_active, config_json)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, TRUE, $10)
-     RETURNING *`,
+     RETURNING ${BOT_STRATEGY_COLS}`,
     [
       b.name,
       slug,
@@ -1692,6 +1732,7 @@ router.post('/admin/strategies', requireDb, requireAdmin, async (req: AuthReques
         : JSON.stringify(b.config || { stake: 1, barrier: '2', duration: 1, martingale: 2 }),
     ]
   );
+  invalidateBotStrategiesCache();
   await logAdminAction(req.user!.id, 'create_strategy', 'bot_strategies', String(strategy.id));
   res.status(201).json({ strategy });
 });
@@ -1713,7 +1754,7 @@ router.patch('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthR
       config_json = COALESCE($10, config_json),
       updated_at = NOW()
      WHERE id = $11
-     RETURNING *`,
+     RETURNING ${BOT_STRATEGY_COLS}`,
     [
       b.name ?? null,
       b.category ?? null,
@@ -1728,6 +1769,7 @@ router.patch('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthR
       id,
     ]
   );
+  invalidateBotStrategiesCache();
   await logAdminAction(req.user!.id, 'update_strategy', 'bot_strategies', String(id));
   res.json({ strategy });
 });
@@ -1735,6 +1777,7 @@ router.patch('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthR
 router.delete('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   await execute('DELETE FROM bot_strategies WHERE id = $1', [id]);
+  invalidateBotStrategiesCache();
   await logAdminAction(req.user!.id, 'delete_strategy', 'bot_strategies', String(id));
   res.json({ ok: true });
 });
@@ -1742,10 +1785,12 @@ router.delete('/admin/strategies/:id', requireDb, requireAdmin, async (req: Auth
 // Instruments Management
 router.get('/admin/instruments', requireDb, requireAdmin, async (_req, res) => {
   const rows = await query(
-    `SELECT m.*, c.price, c.change_pct
+    `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
+            m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
      FROM market_instruments m
      LEFT JOIN market_data_cache c ON m.symbol = c.symbol
-     ORDER BY m.category, m.display_name`
+     ORDER BY m.category, m.display_name
+     LIMIT 250`
   );
   const ticks = derivWs.getAllLatestTicks();
   res.json({
@@ -1769,7 +1814,7 @@ router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, async (req: 
       is_active = COALESCE($5, is_active),
       updated_at = NOW()
      WHERE symbol = $6
-     RETURNING *`,
+     RETURNING id, symbol, display_name, category, market, submarket, pip_size, spread, min_stake, max_stake, is_active`,
     [
       display_name ?? null,
       spread !== undefined ? Number(spread) : null,
@@ -1791,6 +1836,7 @@ router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, async (req: 
     );
     derivWs.setInstrumentSpotOverride(symbol, p);
   }
+  invalidateInstrumentsCache();
   await logAdminAction(req.user!.id, 'update_instrument', 'market_instruments', symbol, req.body || {});
   res.json({ instrument: { ...inst, price: derivWs.getLatestTick(symbol)?.quote ?? Number(price || 0) } });
 });
@@ -1801,6 +1847,8 @@ router.get('/admin/trades', requireDb, requireAdmin, async (req, res) => {
   const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : '';
   const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : '';
   const accountMode = typeof req.query.accountMode === 'string' ? req.query.accountMode.trim().toLowerCase() : '';
+  const limit = Math.min(250, Math.max(1, Number(req.query.limit || 80)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
 
   const where: string[] = ["u.role NOT IN ('owner', 'admin')"];
   const params: unknown[] = [];
@@ -1821,12 +1869,13 @@ router.get('/admin/trades', requireDb, requireAdmin, async (req, res) => {
     where.push(`COALESCE(vo.account_mode, 'demo') = $${params.length}`);
   }
 
+  params.push(limit, offset);
   const orders = await query(
-    `SELECT vo.*, u.email as user_email, u.full_name as user_name
+    `SELECT ${ADMIN_ORDER_COLS}, u.email as user_email, u.full_name as user_name
      FROM virtual_orders vo
      JOIN users u ON vo.user_id = u.id
      WHERE ${where.join(' AND ')}
-     ORDER BY vo.id DESC LIMIT 250`,
+     ORDER BY vo.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
     params
   );
   res.json({ orders });
@@ -1835,7 +1884,7 @@ router.get('/admin/trades', requireDb, requireAdmin, async (req, res) => {
 router.patch('/admin/orders/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const { notes, status, exit_price, pnl, stake } = req.body || {};
-  const existing = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1', [id]);
+  const existing = await queryOne<any>('SELECT id, status, notes FROM virtual_orders WHERE id = $1', [id]);
   if (!existing) {
     res.status(404).json({ error: 'Order not found' });
     return;
@@ -1864,7 +1913,8 @@ router.patch('/admin/orders/:id', requireDb, requireAdmin, async (req: AuthReque
 
   const cleanNotes = notes !== undefined ? String(notes).slice(0, 500) : existing.notes || '';
   const updated = await queryOne<any>(
-    `UPDATE virtual_orders SET notes = $1 WHERE id = $2 RETURNING *`,
+    `UPDATE virtual_orders SET notes = $1 WHERE id = $2
+     RETURNING id, user_id, symbol, side, contract_type, stake, pnl, status, notes, opened_at, closed_at`,
     [cleanNotes, id]
   );
 
@@ -1902,12 +1952,17 @@ router.post('/admin/orders/:id/close', requireDb, requireAdmin, async (req: Auth
   }
 });
 
-router.get('/admin/audit-logs', requireDb, requireAdmin, async (_req, res) => {
+router.get('/admin/audit-logs', requireDb, requireAdmin, async (req, res) => {
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 60)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
   const logs = await query(
-    `SELECT l.*, a.email as admin_email, a.full_name as admin_name
+    `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
+            l.ip_address, l.action_result, l.details_json, l.created_at,
+            a.email as admin_email, a.full_name as admin_name
      FROM administrator_audit_logs l
      LEFT JOIN users a ON l.admin_user_id = a.id
-     ORDER BY l.id DESC LIMIT 200`
+     ORDER BY l.id DESC LIMIT $1 OFFSET $2`,
+    [limit, offset]
   );
   res.json({ auditLogs: logs });
 });
@@ -1915,19 +1970,24 @@ router.get('/admin/audit-logs', requireDb, requireAdmin, async (_req, res) => {
 // Cashier & Balance Adjustment Logs
 router.get('/admin/cashier-logs', requireDb, requireAdmin, async (req, res) => {
   const txType = typeof req.query.tx_type === 'string' ? req.query.tx_type : '';
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 60)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+  const cols =
+    'ct.id, ct.user_id, ct.tx_type, ct.method, ct.provider, ct.account_from, ct.account_to, ct.amount, ct.currency, ct.reference_id, ct.status, ct.account_mode, ct.created_at, u.email as user_email';
   const rows = txType
     ? await query(
-        `SELECT ct.*, u.email as user_email FROM cashier_transactions ct
+        `SELECT ${cols} FROM cashier_transactions ct
          JOIN users u ON ct.user_id = u.id
          WHERE ct.tx_type = $1 AND u.role NOT IN ('owner', 'admin')
-         ORDER BY ct.id DESC LIMIT 200`,
-        [txType]
+         ORDER BY ct.id DESC LIMIT $2 OFFSET $3`,
+        [txType, limit, offset]
       )
     : await query(
-        `SELECT ct.*, u.email as user_email FROM cashier_transactions ct
+        `SELECT ${cols} FROM cashier_transactions ct
          JOIN users u ON ct.user_id = u.id
          WHERE u.role NOT IN ('owner', 'admin')
-         ORDER BY ct.id DESC LIMIT 200`
+         ORDER BY ct.id DESC LIMIT $1 OFFSET $2`,
+        [limit, offset]
       );
   res.json({ transactions: rows });
 });

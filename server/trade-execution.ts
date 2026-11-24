@@ -126,6 +126,9 @@ export async function getDecryptedAccountToken(
   return { account, token };
 }
 
+const ORDER_SELECT_COLS =
+  'id, user_id, connected_account_id, deriv_contract_id, execution_mode, source, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, sl_price, tp_price, sl_usd, tp_usd, barrier, duration, duration_unit, payout, pnl, status, strategy_key, timeframe, account_mode, notes, opened_at, closed_at';
+
 async function checkUserRiskLimits(userId: number, stake: number, source: string): Promise<void> {
   if (source === 'bulk') return;
   const risk = await queryOne<{
@@ -135,7 +138,10 @@ async function checkUserRiskLimits(userId: number, stake: number, source: string
     cooldown_minutes: number;
     cooldown_until: string | null;
     enforce_limits: boolean;
-  }>('SELECT * FROM risk_settings WHERE user_id = $1', [userId]);
+  }>(
+    'SELECT daily_loss_limit_usd, max_exposure_usd, max_consecutive_losses, cooldown_minutes, cooldown_until, enforce_limits FROM risk_settings WHERE user_id = $1',
+    [userId]
+  );
 
   if (!risk || !risk.enforce_limits) return;
 
@@ -595,7 +601,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       barrier, duration, duration_unit, payout, pnl, status,
       strategy_key, timeframe, account_mode, notes
     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN', $23, $24, $25, $26)
-    RETURNING *`,
+    RETURNING ${ORDER_SELECT_COLS}`,
     [
       input.userId,
       resolvedConnectedAccountId || null,
@@ -626,6 +632,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     ]
   );
 
+  trackOpenMtmOrder(created);
   derivWs.emitUserEvent(input.userId, 'order_opened', created);
 
   if (
@@ -764,7 +771,10 @@ export async function creditSettledPayoutToUser(
 }
 
 export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
-  const order = await queryOne<any>("SELECT * FROM virtual_orders WHERE id = $1 AND status = 'OPEN'", [orderId]);
+  const order = await queryOne<any>(
+    `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1 AND status = 'OPEN'`,
+    [orderId]
+  );
   if (!order) return null;
 
   const latest = await derivWs.getLiveQuote(order.symbol);
@@ -802,12 +812,13 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
     `UPDATE virtual_orders
      SET status = 'CLOSED', exit_price = $1, current_price = $1, payout = $2, pnl = $3, closed_at = NOW()
      WHERE id = $4
-     RETURNING *`,
+     RETURNING ${ORDER_SELECT_COLS}`,
     [exitPrice, payout, pnl, order.id]
   );
 
   await creditSettledPayoutToUser(order.user_id, order.account_mode, payout, order.connected_account_id);
 
+  untrackOpenMtmOrder(order.id);
   derivWs.emitUserEvent(order.user_id, 'order_closed', closedOrder);
   if (pnl < 0) {
     await evaluateConsecutiveLossCooldown(order.user_id);
@@ -816,12 +827,15 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
 }
 
 export async function closeOrderById(orderId: number, userId?: number, isAdmin = false): Promise<any> {
-  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1', [orderId]);
+  const order = await queryOne<any>(`SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1`, [orderId]);
   if (!order) throw new Error('Order not found');
   if (!isAdmin && userId !== undefined && order.user_id !== userId) {
     throw new Error('Unauthorized to close this order');
   }
-  if (order.status === 'CLOSED') return order;
+  if (order.status === 'CLOSED') {
+    untrackOpenMtmOrder(order.id);
+    return order;
+  }
 
   const latest = await derivWs.getLiveQuote(order.symbol);
   const exitPrice = latest?.quote || order.current_price || order.entry_price;
@@ -903,10 +917,11 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
     `UPDATE virtual_orders
      SET status = 'CLOSED', current_price = $1, exit_price = $1, pnl = $2, closed_at = NOW()
      WHERE id = $3
-     RETURNING *`,
+     RETURNING ${ORDER_SELECT_COLS}`,
     [exitPrice, pnl, order.id]
   );
 
+  untrackOpenMtmOrder(order.id);
   derivWs.emitUserEvent(order.user_id, 'order_closed', closedOrder);
   if (pnl < 0) {
     await evaluateConsecutiveLossCooldown(order.user_id);
@@ -919,7 +934,7 @@ export async function bulkCloseOrders(
   filter: 'all' | 'profitable' | 'losing' | 'buy' | 'sell' | 'over' | 'under' | 'bot'
 ): Promise<{ closedCount: number; closedOrders: any[] }> {
   const openOrders = await query<any>(
-    "SELECT * FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN'",
+    `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' LIMIT 200`,
     [userId]
   );
 
@@ -968,7 +983,10 @@ export async function updateOrderLimits(
   userId: number,
   patch: { slPrice?: number | null; tpPrice?: number | null; slUsd?: number | null; tpUsd?: number | null }
 ): Promise<any> {
-  const order = await queryOne<any>('SELECT * FROM virtual_orders WHERE id = $1 AND user_id = $2', [orderId, userId]);
+  const order = await queryOne<any>(
+    `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1 AND user_id = $2`,
+    [orderId, userId]
+  );
   if (!order) throw new Error('Order not found');
   if (order.status !== 'OPEN') throw new Error('Only open positions can update SL/TP');
   if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL'].includes(String(order.contract_type || '').toUpperCase())) {
@@ -1029,22 +1047,79 @@ export async function updateOrderLimits(
     `UPDATE virtual_orders
      SET sl_price = $1, tp_price = $2, sl_usd = $3, tp_usd = $4
      WHERE id = $5 AND user_id = $6
-     RETURNING *`,
+     RETURNING ${ORDER_SELECT_COLS}`,
     [nextSlPrice, nextTpPrice, nextSlUsd, nextTpUsd, orderId, userId]
   );
 
+  trackOpenMtmOrder(updated);
   derivWs.emitUserEvent(userId, 'order_updated', updated);
   return updated;
 }
 
 const mtmClosingLocks = new Set<number>();
 const lastOrderEmitAt = new Map<number, number>();
+const lastMtmPersistAt = new Map<number, number>();
+const openMtmOrdersCache = new Map<number, any>();
+let openMtmHydrated = false;
+let openMtmLastSyncAt = 0;
+let openMtmHydratePromise: Promise<void> | null = null;
 let mtmSweepBusy = false;
+
+const MTM_CONTRACT_TYPES = new Set(['MULTUP', 'MULTDOWN', 'BUY', 'SELL', 'ACCU']);
+
+function trackOpenMtmOrder(order: any): void {
+  if (!order || order.status !== 'OPEN') return;
+  const ct = String(order.contract_type || '').toUpperCase();
+  if (!MTM_CONTRACT_TYPES.has(ct)) return;
+  openMtmOrdersCache.set(Number(order.id), { ...order });
+}
+
+export function untrackOpenMtmOrder(orderId: number): void {
+  const id = Number(orderId);
+  openMtmOrdersCache.delete(id);
+  lastOrderEmitAt.delete(id);
+  lastMtmPersistAt.delete(id);
+}
+
+export function invalidateOpenOrdersCache(): void {
+  openMtmHydrated = false;
+}
+
+async function ensureOpenMtmCacheHydrated(force = false): Promise<void> {
+  const now = Date.now();
+  if (!force && openMtmHydrated && now - openMtmLastSyncAt < 120_000) {
+    return;
+  }
+  if (openMtmHydratePromise) {
+    return openMtmHydratePromise;
+  }
+  openMtmHydratePromise = (async () => {
+    try {
+      const rows = await query<any>(
+        `SELECT ${ORDER_SELECT_COLS}
+         FROM virtual_orders
+         WHERE status = 'OPEN' AND contract_type IN ('MULTUP','MULTDOWN','BUY','SELL','ACCU')
+         LIMIT 200`
+      );
+      openMtmOrdersCache.clear();
+      for (const r of rows) {
+        openMtmOrdersCache.set(Number(r.id), r);
+      }
+      openMtmHydrated = true;
+      openMtmLastSyncAt = Date.now();
+    } catch {
+      // ignore while DB is waking up
+    } finally {
+      openMtmHydratePromise = null;
+    }
+  })();
+  return openMtmHydratePromise;
+}
 
 async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
   if (mtmClosingLocks.has(order.id)) return;
   const ct = String(order.contract_type || '').toUpperCase();
-  if (!['MULTUP', 'MULTDOWN', 'BUY', 'SELL', 'ACCU'].includes(ct)) return;
+  if (!MTM_CONTRACT_TYPES.has(ct)) return;
   const entry = Number(order.entry_price || 0);
   if (!(entry > 0) || !Number.isFinite(quotePrice)) return;
 
@@ -1061,6 +1136,7 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
 
     if (shouldKnockout) {
       mtmClosingLocks.add(order.id);
+      untrackOpenMtmOrder(order.id);
       await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
         quotePrice,
         -Number(order.stake),
@@ -1083,19 +1159,33 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
     }
 
     const accruedPnl = Number((order.stake * (Math.pow(1 + growthRate, Math.min(45, elapsedTicks)) - 1)).toFixed(2));
-    await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
-      quotePrice,
-      accruedPnl,
-      order.id,
-    ]);
-    derivWs.emitUserEvent(order.user_id, 'order_updated', {
-      id: order.id,
-      current_price: quotePrice,
-      pnl: accruedPnl,
-    });
+    order.current_price = quotePrice;
+    order.pnl = accruedPnl;
+
+    const nowMs = Date.now();
+    const prevPersist = lastMtmPersistAt.get(order.id) || 0;
+    if (nowMs - prevPersist >= 4000) {
+      lastMtmPersistAt.set(order.id, nowMs);
+      execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+        quotePrice,
+        accruedPnl,
+        order.id,
+      ]).catch(() => {});
+    }
+
+    const prevEmit = lastOrderEmitAt.get(order.id) || 0;
+    if (nowMs - prevEmit >= 450) {
+      lastOrderEmitAt.set(order.id, nowMs);
+      derivWs.emitUserEvent(order.user_id, 'order_updated', {
+        id: order.id,
+        current_price: quotePrice,
+        pnl: accruedPnl,
+      });
+    }
 
     if (order.tp_usd && Number(order.tp_usd) > 0 && accruedPnl >= Number(order.tp_usd)) {
       mtmClosingLocks.add(order.id);
+      untrackOpenMtmOrder(order.id);
       closeOrderById(order.id, order.user_id)
         .then((closed) => {
           if (closed) {
@@ -1118,13 +1208,20 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
   const directional = isUp ? pctDiff : -pctDiff;
   const livePnl = Number(Math.max(-Number(order.stake), directional * Number(order.stake) * Number(order.multiplier || 100)).toFixed(2));
 
-  await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
-    quotePrice,
-    livePnl,
-    order.id,
-  ]);
+  order.current_price = quotePrice;
+  order.pnl = livePnl;
 
   const nowMs = Date.now();
+  const prevPersist = lastMtmPersistAt.get(order.id) || 0;
+  if (nowMs - prevPersist >= 4000) {
+    lastMtmPersistAt.set(order.id, nowMs);
+    execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+      quotePrice,
+      livePnl,
+      order.id,
+    ]).catch(() => {});
+  }
+
   const prevEmit = lastOrderEmitAt.get(order.id) || 0;
   if (nowMs - prevEmit >= 450) {
     lastOrderEmitAt.set(order.id, nowMs);
@@ -1148,6 +1245,7 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
 
   if (hitTpUsd || hitSlUsd || hitTpPrice || hitSlPrice) {
     mtmClosingLocks.add(order.id);
+    untrackOpenMtmOrder(order.id);
     const reason = hitTpUsd || hitTpPrice ? 'Take Profit' : 'Stop Loss';
     closeOrderById(order.id, order.user_id)
       .then((closed) => {
@@ -1166,30 +1264,29 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
 }
 
 export function startMtmPositionMonitor(): void {
-  derivWs.onTick(async (tick) => {
+  // Initial one-time hydration after startup
+  setTimeout(() => {
+    ensureOpenMtmCacheHydrated(true).catch(() => {});
+  }, 3000);
+
+  derivWs.onTick((tick) => {
     if (tick.source !== 'deriv_ws' && tick.source !== 'live_pulse') return;
-    try {
-      const openOrders = await query<any>(
-        "SELECT * FROM virtual_orders WHERE symbol = $1 AND status = 'OPEN' AND source != 'bot'",
-        [tick.symbol]
-      );
-      for (const order of openOrders) {
-        await evaluateMtmOrder(order, tick.quote);
+    if (openMtmOrdersCache.size === 0) return;
+    for (const order of openMtmOrdersCache.values()) {
+      if (order.symbol === tick.symbol && order.source !== 'bot') {
+        evaluateMtmOrder(order, tick.quote).catch(() => {});
       }
-    } catch {
-      // ignore if DB not yet initialized
     }
   });
 
-  // Periodic sweep guarantees MTM + SL/TP checks stay alive across all open positions
+  // Periodic sweep guarantees MTM + SL/TP checks stay alive with zero DB queries when no orders are open
   setInterval(async () => {
     if (mtmSweepBusy) return;
     mtmSweepBusy = true;
     try {
-      const openOrders = await query<any>(
-        "SELECT * FROM virtual_orders WHERE status = 'OPEN' AND contract_type IN ('MULTUP','MULTDOWN','BUY','SELL','ACCU') LIMIT 100"
-      );
-      for (const order of openOrders) {
+      await ensureOpenMtmCacheHydrated(false);
+      if (openMtmOrdersCache.size === 0) return;
+      for (const order of openMtmOrdersCache.values()) {
         await derivWs.ensureSymbolSubscribed(order.symbol);
         const t = derivWs.getLatestTick(order.symbol);
         if (t && (t.source === 'deriv_ws' || t.source === 'live_pulse')) {

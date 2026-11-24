@@ -41,8 +41,8 @@ export const pool: Pool | null = databaseConfigured
       connectionString: nonLocalDb ? sanitizeConnectionStringForPg(config.databaseUrl) : config.databaseUrl,
       ssl: nonLocalDb ? { rejectUnauthorized: false } : undefined,
       connectionTimeoutMillis: 10000,
-      idleTimeoutMillis: 30000,
-      max: 15,
+      idleTimeoutMillis: 15000,
+      max: 10,
     })
   : null;
 
@@ -53,7 +53,9 @@ if (pool) {
 }
 
 let schemaPromise: Promise<void> | null = null;
+const SETTINGS_TTL_MS = 60_000;
 const settingsCache = new Map<string, unknown>();
+const settingsCacheAt = new Map<string, number>();
 
 export function getCachedSetting<T>(key: string, fallback: T): T {
   if (settingsCache.has(key)) {
@@ -475,7 +477,9 @@ async function runSchemaAndSeed(): Promise<void> {
       ON connected_accounts (user_id, deriv_login_id);
 
       CREATE INDEX IF NOT EXISTS idx_virtual_orders_user_status ON virtual_orders (user_id, status, opened_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_virtual_orders_open_mtm ON virtual_orders (symbol, id) WHERE status = 'OPEN';
       CREATE INDEX IF NOT EXISTS idx_smart_alerts_user_status ON smart_alerts (user_id, status);
+      CREATE INDEX IF NOT EXISTS idx_smart_alerts_active_symbol ON smart_alerts (symbol, id) WHERE status = 'active';
       CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_email_time ON admin_login_attempts (email, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_journal_user_time ON trading_journal_entries (user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_cashier_tx_user_time ON cashier_transactions (user_id, created_at DESC);
@@ -507,50 +511,56 @@ async function runSchemaAndSeed(): Promise<void> {
        ON CONFLICT (name) DO NOTHING`
     );
 
-    // Seed curated Deriv instruments
-    for (const inst of CURATED_DERIV_INSTRUMENTS) {
-      await client.query(
-        `INSERT INTO market_instruments (symbol, display_name, category, market, submarket, pip_size, spread)
-         VALUES ($1, $2, $3, $4, $5, $6, $7)
-         ON CONFLICT (symbol) DO NOTHING`,
-        [inst.symbol, inst.display_name, inst.category, inst.market, inst.submarket, inst.pip_size, inst.spread]
-      );
+    // Seed curated Deriv instruments only when table is empty
+    const instCountRes = await client.query<{ c: number }>('SELECT COUNT(*)::int as c FROM market_instruments');
+    if ((instCountRes.rows[0]?.c || 0) === 0) {
+      for (const inst of CURATED_DERIV_INSTRUMENTS) {
+        await client.query(
+          `INSERT INTO market_instruments (symbol, display_name, category, market, submarket, pip_size, spread)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)
+           ON CONFLICT (symbol) DO NOTHING`,
+          [inst.symbol, inst.display_name, inst.category, inst.market, inst.submarket, inst.pip_size, inst.spread]
+        );
 
-      const spark: number[] = [];
-      let p = inst.base_price;
-      for (let i = 0; i < 24; i++) {
-        const drift = Math.sin(i * 0.7 + inst.symbol.length) * 0.0025 * inst.base_price;
-        p = Number((inst.base_price + drift).toFixed(inst.pip_size < 0.001 ? 5 : 2));
-        spark.push(p);
+        const spark: number[] = [];
+        let p = inst.base_price;
+        for (let i = 0; i < 24; i++) {
+          const drift = Math.sin(i * 0.7 + inst.symbol.length) * 0.0025 * inst.base_price;
+          p = Number((inst.base_price + drift).toFixed(inst.pip_size < 0.001 ? 5 : 2));
+          spark.push(p);
+        }
+        const chg = Number((((spark[spark.length - 1] - spark[0]) / (spark[0] || 1)) * 100).toFixed(2));
+        await client.query(
+          `INSERT INTO market_data_cache (symbol, price, change_pct, high_24h, low_24h, sparkline_json)
+           VALUES ($1, $2, $3, $4, $5, $6)
+           ON CONFLICT (symbol) DO NOTHING`,
+          [inst.symbol, spark[spark.length - 1], chg, Math.max(...spark), Math.min(...spark), JSON.stringify(spark)]
+        );
       }
-      const chg = Number((((spark[spark.length - 1] - spark[0]) / (spark[0] || 1)) * 100).toFixed(2));
-      await client.query(
-        `INSERT INTO market_data_cache (symbol, price, change_pct, high_24h, low_24h, sparkline_json)
-         VALUES ($1, $2, $3, $4, $5, $6)
-         ON CONFLICT (symbol) DO NOTHING`,
-        [inst.symbol, spark[spark.length - 1], chg, Math.max(...spark), Math.min(...spark), JSON.stringify(spark)]
-      );
     }
 
-    // Seed bot strategies
-    for (const s of SEEDED_BOT_STRATEGIES) {
-      await client.query(
-        `INSERT INTO bot_strategies (name, slug, category, symbol, contract_type, description, win_rate_est, rating, is_premium, config_json)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-         ON CONFLICT (slug) DO NOTHING`,
-        [
-          s.name,
-          s.slug,
-          s.category,
-          s.symbol,
-          s.contract_type,
-          s.description,
-          s.win_rate_est,
-          s.rating,
-          Boolean(s.is_premium),
-          JSON.stringify(s.config),
-        ]
-      );
+    // Seed bot strategies only when table is empty
+    const stratCountRes = await client.query<{ c: number }>('SELECT COUNT(*)::int as c FROM bot_strategies');
+    if ((stratCountRes.rows[0]?.c || 0) === 0) {
+      for (const s of SEEDED_BOT_STRATEGIES) {
+        await client.query(
+          `INSERT INTO bot_strategies (name, slug, category, symbol, contract_type, description, win_rate_est, rating, is_premium, config_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+           ON CONFLICT (slug) DO NOTHING`,
+          [
+            s.name,
+            s.slug,
+            s.category,
+            s.symbol,
+            s.contract_type,
+            s.description,
+            s.win_rate_est,
+            s.rating,
+            Boolean(s.is_premium),
+            JSON.stringify(s.config),
+          ]
+        );
+      }
     }
 
     // Seed default settings
@@ -720,6 +730,7 @@ async function runSchemaAndSeed(): Promise<void> {
         }
       }
       settingsCache.set(key, parsed);
+      settingsCacheAt.set(key, Date.now());
     }
 
     // Optional env-var Owner bootstrap when ADMIN_EMAIL and ADMIN_PASSWORD are provided
@@ -782,7 +793,15 @@ export async function requireDb(_req: Request, res: Response, next: NextFunction
   }
 }
 
-export async function checkDatabaseHealth(): Promise<{
+let lastHealthCheckResult: {
+  ok: boolean;
+  configured: boolean;
+  connected: boolean;
+  latencyMs: number;
+} | null = null;
+let lastHealthCheckAt = 0;
+
+export async function checkDatabaseHealth(force = false): Promise<{
   ok: boolean;
   configured: boolean;
   connected: boolean;
@@ -791,18 +810,29 @@ export async function checkDatabaseHealth(): Promise<{
   if (!pool) {
     return { ok: false, configured: false, connected: false, latencyMs: 0 };
   }
+  if (!force && lastHealthCheckResult && Date.now() - lastHealthCheckAt < 30_000) {
+    return lastHealthCheckResult;
+  }
   const t0 = Date.now();
   try {
     await ensureDatabaseSchema();
     await pool.query('SELECT 1');
-    return { ok: true, configured: true, connected: true, latencyMs: Date.now() - t0 };
+    lastHealthCheckResult = { ok: true, configured: true, connected: true, latencyMs: Date.now() - t0 };
+    lastHealthCheckAt = Date.now();
+    return lastHealthCheckResult;
   } catch {
-    return { ok: false, configured: true, connected: false, latencyMs: Date.now() - t0 };
+    lastHealthCheckResult = { ok: false, configured: true, connected: false, latencyMs: Date.now() - t0 };
+    lastHealthCheckAt = Date.now();
+    return lastHealthCheckResult;
   }
 }
 
 export async function getSetting<T = Record<string, unknown>>(key: string, fallback: T): Promise<T> {
   if (!pool) return getCachedSetting(key, fallback);
+  const cachedAt = settingsCacheAt.get(key) || 0;
+  if (settingsCache.has(key) && Date.now() - cachedAt < SETTINGS_TTL_MS) {
+    return settingsCache.get(key) as T;
+  }
   try {
     const row = await queryOne<{ value_json: string }>('SELECT value_json FROM application_settings WHERE key = $1', [
       key,
@@ -810,6 +840,7 @@ export async function getSetting<T = Record<string, unknown>>(key: string, fallb
     if (!row) return fallback;
     const parsed = JSON.parse(row.value_json) as T;
     settingsCache.set(key, parsed);
+    settingsCacheAt.set(key, Date.now());
     return parsed;
   } catch {
     return getCachedSetting(key, fallback);
@@ -818,6 +849,7 @@ export async function getSetting<T = Record<string, unknown>>(key: string, fallb
 
 export async function setSetting(key: string, value: unknown): Promise<void> {
   settingsCache.set(key, value);
+  settingsCacheAt.set(key, Date.now());
   await execute(
     `INSERT INTO application_settings (key, value_json, updated_at)
      VALUES ($1, $2, NOW())

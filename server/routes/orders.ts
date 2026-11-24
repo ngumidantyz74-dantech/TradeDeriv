@@ -8,6 +8,17 @@ import { startBotSession, stopBotSession, closeAllBotOrders, getBotStatus } from
 
 const router = Router();
 
+const ORDER_COLS = `id, user_id, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, pnl, sl_usd, tp_usd, sl_price, tp_price, barrier, duration, duration_unit, execution_mode, connected_account_id, account_mode, source, strategy_key, timeframe, notes, deriv_contract_id, status, opened_at, closed_at`;
+
+const BOT_STRATEGIES_TTL_MS = 5 * 60 * 1000;
+let botStrategiesCache: any[] | null = null;
+let botStrategiesCachedAt = 0;
+
+export function invalidateBotStrategiesCache(): void {
+  botStrategiesCache = null;
+  botStrategiesCachedAt = 0;
+}
+
 router.use((_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
   res.setHeader('Pragma', 'no-cache');
@@ -16,9 +27,12 @@ router.use((_req, res, next) => {
 });
 
 router.get('/orders', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const rows = await query<any>('SELECT * FROM virtual_orders WHERE user_id = $1 ORDER BY id DESC LIMIT 200', [
-    req.user!.id,
-  ]);
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 60)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+  const rows = await query<any>(
+    `SELECT ${ORDER_COLS} FROM virtual_orders WHERE user_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3`,
+    [req.user!.id, limit, offset]
+  );
   const orders = rows.map((o) => {
     if (o.status !== 'OPEN') return o;
     derivWs.ensureSymbolSubscribed(o.symbol).catch(() => {});
@@ -257,10 +271,21 @@ router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthReq
 
 // Bots (No password gate)
 router.get('/bots/strategies', async (_req, res) => {
+  if (botStrategiesCache && Date.now() - botStrategiesCachedAt < BOT_STRATEGIES_TTL_MS) {
+    res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
+    res.json({ strategies: botStrategiesCache });
+    return;
+  }
   if (pool) {
     try {
       await ensureDatabaseSchema();
-      const rows = await query<any>('SELECT * FROM bot_strategies WHERE is_active = TRUE ORDER BY is_premium ASC, rating DESC');
+      const rows = await query<any>(
+        `SELECT id, name, slug, category, symbol, contract_type, description, win_rate_est, rating, is_premium, is_active, config_json
+         FROM bot_strategies
+         WHERE is_active = TRUE
+         ORDER BY is_premium ASC, rating DESC
+         LIMIT 100`
+      );
       const strategies = rows.map((r) => ({
         ...r,
         config: (() => {
@@ -271,6 +296,9 @@ router.get('/bots/strategies', async (_req, res) => {
           }
         })(),
       }));
+      botStrategiesCache = strategies;
+      botStrategiesCachedAt = Date.now();
+      res.setHeader('Cache-Control', 'public, max-age=60, stale-while-revalidate=120');
       res.json({ strategies });
       return;
     } catch {

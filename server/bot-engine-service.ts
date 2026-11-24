@@ -69,6 +69,7 @@ interface InternalBotSession extends BotTelemetry {
 
 const activeSessions = new Map<number, InternalBotSession>();
 const closingOrderLocks = new Set<number>();
+const botLastPersistAt = new Map<number, number>();
 
 function getLastDigit(price: number, pipSize = 0.01): number {
   const decimals = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
@@ -195,23 +196,31 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   if (session.recentPrices.length > 20) session.recentPrices.shift();
 
   const openBotOrders = await query<any>(
-    "SELECT * FROM virtual_orders WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' AND source = 'bot'",
+    `SELECT id, user_id, symbol, contract_type, stake, multiplier, entry_price, barrier, sl_usd, tp_usd, opened_at
+     FROM virtual_orders
+     WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' AND source = 'bot'
+     LIMIT 20`,
     [session.userId, session.symbol]
   );
 
   for (const order of openBotOrders) {
     if (closingOrderLocks.has(order.id)) continue;
     const oct = String(order.contract_type || '').toUpperCase();
+    const nowMs = Date.now();
+    const shouldPersist = nowMs - (botLastPersistAt.get(order.id) || 0) >= 3000;
 
     if (oct === 'ACCU') {
       const growthRate = Math.min(0.05, Math.max(0.01, Number(order.barrier || session.growthRate || 0.02)));
       const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / 1500));
       const accruedPnl = Number((order.stake * (Math.pow(1 + growthRate, elapsedTicks) - 1)).toFixed(2));
-      await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
-        tick.quote,
-        accruedPnl,
-        order.id,
-      ]);
+      if (shouldPersist) {
+        botLastPersistAt.set(order.id, nowMs);
+        execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+          tick.quote,
+          accruedPnl,
+          order.id,
+        ]).catch(() => {});
+      }
       derivWs.emitUserEvent(session.userId, 'order_updated', {
         id: order.id,
         current_price: tick.quote,
@@ -220,6 +229,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 
       if (elapsedTicks >= 5 || accruedPnl >= Number(order.tp_usd || order.stake * 0.15)) {
         closingOrderLocks.add(order.id);
+        botLastPersistAt.delete(order.id);
         closeOrderById(order.id, session.userId)
           .then((closed) => {
             if (closed) {
@@ -241,7 +251,10 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     const pctDiff = (tick.quote - order.entry_price) / (order.entry_price || 1);
     const directional = isUp ? pctDiff : -pctDiff;
     const livePnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
-    await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [tick.quote, livePnl, order.id]);
+    if (shouldPersist) {
+      botLastPersistAt.set(order.id, nowMs);
+      execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [tick.quote, livePnl, order.id]).catch(() => {});
+    }
     derivWs.emitUserEvent(session.userId, 'order_updated', {
       id: order.id,
       current_price: tick.quote,
@@ -252,6 +265,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     const hitSl = order.sl_usd && livePnl <= -Number(order.sl_usd);
     if (hitTp || hitSl) {
       closingOrderLocks.add(order.id);
+      botLastPersistAt.delete(order.id);
       closeOrderById(order.id, session.userId)
         .then((closed) => {
           if (closed) {
@@ -283,11 +297,12 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   if (session.executionSpeed === 'normal' && Date.now() - session.lastTradeAt < 1800) {
     return;
   }
-  const stillOpen = await queryOne<{ c: string }>(
-    "SELECT COUNT(*)::text as c FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' AND source = 'bot'",
+  if (openBotOrders.length > 0) return;
+  const stillOpen = await queryOne<{ id: number }>(
+    "SELECT id FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' AND source = 'bot' LIMIT 1",
     [session.userId]
   );
-  if (Number(stillOpen?.c || 0) > 0) return;
+  if (stillOpen) return;
 
   session.isExecutingTrade = true;
   try {
@@ -366,7 +381,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         } catch {
           clearInterval(checkInterval);
         }
-      }, 450);
+      }, 1100);
     }
   } catch (err) {
     session.lastSignal = err instanceof Error ? err.message : 'Execution paused';
@@ -507,6 +522,7 @@ export async function stopBotSession(userId: number, reason = 'Stopped by trader
   }
   const snap = serializeTelemetry(session);
   activeSessions.delete(userId);
+  if (botLastPersistAt.size > 500) botLastPersistAt.clear();
   derivWs.emitUserEvent(userId, 'bot_status', snap);
   await addNotification(
     userId,

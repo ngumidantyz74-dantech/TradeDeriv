@@ -3,11 +3,14 @@ import { query, queryOne, execute, requireDb, addNotification, logSecurityEvent,
 import { config } from '../config.ts';
 import { randomId, decryptToken, maskClientId } from '../crypto.ts';
 import { hashPasswordArgon2id, verifyPasswordHash } from '../password-hash.ts';
-import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
+import { requireAuth, signUserToken, invalidateAuthUserCache, type AuthRequest } from '../middleware/auth.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
 import { derivWs } from '../deriv-client.ts';
 
 const router = Router();
+
+const USER_PUBLIC_COLS = `id, email, full_name, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended, locked_until, email_verified, preferred_currency, preferred_language, display_theme, virtual_workspace_balance, real_wallets_json, demo_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_nickname, deriv_client_id, last_login_at, updated_at, created_at`;
+const USER_AUTH_COLS = `${USER_PUBLIC_COLS}, password_hash`;
 
 function parseWalletJson<T>(raw: string | null | undefined, fallback: T): T {
   try {
@@ -103,7 +106,7 @@ router.post('/auth/register', requireDb, async (req, res) => {
     const newUser = await queryOne<any>(
       `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, email_verification_token, virtual_workspace_balance, deriv_client_id)
        VALUES ($1, $2, $3, $4, $5, 'user', 'active', FALSE, $6, $7, $8)
-       RETURNING *`,
+       RETURNING ${USER_PUBLIC_COLS}`,
       [
         cleanEmail,
         passwordHash,
@@ -148,7 +151,7 @@ router.post('/auth/login', requireDb, async (req, res) => {
       return;
     }
     const cleanEmail = String(email).trim().toLowerCase();
-    const user = await queryOne<any>('SELECT * FROM users WHERE email = $1', [cleanEmail]);
+    const user = await queryOne<any>(`SELECT ${USER_AUTH_COLS} FROM users WHERE email = $1`, [cleanEmail]);
     if (!user) {
       res.status(401).json({ error: 'Invalid credentials' });
       return;
@@ -173,9 +176,10 @@ router.post('/auth/login', requireDb, async (req, res) => {
     }
 
     const loggedUser =
-      (await queryOne<any>('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING *', [
-        user.id,
-      ])) || user;
+      (await queryOne<any>(
+        `UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1 RETURNING ${USER_PUBLIC_COLS}`,
+        [user.id]
+      )) || user;
     const token = signUserToken({ id: loggedUser.id, email: loggedUser.email, role: loggedUser.role });
     await logSecurityEvent(loggedUser.id, 'login_success', req.ip);
     res.json({ token, user: formatPublicUser(loggedUser) });
@@ -185,7 +189,7 @@ router.post('/auth/login', requireDb, async (req, res) => {
 });
 
 router.get('/auth/me', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const user = await queryOne<any>('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+  const user = await queryOne<any>(`SELECT ${USER_PUBLIC_COLS} FROM users WHERE id = $1`, [req.user!.id]);
   if (!user) {
     res.status(404).json({ error: 'User not found' });
     return;
@@ -268,7 +272,7 @@ router.post('/auth/reset-password', requireDb, async (req, res) => {
 });
 
 router.get('/account/profile-details', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const user = await queryOne<any>('SELECT * FROM users WHERE id = $1', [req.user!.id]);
+  const user = await queryOne<any>(`SELECT ${USER_PUBLIC_COLS} FROM users WHERE id = $1`, [req.user!.id]);
   const derivToken = await getPrimaryTokenForUser(req.user!.id);
 
   let derivSettings: Record<string, unknown> | null = null;
@@ -333,7 +337,7 @@ router.put('/account/profile-details', requireDb, requireAuth, async (req: AuthR
       display_theme = COALESCE($6, display_theme),
       updated_at = NOW()
      WHERE id = $7
-     RETURNING *`,
+     RETURNING ${USER_PUBLIC_COLS}`,
     [
       full_name ?? null,
       phone ?? null,
@@ -414,7 +418,8 @@ router.post('/account/create-trading-account', requireDb, requireAuth, async (re
         user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
         balance, last_known_balance, balance_locked_by_admin, status, scopes
       ) VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, FALSE, 'active', 'trade account_manage')
-      RETURNING *`,
+      RETURNING id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+                last_known_balance as balance, last_known_balance, balance_locked_by_admin, status, scopes, updated_at`,
       [
         req.user!.id,
         createdLoginId,
@@ -510,6 +515,7 @@ router.post('/account/close', requireDb, requireAuth, async (req: AuthRequest, r
     }
   }
   await execute("UPDATE users SET status = 'closed', updated_at = NOW() WHERE id = $1", [req.user!.id]);
+  invalidateAuthUserCache(req.user!.id);
   await execute('UPDATE account_authorizations SET revoked_at = NOW() WHERE user_id = $1', [req.user!.id]);
   await logSecurityEvent(req.user!.id, 'account_closed', req.ip, { reason });
   res.json({ ok: true, message: 'Account closed and authorizations revoked' });
