@@ -22,6 +22,9 @@ export const config = {
   botGateJwtSecret: process.env.BOT_GATE_JWT_SECRET || `td_bot_${derivedFallbackSecret}`,
   tokenEncryptionKey: process.env.TOKEN_ENCRYPTION_KEY || derivedFallbackSecret,
   adminPrivateSlug: (process.env.ADMIN_PRIVATE_SLUG || 'pf-ops-9482').replace(/^\/+/, ''),
+  adminBootstrapEmail: (process.env.ADMIN_EMAIL || '').trim().toLowerCase(),
+  adminBootstrapPassword: (process.env.ADMIN_PASSWORD || '').trim(),
+  adminBootstrapFullName: (process.env.ADMIN_FULL_NAME || 'Platform Owner').trim(),
 
   derivAppId: (process.env.DERIV_APP_ID || process.env.VITE_DERIV_APP_ID || '1089').trim(),
   derivClientSecret: (process.env.DERIV_CLIENT_SECRET || '').trim(),
@@ -41,8 +44,8 @@ export const config = {
   ],
 
   brevoApiKey: process.env.BREVO_API_KEY || '',
-  brevoSenderEmail: process.env.BREVO_SENDER_EMAIL || 'noreply@tradederiv.app',
-  brevoSenderName: process.env.BREVO_SENDER_NAME || 'TradeDeriv',
+  brevoSenderEmail: process.env.BREVO_SENDER_EMAIL || 'noreply@deriv.app',
+  brevoSenderName: process.env.BREVO_SENDER_NAME || 'DERIV',
 };
 
 function isLocalUrl(url: string): boolean {

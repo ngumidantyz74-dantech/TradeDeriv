@@ -221,12 +221,20 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const user = await queryOne<{
     id: number;
     role: string;
+    status: string;
+    trading_suspended: boolean;
     virtual_workspace_balance: number;
     real_wallets_json: string;
-  }>('SELECT id, role, virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1', [input.userId]);
+  }>('SELECT id, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended, virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1', [input.userId]);
   if (!user) throw new Error('User not found');
   if (user.role === 'owner' || user.role === 'admin') {
     throw new Error('Owner / Admin MIS accounts are for administration only, not trading.');
+  }
+  if (user.status !== 'active') {
+    throw new Error(`Account is currently ${user.status}. Contact support.`);
+  }
+  if (user.trading_suspended) {
+    throw new Error('Trading is currently frozen on your account by Administrator controls.');
   }
 
   const tick = await derivWs.getLiveQuote(input.symbol);

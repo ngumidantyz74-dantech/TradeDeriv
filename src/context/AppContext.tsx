@@ -155,12 +155,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   );
 
   const openAdminPortal = useCallback(() => {
-    const slug = publicSettings.global?.adminPrivateSlug || import.meta.env.VITE_ADMIN_PRIVATE_SLUG || 'pf-ops-9482';
-    window.history.pushState({}, '', `/${slug}`);
+    window.location.hash = '#/admin_console';
     setAdminGateOpen(true);
-  }, [publicSettings.global?.adminPrivateSlug]);
+  }, []);
 
-  // 30-tap logo gesture within 2.5s rolling timeout to open Owner MIS Portal
+  // 30-tap logo gesture within 2.5s rolling timeout to open Administrator Console
   const registerLogoTap = useCallback(() => {
     if (tapTimerRef.current) {
       clearTimeout(tapTimerRef.current);
@@ -168,6 +167,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     tapCountRef.current += 1;
     if (tapCountRef.current >= 30) {
       resetLogoTaps();
+      window.location.hash = '#/admin_console';
       setAdminGateOpen(true);
       return;
     }

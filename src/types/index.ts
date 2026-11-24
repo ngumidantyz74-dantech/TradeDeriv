@@ -25,6 +25,7 @@ export interface UserProfile {
   country: string;
   role: string;
   status: string;
+  trading_suspended?: boolean;
   email_verified: boolean;
   preferred_currency: string;
   preferred_language: string;

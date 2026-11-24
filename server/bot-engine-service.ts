@@ -408,6 +408,20 @@ function serializeTelemetry(s: InternalBotSession): BotTelemetry {
 }
 
 export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemetry> {
+  const userRow = await queryOne<{ status: string; trading_suspended: boolean; role: string }>(
+    'SELECT role, status, COALESCE(trading_suspended, FALSE) as trading_suspended FROM users WHERE id = $1',
+    [cfg.userId]
+  );
+  if (!userRow || userRow.status !== 'active') {
+    throw new Error('Account is inactive or suspended.');
+  }
+  if (userRow.role === 'owner' || userRow.role === 'admin') {
+    throw new Error('Administrator accounts cannot run trading bots.');
+  }
+  if (userRow.trading_suspended) {
+    throw new Error('Trading is currently frozen on your account by Administrator controls.');
+  }
+
   if (activeSessions.has(cfg.userId)) {
     await stopBotSession(cfg.userId, 'Replaced by new bot run');
   }

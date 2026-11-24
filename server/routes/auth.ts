@@ -26,6 +26,7 @@ export function formatPublicUser(u: any) {
     country: u.country || 'Kenya',
     role: u.role,
     status: u.status,
+    trading_suspended: Boolean(u.trading_suspended),
     email_verified: Boolean(u.email_verified),
     preferred_currency: u.preferred_currency || 'USD',
     preferred_language: u.preferred_language || 'EN',
@@ -161,8 +162,12 @@ router.post('/auth/login', requireDb, async (req, res) => {
       const upgraded = await hashPasswordArgon2id(String(password));
       await execute('UPDATE users SET password_hash = $1 WHERE id = $2', [upgraded, user.id]);
     }
-    if (user.status === 'suspended') {
-      res.status(403).json({ error: 'Account is suspended' });
+    if (user.status === 'suspended' || user.status === 'closed') {
+      res.status(403).json({ error: `Account is ${user.status}` });
+      return;
+    }
+    if (user.locked_until && new Date(user.locked_until).getTime() > Date.now()) {
+      res.status(403).json({ error: 'Account is temporarily locked. Please try again later.' });
       return;
     }
 

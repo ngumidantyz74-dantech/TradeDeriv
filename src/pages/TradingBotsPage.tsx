@@ -642,7 +642,7 @@ export const TradingBotsPage: React.FC = () => {
                   {renderEquitySvg(backtestReport.equityCurve)}
                 </div>
 
-                {/* Simulated Trades Table */}
+                {/* Automated Trades Table */}
                 {backtestReport.trades.length > 0 && (
                   <div className="overflow-x-auto">
                     <table className="w-full text-xs">

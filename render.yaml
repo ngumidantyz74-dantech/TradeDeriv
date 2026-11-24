@@ -39,9 +39,13 @@ services:
         value: pf-ops-9482
       - key: VITE_ADMIN_PRIVATE_SLUG
         value: pf-ops-9482
+      - key: ADMIN_EMAIL
+        sync: false
+      - key: ADMIN_PASSWORD
+        sync: false
       - key: BREVO_API_KEY
         sync: false
       - key: BREVO_SENDER_EMAIL
-        value: noreply@tradederiv.app
+        value: noreply@deriv.app
       - key: BREVO_SENDER_NAME
-        value: TradeDeriv
+        value: DERIV

@@ -30,7 +30,17 @@ const MainRouter: React.FC = () => {
   const [isAdminRoute, setIsAdminRoute] = useState<boolean>(() => {
     const p = window.location.pathname.replace(/^\/+|\/+$/g, '');
     const h = window.location.hash.replace(/^#\/?|\/+$/g, '');
-    return p === envSlug || h === envSlug || p === 'pf-ops-9482' || h === 'pf-ops-9482' || p === 'admin' || h === 'admin';
+    return (
+      h === 'admin_console' ||
+      h.startsWith('admin_console/') ||
+      p === 'admin_console' ||
+      p === envSlug ||
+      h === envSlug ||
+      p === 'pf-ops-9482' ||
+      h === 'pf-ops-9482' ||
+      p === 'admin' ||
+      h === 'admin'
+    );
   });
 
   useEffect(() => {
@@ -38,7 +48,10 @@ const MainRouter: React.FC = () => {
       const p = window.location.pathname.replace(/^\/+|\/+$/g, '');
       const h = window.location.hash.replace(/^#\/?|\/+$/g, '');
       setIsAdminRoute(
-        p === privateSlug ||
+        h === 'admin_console' ||
+          h.startsWith('admin_console/') ||
+          p === 'admin_console' ||
+          p === privateSlug ||
           h === privateSlug ||
           p === envSlug ||
           h === envSlug ||

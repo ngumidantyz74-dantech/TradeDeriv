@@ -32,12 +32,21 @@ export function parseCookies(cookieHeader?: string): Record<string, string> {
   return out;
 }
 
-export function getAdminCookieOptions() {
-  const isProd = config.nodeEnv === 'production';
+export function isSecureTransport(req?: Request): boolean {
+  if (config.nodeEnv === 'production') return true;
+  if (!req) return false;
+  if (req.secure) return true;
+  const xfProto = String(req.get('x-forwarded-proto') || '').toLowerCase();
+  return xfProto.includes('https');
+}
+
+export function getAdminCookieOptions(req?: Request) {
+  const secure = isSecureTransport(req);
   return {
     httpOnly: true,
-    sameSite: 'lax' as const,
-    secure: isProd,
+    sameSite: secure ? ('none' as const) : ('lax' as const),
+    secure,
+    ...(secure ? { partitioned: true } : {}),
     path: '/',
     maxAge: 12 * 60 * 60 * 1000, // 12 hours
   };
@@ -69,23 +78,50 @@ export function verifyAdminReauthToken(token: string | undefined, expectedAdminI
   }
 }
 
-function extractRawToken(req: Request, allowAdminCookie = false): string {
+function extractRawToken(req: Request, allowAdminCookie = false): { token: string; viaCookie: boolean } {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ')) {
     const t = header.slice(7).trim();
-    if (t) return t;
+    if (t) return { token: t, viaCookie: false };
   }
   const queryToken = typeof req.query.token === 'string' ? req.query.token : '';
-  if (queryToken) return queryToken;
+  if (queryToken) return { token: queryToken, viaCookie: false };
   if (allowAdminCookie) {
     const cookies = parseCookies(req.headers.cookie);
-    if (cookies[ADMIN_SESSION_COOKIE]) return cookies[ADMIN_SESSION_COOKIE];
+    if (cookies[ADMIN_SESSION_COOKIE]) return { token: cookies[ADMIN_SESSION_COOKIE], viaCookie: true };
   }
-  return '';
+  return { token: '', viaCookie: false };
+}
+
+function passesCsrfOriginCheck(req: Request): boolean {
+  const method = req.method.toUpperCase();
+  if (['GET', 'HEAD', 'OPTIONS'].includes(method)) return true;
+  const expectedHost = String(req.get('x-forwarded-host') || req.get('host') || '').split(',')[0].trim().toLowerCase();
+  const origin = String(req.get('origin') || '').trim();
+  if (origin) {
+    try {
+      const originHost = new URL(origin).host.toLowerCase();
+      if (!expectedHost || originHost === expectedHost) return true;
+      return false;
+    } catch {
+      return false;
+    }
+  }
+  const xrw = String(req.get('x-requested-with') || '').toLowerCase();
+  if (xrw === 'xmlhttprequest') return true;
+  const referer = String(req.get('referer') || '').trim();
+  if (referer && expectedHost) {
+    try {
+      return new URL(referer).host.toLowerCase() === expectedHost;
+    } catch {
+      return false;
+    }
+  }
+  return false;
 }
 
 export async function requireAuth(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  const rawToken = extractRawToken(req, false);
+  const { token: rawToken } = extractRawToken(req, false);
 
   if (!rawToken) {
     res.status(401).json({ error: 'Authentication required' });
@@ -94,8 +130,14 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 
   try {
     const decoded = jwt.verify(rawToken, config.jwtSecret) as AuthUserPayload;
-    const dbUser = await queryOne<{ id: number; email: string; role: string; status: string }>(
-      'SELECT id, email, role, status FROM users WHERE id = $1',
+    const dbUser = await queryOne<{
+      id: number;
+      email: string;
+      role: string;
+      status: string;
+      locked_until: string | null;
+    }>(
+      'SELECT id, email, role, status, locked_until FROM users WHERE id = $1',
       [decoded.id]
     );
 
@@ -103,8 +145,12 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       res.status(401).json({ error: 'User account not found' });
       return;
     }
-    if (dbUser.status === 'suspended') {
-      res.status(403).json({ error: 'Account is suspended' });
+    if (dbUser.status === 'suspended' || dbUser.status === 'closed') {
+      res.status(403).json({ error: `Account is ${dbUser.status}` });
+      return;
+    }
+    if (dbUser.locked_until && new Date(dbUser.locked_until).getTime() > Date.now()) {
+      res.status(403).json({ error: 'Account is temporarily locked by security controls' });
       return;
     }
 
@@ -116,22 +162,37 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
 }
 
 export async function requireAdmin(req: AuthRequest, res: Response, next: NextFunction): Promise<void> {
-  const rawToken = extractRawToken(req, true);
+  const { token: rawToken, viaCookie } = extractRawToken(req, true);
 
   if (!rawToken) {
     res.status(401).json({ error: 'Admin authentication required' });
     return;
   }
 
+  if (viaCookie && !passesCsrfOriginCheck(req)) {
+    res.status(403).json({ error: 'Cross-site request validation failed for admin session' });
+    return;
+  }
+
   try {
     const decoded = jwt.verify(rawToken, config.jwtSecret) as AuthUserPayload;
-    const dbUser = await queryOne<{ id: number; email: string; role: string; status: string }>(
-      'SELECT id, email, role, status FROM users WHERE id = $1',
+    const dbUser = await queryOne<{
+      id: number;
+      email: string;
+      role: string;
+      status: string;
+      locked_until: string | null;
+    }>(
+      'SELECT id, email, role, status, locked_until FROM users WHERE id = $1',
       [decoded.id]
     );
 
-    if (!dbUser || dbUser.status === 'suspended') {
+    if (!dbUser || dbUser.status === 'suspended' || dbUser.status === 'closed') {
       res.status(401).json({ error: 'Admin account unavailable' });
+      return;
+    }
+    if (dbUser.locked_until && new Date(dbUser.locked_until).getTime() > Date.now()) {
+      res.status(403).json({ error: 'Admin account is temporarily locked' });
       return;
     }
     if (!['admin', 'owner'].includes(dbUser.role)) {

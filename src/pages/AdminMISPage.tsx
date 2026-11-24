@@ -26,6 +26,11 @@ import {
   Sliders,
   BarChart3,
   Edit3,
+  Search,
+  Eye,
+  PauseCircle,
+  PlayCircle,
+  UserPlus,
 } from 'lucide-react';
 import { TradeDerivLogo } from '../components/TradeDerivLogo';
 
@@ -44,7 +49,6 @@ type AdminTab =
   | 'logs'
   | 'security';
 
-const ADMIN_TOKEN_KEY = 'tradederiv_admin_jwt';
 let currentAdminReauthToken = '';
 
 class AdminReauthRequiredError extends Error {
@@ -55,12 +59,11 @@ class AdminReauthRequiredError extends Error {
 }
 
 async function adminFetch<T = any>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = localStorage.getItem(ADMIN_TOKEN_KEY);
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+    'X-Requested-With': 'XMLHttpRequest',
     ...((options.headers as Record<string, string>) || {}),
   };
-  if (token) headers.Authorization = `Bearer ${token}`;
   if (currentAdminReauthToken) headers['x-admin-reauth'] = currentAdminReauthToken;
   const resp = await fetch(path, { ...options, headers, credentials: 'include' });
   const data = await resp.json().catch(() => ({}));
@@ -72,7 +75,7 @@ async function adminFetch<T = any>(path: string, options: RequestInit = {}): Pro
 }
 
 export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onReturnToSite }) => {
-  const [adminToken, setAdminToken] = useState<string | null>(() => localStorage.getItem(ADMIN_TOKEN_KEY));
+  const [adminUser, setAdminUser] = useState<{ id: number; email: string; full_name: string; role: string } | null>(null);
   const [bootstrapped, setBootstrapped] = useState<boolean>(true);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [tab, setTab] = useState<AdminTab>('overview');
@@ -135,9 +138,34 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     Record<string, { display_name: string; price: string; spread: string; min_stake: string; max_stake: string; is_active: boolean }>
   >({});
 
-  // Full User & Order Edit Modals
+  // Full User & Order Edit Modals, Filters, Balance Adjust & Activity Inspection
   const [editingUser, setEditingUser] = useState<any | null>(null);
   const [editingOrder, setEditingOrder] = useState<any | null>(null);
+  const [userSearch, setUserSearch] = useState('');
+  const [userStatusFilter, setUserStatusFilter] = useState<'all' | 'active' | 'suspended' | 'trading_frozen'>('all');
+  const [adjustTarget, setAdjustTarget] = useState<{
+    user: any;
+    accountMode: 'demo' | 'real';
+    walletBucket: 'options' | 'mt5_standard' | 'mt5_gold' | 'exchange_usdt';
+    operation: 'credit' | 'debit' | 'set';
+    amount: string;
+    reason: string;
+  } | null>(null);
+  const [activityData, setActivityData] = useState<any | null>(null);
+  const [activityLoading, setActivityLoading] = useState(false);
+
+  // Orders Oversight Filters
+  const [orderUserFilter, setOrderUserFilter] = useState('');
+  const [orderSymbolFilter, setOrderSymbolFilter] = useState('');
+  const [orderStatusFilter, setOrderStatusFilter] = useState<'ALL' | 'OPEN' | 'CLOSED' | 'CANCELLED'>('ALL');
+  const [orderModeFilter, setOrderModeFilter] = useState<'ALL' | 'real' | 'demo'>('ALL');
+  const [serverTrades, setServerTrades] = useState<any[] | null>(null);
+
+  // Admin Team Management
+  const [adminsList, setAdminsList] = useState<any[]>([]);
+  const [createAdminEmail, setCreateAdminEmail] = useState('');
+  const [createAdminName, setCreateAdminName] = useState('');
+  const [createAdminPassword, setCreateAdminPassword] = useState('');
 
   // Create forms
   const [newUserEmail, setNewUserEmail] = useState('');
@@ -172,23 +200,35 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   };
 
   useEffect(() => {
-    adminFetch<{ bootstrapped: boolean }>('/api/admin/bootstrap-status')
-      .then((res) => setBootstrapped(res.bootstrapped))
-      .catch(() => {})
+    Promise.all([
+      adminFetch<{ bootstrapped: boolean }>('/api/admin/bootstrap-status').catch(() => ({ bootstrapped: true })),
+      fetch('/api/admin/me', { credentials: 'include' })
+        .then((r) => (r.ok ? r.json() : null))
+        .catch(() => null),
+    ])
+      .then(([statusRes, meRes]) => {
+        setBootstrapped(statusRes.bootstrapped);
+        if (meRes?.user) {
+          setAdminUser(meRes.user);
+        }
+      })
       .finally(() => setLoadingStatus(false));
   }, []);
 
   const loadAllAdminData = useCallback(async () => {
-    if (!adminToken) return;
+    if (!adminUser) return;
     try {
-      const [ov, cash, comm] = await Promise.all([
+      const [ov, cash, comm, adminsRes] = await Promise.all([
         adminFetch('/api/admin/overview'),
         adminFetch('/api/admin/cashier-logs'),
         adminFetch(`/api/admin/commissions?date_from=${dateFrom}&date_to=${dateTo}`),
+        adminFetch<{ admins: any[] }>('/api/admin/admins').catch(() => ({ admins: [] })),
       ]);
       setOverview(ov);
       setCashierLogs(cash.transactions || []);
       setCommData(comm);
+      setAdminsList(adminsRes.admins || []);
+      setServerTrades(null);
 
       const uMap: Record<number, string> = {};
       const rMap: Record<number, string> = {};
@@ -264,12 +304,11 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
       setAffiliateCode(comm.config?.affiliateCode || 'VNMH2VHBRTFN');
       setAffiliateTier(String(comm.config?.affiliateTierRate ?? 30));
     } catch (err) {
-      if (err instanceof Error && err.message.includes('401')) {
-        localStorage.removeItem(ADMIN_TOKEN_KEY);
-        setAdminToken(null);
+      if (err instanceof Error && (err.message.includes('401') || err.message.includes('403'))) {
+        setAdminUser(null);
       }
     }
-  }, [adminToken, dateFrom, dateTo]);
+  }, [adminUser, dateFrom, dateTo]);
 
   useEffect(() => {
     loadAllAdminData();
@@ -280,14 +319,14 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     setAuthBusy(true);
     try {
       const path = bootstrapped ? '/api/admin/login' : '/api/admin/bootstrap';
-      const res = await adminFetch<{ token: string }>(path, {
+      const res = await adminFetch<{ user: { id: number; email: string; full_name: string; role: string } }>(path, {
         method: 'POST',
         body: JSON.stringify({ email: authEmail, password: authPassword, full_name: authName }),
       });
-      localStorage.setItem(ADMIN_TOKEN_KEY, res.token);
-      setAdminToken(res.token);
+      setAdminUser(res.user);
+      setAuthPassword('');
       setBootstrapped(true);
-      flash('Signed in to Owner MIS Console');
+      flash('Signed in to Administrator Console');
     } catch (err) {
       flash(err instanceof Error ? err.message : 'Authentication failed', 'err');
     } finally {
@@ -296,16 +335,20 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   };
 
   const handleSignOutOwner = async () => {
-    await fetch('/api/admin/logout', { method: 'POST', credentials: 'include' }).catch(() => {});
+    await fetch('/api/admin/logout', {
+      method: 'POST',
+      credentials: 'include',
+      headers: { 'X-Requested-With': 'XMLHttpRequest' },
+    }).catch(() => {});
     currentAdminReauthToken = '';
-    localStorage.removeItem(ADMIN_TOKEN_KEY);
-    setAdminToken(null);
+    setAdminUser(null);
     setOverview(null);
     setDiagnostics(null);
+    setAdminsList([]);
   };
 
   const loadDiagnostics = useCallback(async () => {
-    if (!adminToken) return;
+    if (!adminUser) return;
     setDiagLoading(true);
     try {
       const diag = await adminFetch('/api/admin/diagnostics');
@@ -315,7 +358,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     } finally {
       setDiagLoading(false);
     }
-  }, [adminToken]);
+  }, [adminUser]);
 
   useEffect(() => {
     if (tab === 'security') {
@@ -359,15 +402,27 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     }
   };
 
+  const openUserActivity = async (userId: number) => {
+    setActivityLoading(true);
+    try {
+      const data = await adminFetch(`/api/admin/users/${userId}/activity`);
+      setActivityData(data);
+    } catch (err) {
+      flash(err instanceof Error ? err.message : 'Failed to load trader activity', 'err');
+    } finally {
+      setActivityLoading(false);
+    }
+  };
+
   if (loadingStatus) {
     return (
       <div className="min-h-screen bg-[#111319] text-white flex items-center justify-center">
-        <p className="text-sm text-slate-400">Loading MIS Operations Console...</p>
+        <p className="text-sm text-slate-400">Loading Administrator Console...</p>
       </div>
     );
   }
 
-  if (!adminToken) {
+  if (!adminUser) {
     return (
       <div className="min-h-screen bg-[#111319] text-white flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-[#181C25] border border-[#2A2F3D] rounded-3xl p-7 space-y-6">
@@ -384,7 +439,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
           <div>
             <h1 className="font-display text-xl font-bold">
-              {bootstrapped ? 'Owner MIS Sign In' : 'First-Run Owner Bootstrap'}
+              {bootstrapped ? 'Administrator Console Sign In' : 'First-Run Owner Bootstrap'}
             </h1>
             <p className="text-xs text-slate-400 mt-1">
               {bootstrapped
@@ -505,6 +560,12 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
         </nav>
 
         <div className="p-3 border-t border-[#2A2F3D] space-y-2">
+          <div className="px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] flex items-center justify-between gap-2 text-[11px]">
+            <span className="text-slate-300 truncate">{adminUser.email}</span>
+            <span className="px-2 py-0.5 rounded bg-[#00A878]/20 text-[#00A878] font-bold uppercase text-[9px] shrink-0">
+              {adminUser.role}
+            </span>
+          </div>
           <button
             type="button"
             onClick={onReturnToSite}
@@ -517,7 +578,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             onClick={handleSignOutOwner}
             className="w-full py-2.5 px-3 rounded-xl bg-[#FF444F]/10 hover:bg-[#FF444F]/20 text-[#FF444F] text-xs font-semibold flex items-center gap-2 cursor-pointer"
           >
-            <LogOut className="w-4 h-4" /> Sign Out Owner
+            <LogOut className="w-4 h-4" /> Sign Out Console
           </button>
         </div>
       </aside>
@@ -904,393 +965,504 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 3. Users CRUD */}
-          {tab === 'users' && (
-            <div className="space-y-4">
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
+          {tab === 'users' &&
+            (() => {
+              const q = userSearch.trim().toLowerCase();
+              const filteredUsers = (overview?.users || []).filter((u: any) => {
+                if (userStatusFilter === 'active' && u.status !== 'active') return false;
+                if (userStatusFilter === 'suspended' && u.status !== 'suspended') return false;
+                if (userStatusFilter === 'trading_frozen' && !u.trading_suspended) return false;
+                if (!q) return true;
+                return (
+                  String(u.email || '').toLowerCase().includes(q) ||
+                  String(u.full_name || '').toLowerCase().includes(q) ||
+                  String(u.deriv_client_id || '').toLowerCase().includes(q)
+                );
+              });
+
+              const openAdjustModal = (u: any) =>
+                setAdjustTarget({
+                  user: u,
+                  accountMode: 'demo',
+                  walletBucket: 'options',
+                  operation: 'credit',
+                  amount: '100',
+                  reason: 'Administrative balance adjustment',
+                });
+
+              const openFullEditModal = (u: any) => {
+                const parseJson = (raw: any, def: any) => {
                   try {
-                    await adminFetch('/api/admin/users', {
-                      method: 'POST',
-                      body: JSON.stringify({
-                        email: newUserEmail,
-                        full_name: newUserName,
-                        virtual_workspace_balance: Number(newUserBal),
-                      }),
-                    });
-                    setNewUserEmail('');
-                    setNewUserName('');
-                    await loadAllAdminData();
-                    flash('Trader user created');
-                  } catch (err) {
-                    flash(err instanceof Error ? err.message : 'Failed', 'err');
+                    return { ...def, ...(typeof raw === 'string' ? JSON.parse(raw || '{}') : raw || {}) };
+                  } catch {
+                    return { ...def };
                   }
-                }}
-                className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-4 gap-3"
-              >
-                <input
-                  type="email"
-                  required
-                  placeholder="Email"
-                  value={newUserEmail}
-                  onChange={(e) => setNewUserEmail(e.target.value)}
-                  className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                />
-                <input
-                  type="text"
-                  required
-                  placeholder="Full Name"
-                  value={newUserName}
-                  onChange={(e) => setNewUserName(e.target.value)}
-                  className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                />
-                <input
-                  type="number"
-                  placeholder="Virtual Balance"
-                  value={newUserBal}
-                  onChange={(e) => setNewUserBal(e.target.value)}
-                  className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-xs"
-                />
-                <button type="submit" className="px-4 py-2 rounded-full bg-[#FF444F] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
-                  <Plus className="w-3.5 h-3.5" /> Add User
-                </button>
-              </form>
+                };
+                setEditingUser({
+                  ...u,
+                  password: '',
+                  demo_wallets: parseJson(u.demo_wallets_json, { mt5_standard: 10000, mt5_gold: 10000, exchange_usdt: 10000 }),
+                  real_wallets: parseJson(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+                  exchange_balances: parseJson(u.exchange_balances_json, { USDT: 10000, USDC: 2500, BTC: 0.15, ETH: 2.5 }),
+                  real_exchange_balances: parseJson(u.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
+                });
+              };
 
-              {/* Mobile Responsive Cards for Users CRUD */}
-              <div className="md:hidden space-y-3">
-                {(overview?.users || []).length === 0 ? (
-                  <div className="p-6 rounded-2xl bg-[#181C25] border border-[#2A2F3D] text-center text-xs text-slate-400">
-                    No trader accounts found yet.
-                  </div>
-                ) : (
-                  (overview?.users || []).map((u: any) => {
-                    let parsedRw = 0;
-                    try {
-                      parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
-                    } catch {
-                      parsedRw = 0;
-                    }
-                    return (
-                      <div key={u.id} className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] space-y-3 text-xs">
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="min-w-0">
-                            <p className="font-bold truncate">{u.full_name}</p>
-                            <p className="text-slate-400 truncate">{u.email}</p>
-                          </div>
-                          <span
-                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold shrink-0 ${
-                              u.status === 'active' ? 'bg-[#00A878]/20 text-[#00A878]' : 'bg-[#FF444F]/20 text-[#FF444F]'
-                            }`}
-                          >
-                            {u.status}
-                          </span>
-                        </div>
+              const toggleTradingFreeze = (u: any) =>
+                runWithReauth(async () => {
+                  await adminFetch(`/api/admin/users/${u.id}/trading-access`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({ trading_suspended: !u.trading_suspended }),
+                  });
+                  await loadAllAdminData();
+                  flash(
+                    !u.trading_suspended
+                      ? `Trading execution frozen for ${u.email}`
+                      : `Trading execution restored for ${u.email}`
+                  );
+                });
 
-                        <div className="grid grid-cols-1 gap-2">
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
-                              onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                              className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                            />
-                            <button
-                              type="button"
-                              disabled={busyAction === `user-${u.id}`}
-                              onClick={async () => {
-                                const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                if (Number.isNaN(val) || val < 0) {
-                                  flash('Enter a valid non-negative Demo balance', 'err');
-                                  return;
-                                }
-                                setBusyAction(`user-${u.id}`);
-                                await runWithReauth(async () => {
-                                  await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                    method: 'PATCH',
-                                    body: JSON.stringify({ balance: val }),
-                                  });
-                                  await loadAllAdminData();
-                                  flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                });
-                                setBusyAction(null);
-                              }}
-                              className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
-                            >
-                              {busyAction === `user-${u.id}` ? '...' : 'Save'}
-                            </button>
-                          </div>
-
-                          <div className="flex items-center gap-2">
-                            <span className="text-[11px] text-[#FF444F] font-bold w-16">Real ($):</span>
-                            <input
-                              type="number"
-                              step="0.01"
-                              min="0"
-                              value={realBalances[u.id] ?? parsedRw.toFixed(2)}
-                              onChange={(e) => setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                              className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                            />
-                            <button
-                              type="button"
-                              disabled={busyAction === `real-${u.id}`}
-                              onClick={async () => {
-                                const val = Number(realBalances[u.id] ?? parsedRw);
-                                if (Number.isNaN(val) || val < 0) {
-                                  flash('Enter a valid non-negative Real balance', 'err');
-                                  return;
-                                }
-                                setBusyAction(`real-${u.id}`);
-                                await runWithReauth(async () => {
-                                  await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
-                                    method: 'PATCH',
-                                    body: JSON.stringify({ balance: val }),
-                                  });
-                                  await loadAllAdminData();
-                                  flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                });
-                                setBusyAction(null);
-                              }}
-                              className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
-                            >
-                              {busyAction === `real-${u.id}` ? '...' : 'Save'}
-                            </button>
-                          </div>
-                        </div>
-
-                        <div className="flex items-center justify-end gap-2 pt-1 border-t border-[#2A2F3D]">
-                          <button
-                            type="button"
-                            onClick={() => {
-                              const parseJson = (raw: any, def: any) => {
-                                try {
-                                  return { ...def, ...(typeof raw === 'string' ? JSON.parse(raw || '{}') : raw || {}) };
-                                } catch {
-                                  return { ...def };
-                                }
-                              };
-                              setEditingUser({
-                                ...u,
-                                password: '',
-                                demo_wallets: parseJson(u.demo_wallets_json, { mt5_standard: 10000, mt5_gold: 10000, exchange_usdt: 10000 }),
-                                real_wallets: parseJson(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
-                                exchange_balances: parseJson(u.exchange_balances_json, { USDT: 10000, USDC: 2500, BTC: 0.15, ETH: 2.5 }),
-                                real_exchange_balances: parseJson(u.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
-                              });
-                            }}
-                            className="px-3 py-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] font-semibold flex items-center gap-1 cursor-pointer"
-                          >
-                            <Edit3 className="w-3 h-3" /> Edit All
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() =>
-                              runWithReauth(async () => {
-                                await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                  method: 'PATCH',
-                                  body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                                });
-                                await loadAllAdminData();
-                                flash(`Updated user status for ${u.email}`);
-                              })
-                            }
-                            className="px-3 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                          >
-                            {u.status === 'active' ? 'Suspend' : 'Activate'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              try {
-                                await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
-                                loadAllAdminData();
-                              } catch (err) {
-                                flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
-                              }
-                            }}
-                            className="p-1.5 text-[#FF444F] cursor-pointer"
-                          >
-                            <Trash2 className="w-3.5 h-3.5 inline" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-
-              {/* Desktop Table for Users CRUD */}
-              <div className="hidden md:block bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-[#2A2F3D] text-slate-400">
-                      <th className="text-left px-4 py-3">Trader</th>
-                      <th className="text-left px-4 py-3">Status</th>
-                      <th className="text-right px-4 py-3">Demo Bal (DB)</th>
-                      <th className="text-right px-4 py-3">Real Bal (DB)</th>
-                      <th className="text-right px-4 py-3">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-[#2A2F3D]">
-                    {(overview?.users || []).map((u: any) => {
-                      let parsedRw = 0;
+              return (
+                <div className="space-y-4">
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
                       try {
-                        parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
-                      } catch {
-                        parsedRw = 0;
+                        await adminFetch('/api/admin/users', {
+                          method: 'POST',
+                          body: JSON.stringify({
+                            email: newUserEmail,
+                            full_name: newUserName,
+                            virtual_workspace_balance: Number(newUserBal),
+                          }),
+                        });
+                        setNewUserEmail('');
+                        setNewUserName('');
+                        await loadAllAdminData();
+                        flash('Trader user created');
+                      } catch (err) {
+                        flash(err instanceof Error ? err.message : 'Failed', 'err');
                       }
-                      return (
-                        <tr key={u.id}>
-                          <td className="px-4 py-3">
-                            <p className="font-bold">{u.full_name}</p>
-                            <p className="text-slate-400">{u.email}</p>
-                          </td>
-                          <td className="px-4 py-3">
-                            <span className={u.status === 'active' ? 'text-[#00A878] font-semibold' : 'text-[#FF444F] font-semibold'}>
-                              {u.status}
-                            </span>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <div className="inline-flex items-center justify-end gap-1.5">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
-                                onChange={(e) =>
-                                  setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
-                                }
-                                className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                              />
+                    }}
+                    className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-4 gap-3"
+                  >
+                    <input
+                      type="email"
+                      required
+                      placeholder="Email"
+                      value={newUserEmail}
+                      onChange={(e) => setNewUserEmail(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                    />
+                    <input
+                      type="text"
+                      required
+                      placeholder="Full Name"
+                      value={newUserName}
+                      onChange={(e) => setNewUserName(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                    />
+                    <input
+                      type="number"
+                      placeholder="Virtual Balance"
+                      value={newUserBal}
+                      onChange={(e) => setNewUserBal(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-xs"
+                    />
+                    <button type="submit" className="px-4 py-2 rounded-full bg-[#FF444F] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
+                      <Plus className="w-3.5 h-3.5" /> Add User
+                    </button>
+                  </form>
+
+                  {/* Search & Filter Bar */}
+                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-3 flex flex-wrap items-center gap-3 text-xs">
+                    <div className="relative flex-1 min-w-[200px]">
+                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="text"
+                        placeholder="Search by trader name, email, or client ID..."
+                        value={userSearch}
+                        onChange={(e) => setUserSearch(e.target.value)}
+                        className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                      />
+                    </div>
+                    <select
+                      value={userStatusFilter}
+                      onChange={(e) => setUserStatusFilter(e.target.value as any)}
+                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                    >
+                      <option value="all">All Statuses</option>
+                      <option value="active">Active Only</option>
+                      <option value="suspended">Suspended Only</option>
+                      <option value="trading_frozen">Trading Frozen</option>
+                    </select>
+                    <span className="text-slate-400 font-mono-num">
+                      {filteredUsers.length} trader{filteredUsers.length === 1 ? '' : 's'}
+                    </span>
+                  </div>
+
+                  {/* Mobile Responsive Cards for Users CRUD */}
+                  <div className="md:hidden space-y-3">
+                    {filteredUsers.length === 0 ? (
+                      <div className="p-6 rounded-2xl bg-[#181C25] border border-[#2A2F3D] text-center text-xs text-slate-400">
+                        No trader accounts match your filter.
+                      </div>
+                    ) : (
+                      filteredUsers.map((u: any) => {
+                        let parsedRw = 0;
+                        try {
+                          parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
+                        } catch {
+                          parsedRw = 0;
+                        }
+                        return (
+                          <div key={u.id} className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] space-y-3 text-xs">
+                            <div className="flex items-start justify-between gap-2">
+                              <div className="min-w-0">
+                                <p className="font-bold truncate">{u.full_name}</p>
+                                <p className="text-slate-400 truncate">{u.email}</p>
+                              </div>
+                              <div className="flex flex-col items-end gap-1 shrink-0">
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                    u.status === 'active' ? 'bg-[#00A878]/20 text-[#00A878]' : 'bg-[#FF444F]/20 text-[#FF444F]'
+                                  }`}
+                                >
+                                  {u.status}
+                                </span>
+                                {u.trading_suspended && (
+                                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-amber-500/20 text-amber-300">
+                                    TRADING FROZEN
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+
+                            <div className="grid grid-cols-1 gap-2">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                  onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                  className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={busyAction === `user-${u.id}`}
+                                  onClick={async () => {
+                                    const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                    if (Number.isNaN(val) || val < 0) {
+                                      flash('Enter a valid non-negative Demo balance', 'err');
+                                      return;
+                                    }
+                                    setBusyAction(`user-${u.id}`);
+                                    await runWithReauth(async () => {
+                                      await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                        method: 'PATCH',
+                                        body: JSON.stringify({ balance: val }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
+                                    });
+                                    setBusyAction(null);
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
+                                >
+                                  {busyAction === `user-${u.id}` ? '...' : 'Save'}
+                                </button>
+                              </div>
+
+                              <div className="flex items-center gap-2">
+                                <span className="text-[11px] text-[#FF444F] font-bold w-16">Real ($):</span>
+                                <input
+                                  type="number"
+                                  step="0.01"
+                                  min="0"
+                                  value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                  onChange={(e) => setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                  className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={busyAction === `real-${u.id}`}
+                                  onClick={async () => {
+                                    const val = Number(realBalances[u.id] ?? parsedRw);
+                                    if (Number.isNaN(val) || val < 0) {
+                                      flash('Enter a valid non-negative Real balance', 'err');
+                                      return;
+                                    }
+                                    setBusyAction(`real-${u.id}`);
+                                    await runWithReauth(async () => {
+                                      await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                        method: 'PATCH',
+                                        body: JSON.stringify({ balance: val }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
+                                    });
+                                    setBusyAction(null);
+                                  }}
+                                  className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
+                                >
+                                  {busyAction === `real-${u.id}` ? '...' : 'Save'}
+                                </button>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[#2A2F3D]">
                               <button
                                 type="button"
-                                disabled={busyAction === `user-${u.id}`}
-                                onClick={async () => {
-                                  const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                  if (Number.isNaN(val) || val < 0) {
-                                    flash('Enter a valid non-negative balance', 'err');
-                                    return;
-                                  }
-                                  setBusyAction(`user-${u.id}`);
-                                  await runWithReauth(async () => {
-                                    await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                      method: 'PATCH',
-                                      body: JSON.stringify({ balance: val }),
-                                    });
-                                    await loadAllAdminData();
-                                    flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                  });
-                                  setBusyAction(null);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
+                                onClick={() => openAdjustModal(u)}
+                                className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/15 text-[#00A878] font-semibold cursor-pointer"
                               >
-                                {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
+                                Adjust +/-
                               </button>
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 text-right">
-                            <div className="inline-flex items-center justify-end gap-1.5">
-                              <input
-                                type="number"
-                                step="0.01"
-                                min="0"
-                                value={realBalances[u.id] ?? parsedRw.toFixed(2)}
-                                onChange={(e) =>
-                                  setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
-                                }
-                                className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                              />
                               <button
                                 type="button"
-                                disabled={busyAction === `real-${u.id}`}
-                                onClick={async () => {
-                                  const val = Number(realBalances[u.id] ?? parsedRw);
-                                  if (Number.isNaN(val) || val < 0) {
-                                    flash('Enter a valid non-negative Real balance', 'err');
-                                    return;
-                                  }
-                                  setBusyAction(`real-${u.id}`);
-                                  await runWithReauth(async () => {
-                                    await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                onClick={() => openUserActivity(u.id)}
+                                className="px-2.5 py-1.5 rounded-lg bg-white/5 text-slate-200 font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Eye className="w-3 h-3" /> Activity
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => openFullEditModal(u)}
+                                className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Edit3 className="w-3 h-3" /> Edit All
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => toggleTradingFreeze(u)}
+                                className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 font-semibold cursor-pointer"
+                              >
+                                {u.trading_suspended ? 'Unfreeze Trade' : 'Freeze Trade'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  runWithReauth(async () => {
+                                    await adminFetch(`/api/admin/users/${u.id}/status`, {
                                       method: 'PATCH',
-                                      body: JSON.stringify({ balance: val }),
+                                      body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
                                     });
                                     await loadAllAdminData();
-                                    flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                  });
-                                  setBusyAction(null);
-                                }}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
+                                    flash(`Updated user status for ${u.email}`);
+                                  })
+                                }
+                                className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
                               >
-                                {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                {u.status === 'active' ? 'Suspend' : 'Activate'}
                               </button>
-                            </div>
-                          </td>
-                          <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
-                            <button
-                              type="button"
-                              onClick={() => {
-                                const parseJson = (raw: any, def: any) => {
+                              <button
+                                type="button"
+                                onClick={async () => {
                                   try {
-                                    return { ...def, ...(typeof raw === 'string' ? JSON.parse(raw || '{}') : raw || {}) };
-                                  } catch {
-                                    return { ...def };
+                                    await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+                                    loadAllAdminData();
+                                  } catch (err) {
+                                    flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
                                   }
-                                };
-                                setEditingUser({
-                                  ...u,
-                                  password: '',
-                                  demo_wallets: parseJson(u.demo_wallets_json, { mt5_standard: 10000, mt5_gold: 10000, exchange_usdt: 10000 }),
-                                  real_wallets: parseJson(u.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
-                                  exchange_balances: parseJson(u.exchange_balances_json, { USDT: 10000, USDC: 2500, BTC: 0.15, ETH: 2.5 }),
-                                  real_exchange_balances: parseJson(u.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 }),
-                                });
-                              }}
-                              className="px-2.5 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
-                            >
-                              <Edit3 className="w-3 h-3" /> Edit Details &amp; Wallets
-                            </button>
-                            <button
-                              type="button"
-                              onClick={() =>
-                                runWithReauth(async () => {
-                                  await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                    method: 'PATCH',
-                                    body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                                  });
-                                  await loadAllAdminData();
-                                  flash(`Updated user status for ${u.email}`);
-                                })
-                              }
-                              className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                            >
-                              {u.status === 'active' ? 'Suspend' : 'Activate'}
-                            </button>
-                            <button
-                              type="button"
-                              onClick={async () => {
-                                try {
-                                  await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
-                                  loadAllAdminData();
-                                } catch (err) {
-                                  flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
-                                }
-                              }}
-                              className="p-1 text-[#FF444F] cursor-pointer"
-                            >
-                              <Trash2 className="w-3.5 h-3.5 inline" />
-                            </button>
-                          </td>
+                                }}
+                                className="p-1.5 text-[#FF444F] cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 inline" />
+                              </button>
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Desktop Table for Users CRUD */}
+                  <div className="hidden md:block bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[#2A2F3D] text-slate-400">
+                          <th className="text-left px-4 py-3">Trader</th>
+                          <th className="text-left px-4 py-3">Status</th>
+                          <th className="text-right px-4 py-3">Demo Bal (DB)</th>
+                          <th className="text-right px-4 py-3">Real Bal (DB)</th>
+                          <th className="text-right px-4 py-3">Actions</th>
                         </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </div>
-          )}
+                      </thead>
+                      <tbody className="divide-y divide-[#2A2F3D]">
+                        {filteredUsers.map((u: any) => {
+                          let parsedRw = 0;
+                          try {
+                            parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
+                          } catch {
+                            parsedRw = 0;
+                          }
+                          return (
+                            <tr key={u.id}>
+                              <td className="px-4 py-3">
+                                <p className="font-bold">{u.full_name}</p>
+                                <p className="text-slate-400">{u.email}</p>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex flex-col gap-1 items-start">
+                                  <span className={u.status === 'active' ? 'text-[#00A878] font-semibold' : 'text-[#FF444F] font-semibold'}>
+                                    {u.status}
+                                  </span>
+                                  {u.trading_suspended && (
+                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold">
+                                      TRADING FROZEN
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                <div className="inline-flex items-center justify-end gap-1.5">
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                    onChange={(e) =>
+                                      setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
+                                    }
+                                    className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `user-${u.id}`}
+                                    onClick={async () => {
+                                      const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                      if (Number.isNaN(val) || val < 0) {
+                                        flash('Enter a valid non-negative balance', 'err');
+                                        return;
+                                      }
+                                      setBusyAction(`user-${u.id}`);
+                                      await runWithReauth(async () => {
+                                        await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ balance: val }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
+                                      });
+                                      setBusyAction(null);
+                                    }}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
+                                  >
+                                    {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                <div className="inline-flex items-center justify-end gap-1.5">
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                    onChange={(e) =>
+                                      setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
+                                    }
+                                    className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                  />
+                                  <button
+                                    type="button"
+                                    disabled={busyAction === `real-${u.id}`}
+                                    onClick={async () => {
+                                      const val = Number(realBalances[u.id] ?? parsedRw);
+                                      if (Number.isNaN(val) || val < 0) {
+                                        flash('Enter a valid non-negative Real balance', 'err');
+                                        return;
+                                      }
+                                      setBusyAction(`real-${u.id}`);
+                                      await runWithReauth(async () => {
+                                        await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ balance: val }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
+                                      });
+                                      setBusyAction(null);
+                                    }}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
+                                  >
+                                    {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                  </button>
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                                <button
+                                  type="button"
+                                  onClick={() => openAdjustModal(u)}
+                                  className="px-2 py-1 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold cursor-pointer"
+                                >
+                                  Credit/Debit
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openUserActivity(u.id)}
+                                  className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Eye className="w-3 h-3" /> Activity
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => openFullEditModal(u)}
+                                  className="px-2 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Edit3 className="w-3 h-3" /> Wallets
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => toggleTradingFreeze(u)}
+                                  title={u.trading_suspended ? 'Restore Trading Access' : 'Freeze Trading Access'}
+                                  className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  {u.trading_suspended ? <PlayCircle className="w-3 h-3" /> : <PauseCircle className="w-3 h-3" />}
+                                  {u.trading_suspended ? 'Unfreeze' : 'Freeze'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    runWithReauth(async () => {
+                                      await adminFetch(`/api/admin/users/${u.id}/status`, {
+                                        method: 'PATCH',
+                                        body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Updated user status for ${u.email}`);
+                                    })
+                                  }
+                                  className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                                >
+                                  {u.status === 'active' ? 'Suspend' : 'Activate'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+                                      loadAllAdminData();
+                                    } catch (err) {
+                                      flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
+                                    }
+                                  }}
+                                  className="p-1 text-[#FF444F] cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 inline" />
+                                </button>
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
 
           {/* 4. Connected Deriv Accounts */}
           {tab === 'accounts' && (
@@ -1376,6 +1548,21 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           className="px-3 py-1.5 rounded-lg bg-white/5 cursor-pointer"
                         >
                           Sync Live
+                        </button>
+                        <button
+                          type="button"
+                          onClick={async () => {
+                            const nextStatus = a.status === 'frozen' ? 'active' : 'frozen';
+                            await adminFetch(`/api/admin/connected-accounts/${a.id}/status`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ status: nextStatus }),
+                            });
+                            await loadAllAdminData();
+                            flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
+                          }}
+                          className="px-3 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 font-semibold cursor-pointer"
+                        >
+                          {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
                         </button>
                         <button
                           type="button"
@@ -1493,6 +1680,21 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <button
                             type="button"
                             onClick={async () => {
+                              const nextStatus = a.status === 'frozen' ? 'active' : 'frozen';
+                              await adminFetch(`/api/admin/connected-accounts/${a.id}/status`, {
+                                method: 'PATCH',
+                                body: JSON.stringify({ status: nextStatus }),
+                              });
+                              await loadAllAdminData();
+                              flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
+                            }}
+                            className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
+                          >
+                            {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={async () => {
                               await adminFetch(`/api/admin/connected-accounts/${a.id}/revoke`, { method: 'POST' });
                               loadAllAdminData();
                             }}
@@ -1594,89 +1796,160 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             </div>
           )}
 
-          {/* 6. Orders Oversight */}
-          {tab === 'orders' && (
-            <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
-              <table className="w-full text-xs">
-                <thead>
-                  <tr className="border-b border-[#2A2F3D] text-slate-400">
-                    <th className="text-left px-4 py-3">Order</th>
-                    <th className="text-left px-4 py-3">Trader</th>
-                    <th className="text-left px-4 py-3">Mode</th>
-                    <th className="text-right px-4 py-3">Stake</th>
-                    <th className="text-right px-4 py-3">P/L</th>
-                    <th className="text-right px-4 py-3">Actions</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-[#2A2F3D]">
-                  {(overview?.orders || []).map((o: any) => (
-                    <tr key={o.id}>
-                      <td className="px-4 py-3">
-                        <strong>#{o.id} {o.symbol}</strong> ({o.side} · {o.status})
-                      </td>
-                      <td className="px-4 py-3">{o.user_email}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                            o.account_mode === 'real' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-slate-700/60 text-slate-300'
-                          }`}
-                        >
-                          {o.account_mode || 'demo'}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-right font-mono-num">${Number(o.stake || 0).toFixed(2)}</td>
-                      <td className={`px-4 py-3 text-right font-mono-num font-bold ${Number(o.pnl) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
-                        {Number(o.pnl || 0) >= 0 ? '+' : ''}${Number(o.pnl || 0).toFixed(2)}
-                      </td>
-                      <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
-                        <button
-                          type="button"
-                          onClick={() =>
-                            setEditingOrder({
-                              id: o.id,
-                              symbol: o.symbol,
-                              side: o.side,
-                              user_email: o.user_email,
-                              status: o.status,
-                              stake: String(Number(o.stake || 1)),
-                              exit_price: String(Number(o.exit_price ?? o.current_price ?? o.entry_price ?? 0)),
-                              pnl: String(Number(o.pnl || 0)),
-                            })
-                          }
-                          className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
-                        >
-                          <Edit3 className="w-3 h-3" /> Edit P/L
-                        </button>
-                        {o.status === 'OPEN' && (
-                          <button
-                            type="button"
-                            onClick={async () => {
-                              await adminFetch(`/api/admin/orders/${o.id}/close`, { method: 'POST' });
-                              loadAllAdminData();
-                              flash(`Order #${o.id} settled & closed`);
-                            }}
-                            className="px-2.5 py-1 rounded-lg bg-[#FF444F]/15 text-[#FF444F] cursor-pointer"
-                          >
-                            Force Close
-                          </button>
-                        )}
-                        <button
-                          type="button"
-                          onClick={async () => {
-                            await adminFetch(`/api/admin/orders/${o.id}`, { method: 'DELETE' });
-                            loadAllAdminData();
-                          }}
-                          className="p-1 text-slate-400 hover:text-[#FF444F] cursor-pointer"
-                        >
-                          <Trash2 className="w-3.5 h-3.5 inline" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+          {/* 6. Orders Oversight (Immutable Closed Audit Ledger) */}
+          {tab === 'orders' &&
+            (() => {
+              const sourceOrders = serverTrades ?? (overview?.orders || []);
+              const uQ = orderUserFilter.trim().toLowerCase();
+              const sQ = orderSymbolFilter.trim().toUpperCase();
+              const filteredOrders = sourceOrders.filter((o: any) => {
+                if (orderStatusFilter !== 'ALL' && o.status !== orderStatusFilter) return false;
+                if (orderModeFilter !== 'ALL' && (o.account_mode || 'demo') !== orderModeFilter) return false;
+                if (sQ && !String(o.symbol || '').toUpperCase().includes(sQ)) return false;
+                if (uQ && !String(o.user_email || '').toLowerCase().includes(uQ) && !String(o.id).includes(uQ)) return false;
+                return true;
+              });
+
+              const runServerOrderQuery = async () => {
+                const params = new URLSearchParams();
+                if (sQ) params.set('symbol', sQ);
+                if (orderStatusFilter !== 'ALL') params.set('status', orderStatusFilter);
+                if (orderModeFilter !== 'ALL') params.set('accountMode', orderModeFilter);
+                try {
+                  const res = await adminFetch<{ orders: any[] }>(`/api/admin/trades?${params.toString()}`);
+                  setServerTrades(res.orders || []);
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Failed to query trades', 'err');
+                }
+              };
+
+              return (
+                <div className="space-y-4">
+                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 flex flex-wrap items-center gap-3 text-xs">
+                    <input
+                      type="text"
+                      placeholder="Filter by trader email or #ID..."
+                      value={orderUserFilter}
+                      onChange={(e) => setOrderUserFilter(e.target.value)}
+                      className="flex-1 min-w-[180px] px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Symbol (e.g. 1HZ100V)"
+                      value={orderSymbolFilter}
+                      onChange={(e) => setOrderSymbolFilter(e.target.value)}
+                      className="w-36 px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
+                    />
+                    <select
+                      value={orderStatusFilter}
+                      onChange={(e) => setOrderStatusFilter(e.target.value as any)}
+                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                    >
+                      <option value="ALL">All Statuses</option>
+                      <option value="OPEN">OPEN</option>
+                      <option value="CLOSED">CLOSED</option>
+                      <option value="CANCELLED">CANCELLED</option>
+                    </select>
+                    <select
+                      value={orderModeFilter}
+                      onChange={(e) => setOrderModeFilter(e.target.value as any)}
+                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                    >
+                      <option value="ALL">Demo &amp; Real</option>
+                      <option value="demo">Demo</option>
+                      <option value="real">Real</option>
+                    </select>
+                    <button
+                      type="button"
+                      onClick={runServerOrderQuery}
+                      className="px-4 py-2 rounded-full bg-white/10 hover:bg-white/15 font-semibold cursor-pointer"
+                    >
+                      Query Server ({filteredOrders.length})
+                    </button>
+                  </div>
+
+                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[#2A2F3D] text-slate-400">
+                          <th className="text-left px-4 py-3">Order</th>
+                          <th className="text-left px-4 py-3">Trader</th>
+                          <th className="text-left px-4 py-3">Mode</th>
+                          <th className="text-right px-4 py-3">Entry → Exit</th>
+                          <th className="text-right px-4 py-3">Stake</th>
+                          <th className="text-right px-4 py-3">P/L</th>
+                          <th className="text-right px-4 py-3">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#2A2F3D]">
+                        {filteredOrders.map((o: any) => (
+                          <tr key={o.id}>
+                            <td className="px-4 py-3">
+                              <strong>#{o.id} {o.symbol}</strong> ({o.side} · {o.status})
+                              {o.notes && <p className="text-[10px] text-amber-300 mt-0.5 truncate max-w-[200px]">Note: {o.notes}</p>}
+                            </td>
+                            <td className="px-4 py-3">{o.user_email}</td>
+                            <td className="px-4 py-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                                  o.account_mode === 'real' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-slate-700/60 text-slate-300'
+                                }`}
+                              >
+                                {o.account_mode || 'demo'}
+                              </span>
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono-num text-slate-300">
+                              {Number(o.entry_price || 0).toFixed(2)} →{' '}
+                              {o.exit_price !== null && o.exit_price !== undefined ? Number(o.exit_price).toFixed(2) : 'LIVE'}
+                            </td>
+                            <td className="px-4 py-3 text-right font-mono-num">${Number(o.stake || 0).toFixed(2)}</td>
+                            <td className={`px-4 py-3 text-right font-mono-num font-bold ${Number(o.pnl) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                              {Number(o.pnl || 0) >= 0 ? '+' : ''}${Number(o.pnl || 0).toFixed(2)}
+                            </td>
+                            <td className="px-4 py-3 text-right space-x-2 whitespace-nowrap">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setEditingOrder({
+                                    id: o.id,
+                                    symbol: o.symbol,
+                                    side: o.side,
+                                    user_email: o.user_email,
+                                    account_mode: o.account_mode || 'demo',
+                                    status: o.status,
+                                    entry_price: Number(o.entry_price || 0),
+                                    exit_price: o.exit_price ?? o.current_price ?? o.entry_price ?? 0,
+                                    stake: Number(o.stake || 0),
+                                    pnl: Number(o.pnl || 0),
+                                    notes: o.notes || '',
+                                  })
+                                }
+                                className="px-2.5 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Eye className="w-3 h-3" /> Inspect / Notes
+                              </button>
+                              {o.status === 'OPEN' && (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await adminFetch(`/api/admin/orders/${o.id}/close`, { method: 'POST' });
+                                    loadAllAdminData();
+                                    flash(`Order #${o.id} settled & closed`);
+                                  }}
+                                  className="px-2.5 py-1 rounded-lg bg-[#FF444F]/15 text-[#FF444F] cursor-pointer"
+                                >
+                                  Force Close
+                                </button>
+                              )}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              );
+            })()}
 
           {/* 6b. Trading Engine Control (Admin Only) */}
           {tab === 'engine' && (
@@ -2121,43 +2394,127 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 </button>
               </form>
 
-              <form
-                onSubmit={async (e) => {
-                  e.preventDefault();
-                  await runWithReauth(async () => {
-                    await adminFetch('/api/admin/settings/admin-credentials', {
-                      method: 'PUT',
-                      body: JSON.stringify({ email: newAdminEmail || undefined, password: newAdminPassword || undefined }),
+              <div className="space-y-6">
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    await runWithReauth(async () => {
+                      await adminFetch('/api/admin/settings/admin-credentials', {
+                        method: 'PUT',
+                        body: JSON.stringify({ email: newAdminEmail || undefined, password: newAdminPassword || undefined }),
+                      });
+                      setNewAdminPassword('');
+                      flash('Administrator credentials updated');
                     });
-                    setNewAdminPassword('');
-                    flash('Owner credentials updated');
-                  });
-                }}
-                className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-4"
-              >
-                <h2 className="font-display text-sm font-bold">Owner Credentials</h2>
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">New Owner Email (optional)</label>
-                  <input
-                    type="email"
-                    value={newAdminEmail}
-                    onChange={(e) => setNewAdminEmail(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
-                  />
+                  }}
+                  className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-4"
+                >
+                  <h2 className="font-display text-sm font-bold">My Administrator Credentials</h2>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">New Email (optional)</label>
+                    <input
+                      type="email"
+                      value={newAdminEmail}
+                      onChange={(e) => setNewAdminEmail(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-xs text-slate-400 mb-1">New Password (optional)</label>
+                    <input
+                      type="password"
+                      value={newAdminPassword}
+                      onChange={(e) => setNewAdminPassword(e.target.value)}
+                      className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
+                    />
+                  </div>
+                  <button type="submit" className="px-6 py-2.5 rounded-full bg-[#00A878] text-xs font-bold cursor-pointer">
+                    Update Credentials
+                  </button>
+                </form>
+
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-4">
+                  <div className="flex items-center justify-between">
+                    <h2 className="font-display text-sm font-bold flex items-center gap-2">
+                      <UserPlus className="w-4 h-4 text-[#FF444F]" /> Console Team ({adminsList.length})
+                    </h2>
+                    <span className="text-[11px] text-slate-400">Owner + Admin Operators</span>
+                  </div>
+                  <div className="divide-y divide-[#2A2F3D] text-xs">
+                    {adminsList.map((adm) => (
+                      <div key={adm.id} className="py-2.5 flex items-center justify-between gap-2">
+                        <div>
+                          <p className="font-bold">{adm.full_name}</p>
+                          <p className="text-slate-400">{adm.email}</p>
+                        </div>
+                        <span
+                          className={`px-2 py-0.5 rounded uppercase text-[10px] font-bold ${
+                            adm.role === 'owner' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-[#00A878]/20 text-[#00A878]'
+                          }`}
+                        >
+                          {adm.role}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+
+                  {adminUser.role === 'owner' && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        await runWithReauth(async () => {
+                          await adminFetch('/api/admin/admins', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                              email: createAdminEmail,
+                              full_name: createAdminName || 'Operations Admin',
+                              password: createAdminPassword,
+                            }),
+                          });
+                          setCreateAdminEmail('');
+                          setCreateAdminName('');
+                          setCreateAdminPassword('');
+                          await loadAllAdminData();
+                          flash('New administrator provisioned');
+                        });
+                      }}
+                      className="pt-3 border-t border-[#2A2F3D] space-y-3 text-xs"
+                    >
+                      <p className="font-bold text-slate-200">Provision New Operations Admin (Owner Only)</p>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                        <input
+                          type="text"
+                          required
+                          placeholder="Full Name"
+                          value={createAdminName}
+                          onChange={(e) => setCreateAdminName(e.target.value)}
+                          className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                        />
+                        <input
+                          type="email"
+                          required
+                          placeholder="Admin Email"
+                          value={createAdminEmail}
+                          onChange={(e) => setCreateAdminEmail(e.target.value)}
+                          className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                        />
+                      </div>
+                      <input
+                        type="password"
+                        required
+                        minLength={8}
+                        placeholder="Strong Initial Password (min 8 chars)"
+                        value={createAdminPassword}
+                        onChange={(e) => setCreateAdminPassword(e.target.value)}
+                        className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                      />
+                      <button type="submit" className="px-5 py-2 rounded-full bg-[#FF444F] text-xs font-bold cursor-pointer">
+                        Create Admin Operator
+                      </button>
+                    </form>
+                  )}
                 </div>
-                <div>
-                  <label className="block text-xs text-slate-400 mb-1">New Password (optional)</label>
-                  <input
-                    type="password"
-                    value={newAdminPassword}
-                    onChange={(e) => setNewAdminPassword(e.target.value)}
-                    className="w-full px-3.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"
-                  />
-                </div>
-                <button type="submit" className="px-6 py-2.5 rounded-full bg-[#00A878] text-xs font-bold cursor-pointer">
-                  Update Credentials
-                </button>
-              </form>
+              </div>
             </div>
           )}
 
@@ -2226,17 +2583,38 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           {tab === 'logs' && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
-                <h2 className="font-display text-sm font-bold mb-2">Admin Audit Trail</h2>
-                {(overview?.auditLogs || []).slice(0, 20).map((l: any) => (
-                  <div key={l.id} className="py-2 border-b border-[#2A2F3D] last:border-0 text-xs flex justify-between">
-                    <span>{l.action} ({l.target_type} #{l.target_id})</span>
-                    <span className="text-slate-400">{l.created_at}</span>
-                  </div>
-                ))}
+                <h2 className="font-display text-sm font-bold mb-2">Immutable Admin Audit Trail</h2>
+                <div className="max-h-[480px] overflow-y-auto divide-y divide-[#2A2F3D]">
+                  {(overview?.auditLogs || []).slice(0, 50).map((l: any) => (
+                    <div key={l.id} className="py-2.5 text-xs space-y-1">
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-white">
+                          {l.action} · {l.target_type} #{l.target_id}
+                        </span>
+                        <span
+                          className={`px-1.5 py-0.5 rounded text-[10px] font-bold uppercase ${
+                            l.action_result === 'denied' ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-[#00A878]/20 text-[#00A878]'
+                          }`}
+                        >
+                          {l.action_result || 'success'}
+                        </span>
+                      </div>
+                      {(l.previous_value || l.new_value) && (
+                        <p className="text-[11px] font-mono-num text-slate-300">
+                          {l.previous_value || '—'} → {l.new_value || '—'}
+                        </p>
+                      )}
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>{l.admin_email || `Admin #${l.admin_user_id}`} · IP {l.ip_address || '—'}</span>
+                        <span>{new Date(l.created_at).toLocaleString()}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
               </div>
 
               <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
-                <h2 className="font-display text-sm font-bold mb-2">Brevo Email Dispatch Logs</h2>
+                <h2 className="font-display text-sm font-bold mb-2">Email Dispatch Logs</h2>
                 {(overview?.emailLogs || []).slice(0, 20).map((e: any) => (
                   <div key={e.id} className="py-2 border-b border-[#2A2F3D] last:border-0 text-xs flex justify-between">
                     <span>{e.recipient_email} · {e.template}</span>
@@ -2615,100 +2993,295 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
         </div>
       )}
 
-      {/* Order P/L & Status Edit Modal */}
+      {/* Immutable Order Audit Inspection & Admin Notes Modal */}
       {editingOrder && (
         <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
           <div className="w-full max-w-md bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <div>
                 <h3 className="font-display text-base font-bold">
-                  Edit Order #{editingOrder.id} ({editingOrder.symbol})
+                  Inspect Order #{editingOrder.id} ({editingOrder.symbol})
                 </h3>
-                <p className="text-xs text-slate-400">{editingOrder.user_email} · {editingOrder.side}</p>
+                <p className="text-xs text-slate-400">
+                  {editingOrder.user_email} · {editingOrder.side} · {(editingOrder.account_mode || 'demo').toUpperCase()}
+                </p>
               </div>
               <button type="button" onClick={() => setEditingOrder(null)} className="text-slate-400 hover:text-white cursor-pointer">
                 <X className="w-4 h-4" />
               </button>
             </div>
+
+            <div className="grid grid-cols-2 gap-2.5 p-3 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs">
+              <div>
+                <span className="text-[10px] text-slate-400 block">Status</span>
+                <strong className="font-mono-num">{editingOrder.status}</strong>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 block">Stake</span>
+                <strong className="font-mono-num">${Number(editingOrder.stake).toFixed(2)}</strong>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 block">Entry → Exit Price</span>
+                <strong className="font-mono-num">
+                  {Number(editingOrder.entry_price).toFixed(3)} → {Number(editingOrder.exit_price).toFixed(3)}
+                </strong>
+              </div>
+              <div>
+                <span className="text-[10px] text-slate-400 block">Realized P/L</span>
+                <strong className={`font-mono-num ${Number(editingOrder.pnl) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                  {Number(editingOrder.pnl) >= 0 ? '+' : ''}${Number(editingOrder.pnl).toFixed(2)}
+                </strong>
+              </div>
+            </div>
+
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
                 setBusyAction('edit-order-modal');
-                await runWithReauth(async () => {
+                try {
                   await adminFetch(`/api/admin/orders/${editingOrder.id}`, {
                     method: 'PATCH',
-                    body: JSON.stringify({
-                      status: editingOrder.status,
-                      stake: Number(editingOrder.stake),
-                      exit_price: Number(editingOrder.exit_price),
-                      pnl: Number(editingOrder.pnl),
-                    }),
+                    body: JSON.stringify({ notes: editingOrder.notes }),
                   });
                   setEditingOrder(null);
                   await loadAllAdminData();
-                  flash(`Order #${editingOrder.id} updated & trader balance synced`);
-                });
-                setBusyAction(null);
+                  flash(`Saved audit notes on Order #${editingOrder.id}`);
+                } catch (err) {
+                  flash(err instanceof Error ? err.message : 'Update failed', 'err');
+                } finally {
+                  setBusyAction(null);
+                }
               }}
               className="space-y-3 text-xs"
             >
               <div>
-                <label className="block text-slate-400 mb-1">Status</label>
-                <select
-                  value={editingOrder.status}
-                  onChange={(e) => setEditingOrder((p: any) => ({ ...p, status: e.target.value }))}
+                <label className="block text-slate-400 mb-1">Admin Audit Notes (Trade P/L is immutable)</label>
+                <textarea
+                  rows={3}
+                  value={editingOrder.notes}
+                  onChange={(e) => setEditingOrder((p: any) => ({ ...p, notes: e.target.value }))}
+                  placeholder="Record compliance or settlement review notes..."
                   className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
-                >
-                  <option value="OPEN">OPEN</option>
-                  <option value="CLOSED">CLOSED</option>
-                  <option value="CANCELLED">CANCELLED</option>
-                </select>
+                />
               </div>
-              <div className="grid grid-cols-3 gap-2">
-                <div>
-                  <label className="block text-slate-400 mb-1">Stake ($)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={editingOrder.stake}
-                    onChange={(e) => setEditingOrder((p: any) => ({ ...p, stake: e.target.value }))}
-                    className="w-full px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">Exit Price</label>
-                  <input
-                    type="number"
-                    step="any"
-                    value={editingOrder.exit_price}
-                    onChange={(e) => setEditingOrder((p: any) => ({ ...p, exit_price: e.target.value }))}
-                    className="w-full px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
-                  />
-                </div>
-                <div>
-                  <label className="block text-slate-400 mb-1">P/L ($)</label>
-                  <input
-                    type="number"
-                    step="0.01"
-                    value={editingOrder.pnl}
-                    onChange={(e) => setEditingOrder((p: any) => ({ ...p, pnl: e.target.value }))}
-                    className="w-full px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
-                  />
-                </div>
-              </div>
-              <div className="flex justify-end gap-2 pt-2">
+              <div className="flex justify-end gap-2 pt-1">
                 <button type="button" onClick={() => setEditingOrder(null)} className="px-4 py-2 rounded-xl bg-white/5 cursor-pointer">
-                  Cancel
+                  Close
                 </button>
                 <button
                   type="submit"
                   disabled={busyAction === 'edit-order-modal'}
                   className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
                 >
-                  {busyAction === 'edit-order-modal' ? 'Saving...' : 'Save Order & Sync Balance'}
+                  {busyAction === 'edit-order-modal' ? 'Saving...' : 'Save Audit Notes'}
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Atomic Credit / Debit Balance Adjustment Modal */}
+      {adjustTarget && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-md bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">Adjust Trader Balance</h3>
+                <p className="text-xs text-slate-400">{adjustTarget.user.full_name} · {adjustTarget.user.email}</p>
+              </div>
+              <button type="button" onClick={() => setAdjustTarget(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setBusyAction('adjust-bal');
+                await runWithReauth(async () => {
+                  await adminFetch('/api/admin/balances/adjust', {
+                    method: 'POST',
+                    body: JSON.stringify({
+                      userId: adjustTarget.user.id,
+                      accountMode: adjustTarget.accountMode,
+                      walletBucket: adjustTarget.walletBucket,
+                      operation: adjustTarget.operation,
+                      amount: Number(adjustTarget.amount),
+                      reason: adjustTarget.reason,
+                    }),
+                  });
+                  setAdjustTarget(null);
+                  await loadAllAdminData();
+                  flash('Atomic balance adjustment committed & recorded in ledger');
+                });
+                setBusyAction(null);
+              }}
+              className="space-y-3 text-xs"
+            >
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-slate-400 mb-1">Account Mode</label>
+                  <select
+                    value={adjustTarget.accountMode}
+                    onChange={(e) => setAdjustTarget((p) => (p ? { ...p, accountMode: e.target.value as any } : p))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="demo">Demo</option>
+                    <option value="real">Real</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Wallet Bucket</label>
+                  <select
+                    value={adjustTarget.walletBucket}
+                    onChange={(e) => setAdjustTarget((p) => (p ? { ...p, walletBucket: e.target.value as any } : p))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="options">Options &amp; Bot</option>
+                    <option value="mt5_standard">MT5 Standard</option>
+                    <option value="mt5_gold">MT5 Gold</option>
+                    <option value="exchange_usdt">Exchange USDT</option>
+                  </select>
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-slate-400 mb-1">Operation</label>
+                  <select
+                    value={adjustTarget.operation}
+                    onChange={(e) => setAdjustTarget((p) => (p ? { ...p, operation: e.target.value as any } : p))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="credit">Credit (+)</option>
+                    <option value="debit">Debit (-)</option>
+                    <option value="set">Set Exact (=)</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Amount (USD)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    required
+                    value={adjustTarget.amount}
+                    onChange={(e) => setAdjustTarget((p) => (p ? { ...p, amount: e.target.value } : p))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-slate-400 mb-1">Ledger Reason</label>
+                <input
+                  type="text"
+                  required
+                  value={adjustTarget.reason}
+                  onChange={(e) => setAdjustTarget((p) => (p ? { ...p, reason: e.target.value } : p))}
+                  className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-2">
+                <button type="button" onClick={() => setAdjustTarget(null)} className="px-4 py-2 rounded-xl bg-white/5 cursor-pointer">
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busyAction === 'adjust-bal'}
+                  className="px-5 py-2 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white font-bold cursor-pointer"
+                >
+                  {busyAction === 'adjust-bal' ? 'Applying...' : 'Commit Adjustment'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* User Activity Inspection Modal */}
+      {(activityData || activityLoading) && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl max-h-[90vh] overflow-y-auto bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-5 text-xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">
+                  {activityLoading ? 'Loading Trader Activity...' : `Trader Activity · ${activityData?.user?.full_name}`}
+                </h3>
+                {!activityLoading && activityData?.user && (
+                  <p className="text-slate-400">
+                    {activityData.user.email} · {activityData.user.deriv_client_id} · Status: {activityData.user.status}
+                  </p>
+                )}
+              </div>
+              <button type="button" onClick={() => setActivityData(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {activityLoading ? (
+              <div className="py-12 text-center text-slate-400">Fetching connected accounts, trades, and ledger history...</div>
+            ) : (
+              activityData && (
+                <div className="space-y-4">
+                  <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D]">
+                    <p className="font-bold text-slate-200 mb-2">Connected Accounts ({(activityData.accounts || []).length})</p>
+                    {(activityData.accounts || []).length === 0 ? (
+                      <p className="text-slate-400">No linked accounts.</p>
+                    ) : (
+                      <div className="space-y-1.5">
+                        {activityData.accounts.map((acc: any) => (
+                          <div key={acc.id} className="flex items-center justify-between">
+                            <span className="font-mono-num">
+                              {acc.deriv_login_id} ({acc.is_virtual ? 'DEMO' : 'REAL'} · {acc.status})
+                            </span>
+                            <strong className="font-mono-num">${Number(acc.last_known_balance ?? acc.balance ?? 0).toFixed(2)} {acc.currency}</strong>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D]">
+                    <p className="font-bold text-slate-200 mb-2">Recent Trades ({(activityData.orders || []).length})</p>
+                    {(activityData.orders || []).length === 0 ? (
+                      <p className="text-slate-400">No orders placed yet.</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto divide-y divide-[#2A2F3D]">
+                        {activityData.orders.map((ord: any) => (
+                          <div key={ord.id} className="py-1.5 flex items-center justify-between">
+                            <span>
+                              #{ord.id} {ord.symbol} ({ord.side} · {ord.status})
+                            </span>
+                            <span className={`font-mono-num font-bold ${Number(ord.pnl) >= 0 ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
+                              ${Number(ord.stake || 0).toFixed(2)} · P/L {Number(ord.pnl) >= 0 ? '+' : ''}${Number(ord.pnl || 0).toFixed(2)}
+                            </span>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D]">
+                    <p className="font-bold text-slate-200 mb-2">Cashier &amp; Adjustment Transactions ({(activityData.transactions || []).length})</p>
+                    {(activityData.transactions || []).length === 0 ? (
+                      <p className="text-slate-400">No cashier transactions recorded.</p>
+                    ) : (
+                      <div className="max-h-48 overflow-y-auto divide-y divide-[#2A2F3D]">
+                        {activityData.transactions.map((tx: any) => (
+                          <div key={tx.id} className="py-1.5 flex items-center justify-between">
+                            <span>
+                              {tx.reference_id} · {tx.tx_type} ({tx.method})
+                            </span>
+                            <strong className="font-mono-num">
+                              ${Number(tx.amount || 0).toFixed(2)} {tx.currency}
+                            </strong>
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )
+            )}
           </div>
         </div>
       )}
@@ -2719,7 +3292,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           <div className="w-full max-w-sm bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-display text-base font-bold flex items-center gap-2">
-                <Lock className="w-4 h-4 text-[#FF444F]" /> Confirm Owner Password
+                <Lock className="w-4 h-4 text-[#FF444F]" /> Confirm Administrator Password
               </h3>
               <button
                 type="button"
@@ -2733,14 +3306,14 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               </button>
             </div>
             <p className="text-xs text-slate-400">
-              Sensitive operations (editing balances, suspending users, or rotating owner credentials) require password re-verification valid for 10 minutes.
+              Sensitive operations (adjusting balances, freezing trading, suspending users, or managing admin credentials) require password re-verification valid for 10 minutes.
             </p>
             <form onSubmit={handleConfirmReauth} className="space-y-3">
               <input
                 type="password"
                 required
                 autoFocus
-                placeholder="Current Owner Password"
+                placeholder="Current Administrator Password"
                 value={reauthPassword}
                 onChange={(e) => setReauthPassword(e.target.value)}
                 className="w-full px-3.5 py-2.5 rounded-xl bg-[#111319] border border-[#2A2F3D] text-sm"

@@ -1,7 +1,9 @@
-import { Pool, type QueryResultRow } from 'pg';
+import { Pool, type PoolClient, type QueryResultRow } from 'pg';
 import type { Request, Response, NextFunction } from 'express';
 import { config } from './config.ts';
 import { CURATED_DERIV_INSTRUMENTS, SEEDED_BOT_STRATEGIES } from './catalog.ts';
+import { hashPasswordArgon2id } from './password-hash.ts';
+import { randomId } from './crypto.ts';
 
 function isNonLocalDatabase(connectionString: string): boolean {
   if (!connectionString) return false;
@@ -79,6 +81,28 @@ export async function execute(sql: string, params: unknown[] = []): Promise<{ ro
   }
   const res = await pool.query(sql, params);
   return { rowCount: res.rowCount ?? 0 };
+}
+
+export async function withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+  if (!pool) {
+    throw new Error('DATABASE_URL is not configured');
+  }
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const result = await fn(client);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    try {
+      await client.query('ROLLBACK');
+    } catch {
+      // ignore rollback failure
+    }
+    throw err;
+  } finally {
+    client.release();
+  }
 }
 
 async function runSchemaAndSeed(): Promise<void> {
@@ -413,6 +437,12 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS account_mode TEXT DEFAULT 'demo';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
       ALTER TABLE cashier_transactions ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS trading_suspended BOOLEAN NOT NULL DEFAULT FALSE;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS previous_value TEXT DEFAULT '';
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS new_value TEXT DEFAULT '';
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS ip_address TEXT DEFAULT 'unknown';
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS action_result TEXT NOT NULL DEFAULT 'success';
     `);
 
     // Auto-heal misclassified DOT.../VR... demo Deriv accounts from earlier OAuth saves
@@ -445,6 +475,8 @@ async function runSchemaAndSeed(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_smart_alerts_user_status ON smart_alerts (user_id, status);
       CREATE INDEX IF NOT EXISTS idx_admin_login_attempts_email_time ON admin_login_attempts (email, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_journal_user_time ON trading_journal_entries (user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_cashier_tx_user_time ON cashier_transactions (user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON administrator_audit_logs (created_at DESC);
 
       ALTER TABLE risk_settings ALTER COLUMN risk_per_trade_pct SET DEFAULT 2.0;
       ALTER TABLE risk_settings ALTER COLUMN daily_loss_limit_usd SET DEFAULT 10.0;
@@ -686,6 +718,33 @@ async function runSchemaAndSeed(): Promise<void> {
       }
       settingsCache.set(key, parsed);
     }
+
+    // Optional env-var Owner bootstrap when ADMIN_EMAIL and ADMIN_PASSWORD are provided
+    if (config.adminBootstrapEmail && config.adminBootstrapPassword.length >= 8) {
+      const existingOwner = await client.query("SELECT id FROM users WHERE role IN ('admin', 'owner') LIMIT 1");
+      if (existingOwner.rows.length === 0) {
+        const hash = await hashPasswordArgon2id(config.adminBootstrapPassword);
+        const inserted = await client.query<{ id: number }>(
+          `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
+           VALUES ($1, $2, $3, 'owner', 'active', TRUE, 100000.00, $4)
+           ON CONFLICT (email) DO NOTHING
+           RETURNING id`,
+          [config.adminBootstrapEmail, hash, config.adminBootstrapFullName || 'Platform Owner', `OWNER-${randomId(3).toUpperCase()}`]
+        );
+        if (inserted.rows[0]?.id) {
+          await client.query(
+            `INSERT INTO administrator_audit_logs (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
+             VALUES ($1, 'owner_env_bootstrap', 'users', $2, '', $3, 'system', 'success', $4)`,
+            [
+              inserted.rows[0].id,
+              String(inserted.rows[0].id),
+              config.adminBootstrapEmail,
+              JSON.stringify({ email: config.adminBootstrapEmail, via: 'env_bootstrap' }),
+            ]
+          );
+        }
+      }
+    }
   } finally {
     client.release();
   }
@@ -790,12 +849,24 @@ export async function logAdminAction(
   action: string,
   targetType: string,
   targetId = '',
-  details: Record<string, unknown> = {}
+  details: Record<string, unknown> = {},
+  meta?: {
+    previousValue?: string;
+    newValue?: string;
+    ipAddress?: string;
+    actionResult?: 'success' | 'denied' | 'error';
+  }
 ): Promise<void> {
   if (!pool) return;
+  const prevVal = meta?.previousValue ?? (details.previousValue !== undefined ? String(details.previousValue) : '');
+  const nextVal = meta?.newValue ?? (details.newValue !== undefined ? String(details.newValue) : '');
+  const ip = meta?.ipAddress ?? (details.ipAddress !== undefined ? String(details.ipAddress) : 'unknown');
+  const result = meta?.actionResult ?? 'success';
   await execute(
-    'INSERT INTO administrator_audit_logs (admin_user_id, action, target_type, target_id, details_json) VALUES ($1, $2, $3, $4, $5)',
-    [adminUserId, action, targetType, targetId, JSON.stringify(details)]
+    `INSERT INTO administrator_audit_logs
+      (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+    [adminUserId, action, targetType, targetId, prevVal, nextVal, ip, result, JSON.stringify(details)]
   );
 }
 

@@ -724,25 +724,34 @@ export const PortfolioHub: React.FC = () => {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                    {transactions.slice(0, 20).map((tx) => (
-                      <tr key={tx.id}>
-                        <td className="px-4 py-3 font-mono-num text-xs font-semibold">{tx.reference_id}</td>
-                        <td className="px-4 py-3 capitalize text-xs font-medium">{tx.tx_type}</td>
-                        <td className="px-4 py-3 text-xs text-slate-500">
-                          {tx.method}
-                          {tx.account_from && tx.account_to ? ` (${tx.account_from} → ${tx.account_to})` : ''}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono-num font-bold">
-                          {tx.amount.toFixed(2)} {tx.currency}
-                        </td>
-                        <td className="px-4 py-3 text-right">
-                          <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#00A878]">
-                            <CheckCircle2 className="w-3.5 h-3.5" />
-                            {tx.status}
-                          </span>
-                        </td>
-                      </tr>
-                    ))}
+                    {transactions.slice(0, 20).map((tx) => {
+                      const isPositive = tx.tx_type === 'credit' || tx.tx_type === 'deposit';
+                      const isNegative = tx.tx_type === 'debit' || tx.tx_type === 'withdrawal';
+                      return (
+                        <tr key={tx.id}>
+                          <td className="px-4 py-3 font-mono-num text-xs font-semibold">{tx.reference_id}</td>
+                          <td className="px-4 py-3 capitalize text-xs font-medium">{tx.tx_type}</td>
+                          <td className="px-4 py-3 text-xs text-slate-500">
+                            {tx.method}
+                            {tx.account_from && tx.account_to ? ` (${tx.account_from} → ${tx.account_to})` : ''}
+                          </td>
+                          <td
+                            className={`px-4 py-3 text-right font-mono-num font-bold ${
+                              isPositive ? 'text-[#00A878]' : isNegative ? 'text-[#FF444F]' : ''
+                            }`}
+                          >
+                            {isPositive ? '+' : isNegative ? '-' : ''}
+                            {Number(tx.amount).toFixed(2)} {tx.currency}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <span className="inline-flex items-center gap-1 text-xs font-semibold text-[#00A878]">
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                              {tx.status}
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
                   </tbody>
                 </table>
               </div>

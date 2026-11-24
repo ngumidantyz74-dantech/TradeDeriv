@@ -257,11 +257,15 @@ router.post('/exchange/order', requireDb, requireAuth, async (req: AuthRequest, 
   const [baseCoin, quoteCoin] = String(pair).split('/');
 
   const user = await queryOne<any>(
-    'SELECT exchange_balances_json, real_exchange_balances_json, virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
+    'SELECT status, COALESCE(trading_suspended, FALSE) as trading_suspended, exchange_balances_json, real_exchange_balances_json, virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
     [req.user!.id]
   );
   if (!user) {
     res.status(404).json({ error: 'User not found' });
+    return;
+  }
+  if (user.status !== 'active' || user.trading_suspended) {
+    res.status(403).json({ error: 'Trading is currently suspended on this account.' });
     return;
   }
 
