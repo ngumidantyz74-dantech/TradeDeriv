@@ -31,11 +31,21 @@ import {
   PauseCircle,
   PlayCircle,
   UserPlus,
+  Laptop,
+  KeyRound,
+  ShieldCheck,
+  Download,
+  History,
+  Ban,
+  UserCheck,
+  Clock,
 } from 'lucide-react';
 import { TradeDerivLogo } from '../components/TradeDerivLogo';
 
 type AdminTab =
   | 'overview'
+  | 'admins'
+  | 'devices'
   | 'commissions'
   | 'users'
   | 'accounts'
@@ -87,18 +97,41 @@ function formatLoginTime(ts?: string | null): string {
 }
 
 export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onReturnToSite }) => {
-  const [adminUser, setAdminUser] = useState<{ id: number; email: string; full_name: string; role: string } | null>(null);
+  const [adminUser, setAdminUser] = useState<{
+    id: number;
+    email: string;
+    full_name: string;
+    role: string;
+    admin_role_id?: number | null;
+    admin_role_name?: string;
+    admin_role_slug?: string;
+  } | null>(null);
+  const [permissions, setPermissions] = useState<string[]>([]);
+  const [isSuperAdmin, setIsSuperAdmin] = useState<boolean>(false);
+  const [currentDevice, setCurrentDevice] = useState<any | null>(null);
+  const [assignedDeviceIds, setAssignedDeviceIds] = useState<number[]>([]);
   const [bootstrapped, setBootstrapped] = useState<boolean>(true);
   const [loadingStatus, setLoadingStatus] = useState(true);
   const [tab, setTab] = useState<AdminTab>('overview');
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [notice, setNotice] = useState<{ msg: string; type: 'ok' | 'err' } | null>(null);
 
-  // Auth forms
+  // Auth & Device Enrollment forms
   const [authEmail, setAuthEmail] = useState('');
   const [authPassword, setAuthPassword] = useState('');
   const [authName, setAuthName] = useState('Platform Owner');
   const [authBusy, setAuthBusy] = useState(false);
+  const [enrollOpen, setEnrollOpen] = useState(false);
+  const [enrollToken, setEnrollToken] = useState('');
+  const [enrollLabel, setEnrollLabel] = useState('');
+  const [enrollEmail, setEnrollEmail] = useState('');
+  const [enrollPassword, setEnrollPassword] = useState('');
+  const [enrollNeedsCreds, setEnrollNeedsCreds] = useState(false);
+  const [enrollBusy, setEnrollBusy] = useState(false);
+  const [browserDeviceStatus, setBrowserDeviceStatus] = useState<{ verified: boolean; device: any; reason?: string }>({
+    verified: false,
+    device: null,
+  });
 
   // Overview data
   const [overview, setOverview] = useState<any>(null);
@@ -173,11 +206,45 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const [orderModeFilter, setOrderModeFilter] = useState<'ALL' | 'real' | 'demo'>('ALL');
   const [serverTrades, setServerTrades] = useState<any[] | null>(null);
 
-  // Admin Team Management
+  // Admin Team, RBAC Roles, Devices, Sessions & Ownership state
   const [adminsList, setAdminsList] = useState<any[]>([]);
+  const [rolesList, setRolesList] = useState<any[]>([]);
+  const [permissionsCatalog, setPermissionsCatalog] = useState<any[]>([]);
+  const [devicesList, setDevicesList] = useState<any[]>([]);
+  const [sessionsList, setSessionsList] = useState<any[]>([]);
+  const [ownershipClients, setOwnershipClients] = useState<any[]>([]);
+  const [ownershipSearch, setOwnershipSearch] = useState('');
+  const [ownershipFilter, setOwnershipFilter] = useState<'all' | 'verified' | 'pending_verification'>('all');
+
   const [createAdminEmail, setCreateAdminEmail] = useState('');
   const [createAdminName, setCreateAdminName] = useState('');
+  const [createAdminUsername, setCreateAdminUsername] = useState('');
   const [createAdminPassword, setCreateAdminPassword] = useState('');
+  const [createAdminRoleId, setCreateAdminRoleId] = useState<string>('');
+  const [createAdminDeviceIds, setCreateAdminDeviceIds] = useState<number[]>([]);
+  const [createAdminNotes, setCreateAdminNotes] = useState('');
+  const [editingAdmin, setEditingAdmin] = useState<any | null>(null);
+  const [adminActivityModal, setAdminActivityModal] = useState<any | null>(null);
+
+  const [newRoleName, setNewRoleName] = useState('');
+  const [newRoleDesc, setNewRoleDesc] = useState('');
+  const [newRolePerms, setNewRolePerms] = useState<string[]>(['dashboard.view', 'users.view', 'clients.view']);
+  const [rolePermDrafts, setRolePermDrafts] = useState<Record<number, string[]>>({});
+
+  const [newDeviceName, setNewDeviceName] = useState('');
+  const [newDeviceType, setNewDeviceType] = useState<'browser' | 'desktop' | 'mobile' | 'terminal'>('browser');
+  const [newDevicePlatform, setNewDevicePlatform] = useState('web');
+  const [newDeviceAdminId, setNewDeviceAdminId] = useState<string>('');
+  const [issuedTokenBanner, setIssuedTokenBanner] = useState<{
+    deviceUid: string;
+    token: string;
+    isReplacement?: boolean;
+  } | null>(null);
+  const [deviceHistoryModal, setDeviceHistoryModal] = useState<{ device: any; logs: any[] } | null>(null);
+  const [deviceAssignTarget, setDeviceAssignTarget] = useState<Record<number, string>>({});
+  const [deviceReassignTransfer, setDeviceReassignTransfer] = useState<Record<number, boolean>>({});
+  const [clientReassignAdmin, setClientReassignAdmin] = useState<Record<number, string>>({});
+  const [clientReassignDevice, setClientReassignDevice] = useState<Record<number, string>>({});
 
   // Create forms
   const [newUserEmail, setNewUserEmail] = useState('');
@@ -210,8 +277,23 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
   const flash = (msg: string, type: 'ok' | 'err' = 'ok') => {
     setNotice({ msg, type });
-    setTimeout(() => setNotice(null), 4000);
+    setTimeout(() => setNotice(null), 5000);
   };
+
+  const hasPerm = useCallback(
+    (perm: string) => isSuperAdmin || permissions.includes(perm),
+    [isSuperAdmin, permissions]
+  );
+
+  const refreshBrowserDeviceStatus = useCallback(async () => {
+    const st = await adminFetch<{ verified: boolean; device: any; reason?: string }>('/api/admin/devices/status').catch(() => ({
+      verified: false,
+      device: null,
+      reason: 'check_failed',
+    }));
+    setBrowserDeviceStatus(st);
+    if (st.verified && st.device) setCurrentDevice(st.device);
+  }, []);
 
   useEffect(() => {
     Promise.all([
@@ -219,11 +301,20 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
       fetch('/api/admin/me', { credentials: 'include' })
         .then((r) => (r.ok ? r.json() : null))
         .catch(() => null),
+      adminFetch<{ verified: boolean; device: any; reason?: string }>('/api/admin/devices/status').catch(() => ({
+        verified: false,
+        device: null,
+      })),
     ])
-      .then(([statusRes, meRes]) => {
+      .then(([statusRes, meRes, devRes]) => {
         setBootstrapped(statusRes.bootstrapped);
+        setBrowserDeviceStatus(devRes);
         if (meRes?.user) {
           setAdminUser(meRes.user);
+          setPermissions(Array.isArray(meRes.permissions) ? meRes.permissions : []);
+          setIsSuperAdmin(Boolean(meRes.isSuperAdmin || meRes.user.role === 'owner'));
+          setCurrentDevice(meRes.currentDevice || devRes?.device || null);
+          setAssignedDeviceIds(Array.isArray(meRes.assignedDeviceIds) ? meRes.assignedDeviceIds : []);
         }
       })
       .finally(() => setLoadingStatus(false));
@@ -232,22 +323,53 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
   const loadAllAdminData = useCallback(async () => {
     if (!adminUser) return;
     try {
-      const [ov, cash, comm, adminsRes] = await Promise.all([
-        adminFetch('/api/admin/overview'),
-        adminFetch('/api/admin/cashier-logs'),
-        adminFetch(`/api/admin/commissions?date_from=${dateFrom}&date_to=${dateTo}`),
-        adminFetch<{ admins: any[] }>('/api/admin/admins').catch(() => ({ admins: [] })),
+      const superFlag = isSuperAdmin || adminUser.role === 'owner';
+      const canDash = superFlag || permissions.includes('dashboard.view');
+      const canCashier = superFlag || permissions.includes('transactions.view');
+      const canDevices = superFlag || permissions.includes('devices.view');
+
+      const [ov, cash, comm, adminsRes, rolesRes, devRes, sessRes, ownRes] = await Promise.all([
+        canDash ? adminFetch('/api/admin/overview') : Promise.resolve(null),
+        canCashier ? adminFetch('/api/admin/cashier-logs').catch(() => ({ transactions: [] })) : Promise.resolve({ transactions: [] }),
+        superFlag
+          ? adminFetch(`/api/admin/commissions?date_from=${dateFrom}&date_to=${dateTo}`).catch(() => null)
+          : Promise.resolve(null),
+        superFlag ? adminFetch<{ admins: any[] }>('/api/admin/admins').catch(() => ({ admins: [] })) : Promise.resolve({ admins: [] }),
+        superFlag
+          ? adminFetch<{ roles: any[]; permissionsCatalog: any[] }>('/api/admin/roles').catch(() => ({ roles: [], permissionsCatalog: [] }))
+          : Promise.resolve({ roles: [], permissionsCatalog: [] }),
+        canDevices ? adminFetch<{ devices: any[] }>('/api/admin/devices').catch(() => ({ devices: [] })) : Promise.resolve({ devices: [] }),
+        superFlag ? adminFetch<{ sessions: any[] }>('/api/admin/sessions').catch(() => ({ sessions: [] })) : Promise.resolve({ sessions: [] }),
+        superFlag
+          ? adminFetch<{ clients: any[] }>('/api/admin/ownership/clients').catch(() => ({ clients: [] }))
+          : Promise.resolve({ clients: [] }),
       ]);
+
       setOverview(ov);
       setCashierLogs(cash.transactions || []);
       setCommData(comm);
       setAdminsList(adminsRes.admins || []);
+      setRolesList(rolesRes.roles || []);
+      setPermissionsCatalog(rolesRes.permissionsCatalog || []);
+      const rDrafts: Record<number, string[]> = {};
+      for (const r of rolesRes.roles || []) {
+        rDrafts[r.id] = Array.isArray(r.permissions) ? r.permissions : [];
+      }
+      setRolePermDrafts(rDrafts);
+      if (!createAdminRoleId && Array.isArray(rolesRes.roles)) {
+        const defRole = rolesRes.roles.find((r: any) => r.slug !== 'super_admin');
+        if (defRole) setCreateAdminRoleId(String(defRole.id));
+      }
+
+      setDevicesList(devRes.devices || []);
+      setSessionsList(sessRes.sessions || []);
+      setOwnershipClients(ownRes.clients || []);
       setServerTrades(null);
 
       const uMap: Record<number, string> = {};
       const rMap: Record<number, string> = {};
       const nMap: Record<number, string> = {};
-      for (const u of ov.users || []) {
+      for (const u of ov?.users || []) {
         uMap[u.id] = String(Number(u.virtual_workspace_balance ?? 0).toFixed(2));
         nMap[u.id] = String(u.full_name ?? '');
         let realOpt = 0;
@@ -265,31 +387,31 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
       const aMap: Record<number, string> = {};
       const anMap: Record<number, string> = {};
-      for (const a of ov.connectedAccounts || []) {
+      for (const a of ov?.connectedAccounts || []) {
         aMap[a.id] = String(Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2));
         anMap[a.id] = String(a.account_type ?? '');
       }
       setAccountBalances(aMap);
       setAccountNames(anMap);
 
-      setAppName(ov.branding?.appName || 'DERIV');
-      setTagline(ov.branding?.tagline || 'Precision Synthetic, CFD, Options & Crypto Exchange Terminal');
-      setHeroTitle(ov.branding?.heroTitle || 'Trade global markets on one precision platform');
-      setHeroSubtitle(ov.branding?.heroSubtitle || 'Real-time Deriv Synthetics, Forex CFDs, Options & Exchange');
+      setAppName(ov?.branding?.appName || 'DERIV');
+      setTagline(ov?.branding?.tagline || 'Precision Synthetic, CFD, Options & Crypto Exchange Terminal');
+      setHeroTitle(ov?.branding?.heroTitle || 'Trade global markets on one precision platform');
+      setHeroSubtitle(ov?.branding?.heroSubtitle || 'Real-time Deriv Synthetics, Forex CFDs, Options & Exchange');
       setHeroDescription(
-        ov.branding?.heroDescription ||
+        ov?.branding?.heroDescription ||
           'Trade CFDs, Options, Deriv Bot, SmartTrader, and Crypto Spot/Futures from a unified institutional terminal.'
       );
-      setSupportEmail(ov.branding?.supportEmail || 'support@deriv.com');
-      setSupportPhone(ov.branding?.supportPhone || '+44 20 8089 0000');
-      setKesRate(String(ov.global?.kesRate || 130));
-      setTickerText(ov.global?.tickerText || '');
-      setAdminSlug(ov.global?.adminPrivateSlug || 'pf-ops-9482');
-      setDefaultVirtualBalance(String(ov.global?.defaultVirtualBalance ?? 10000));
-      setAllowRegistration(ov.global?.allowRegistration !== false);
-      setMaintenanceMode(Boolean(ov.global?.maintenanceMode));
+      setSupportEmail(ov?.branding?.supportEmail || 'support@deriv.com');
+      setSupportPhone(ov?.branding?.supportPhone || '+44 20 8089 0000');
+      setKesRate(String(ov?.global?.kesRate || 130));
+      setTickerText(ov?.global?.tickerText || '');
+      setAdminSlug(ov?.global?.adminPrivateSlug || 'pf-ops-9482');
+      setDefaultVirtualBalance(String(ov?.global?.defaultVirtualBalance ?? 10000));
+      setAllowRegistration(ov?.global?.allowRegistration !== false);
+      setMaintenanceMode(Boolean(ov?.global?.maintenanceMode));
 
-      if (ov.tradingEngine) {
+      if (ov?.tradingEngine) {
         setEngineConfig({
           botWinRatePct: Number(ov.tradingEngine.botWinRatePct ?? 76),
           analyserWinRatePct: Number(ov.tradingEngine.analyserWinRatePct ?? 82),
@@ -300,7 +422,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
         });
       }
 
-      const insts = Array.isArray(ov.instruments) ? ov.instruments : [];
+      const insts = Array.isArray(ov?.instruments) ? ov.instruments : [];
       setInstrumentsList(insts);
       const iMap: Record<
         string,
@@ -318,17 +440,19 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
       }
       setInstrumentEdits(iMap);
 
-      setDerivAppId(comm.config?.derivAppId || '');
-      setMarkupPct(String(comm.config?.markupPercentage ?? 2.0));
-      setAffiliateLink(comm.config?.affiliateLink || 'https://t.deriv.link?t=FSDRTFVTSKPA');
-      setAffiliateCode(comm.config?.affiliateCode || 'VNMH2VHBRTFN');
-      setAffiliateTier(String(comm.config?.affiliateTierRate ?? 30));
+      if (comm) {
+        setDerivAppId(comm.config?.derivAppId || '');
+        setMarkupPct(String(comm.config?.markupPercentage ?? 2.0));
+        setAffiliateLink(comm.config?.affiliateLink || 'https://t.deriv.link?t=FSDRTFVTSKPA');
+        setAffiliateCode(comm.config?.affiliateCode || 'VNMH2VHBRTFN');
+        setAffiliateTier(String(comm.config?.affiliateTierRate ?? 30));
+      }
     } catch (err) {
-      if (err instanceof Error && (err.message.includes('401') || err.message.includes('403'))) {
+      if (err instanceof Error && (err.message.includes('401') || err.message.includes('DEVICE_') || err.message.includes('SESSION_'))) {
         setAdminUser(null);
       }
     }
-  }, [adminUser, dateFrom, dateTo]);
+  }, [adminUser, isSuperAdmin, permissions, dateFrom, dateTo, createAdminRoleId]);
 
   useEffect(() => {
     loadAllAdminData();
@@ -339,18 +463,64 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     setAuthBusy(true);
     try {
       const path = bootstrapped ? '/api/admin/login' : '/api/admin/bootstrap';
-      const res = await adminFetch<{ user: { id: number; email: string; full_name: string; role: string } }>(path, {
+      const res = await adminFetch<any>(path, {
         method: 'POST',
         body: JSON.stringify({ email: authEmail, password: authPassword, full_name: authName }),
       });
       setAdminUser(res.user);
+      setPermissions(Array.isArray(res.permissions) ? res.permissions : []);
+      setIsSuperAdmin(Boolean(res.isSuperAdmin || res.user?.role === 'owner'));
+      setCurrentDevice(res.currentDevice || null);
+      setAssignedDeviceIds(Array.isArray(res.assignedDeviceIds) ? res.assignedDeviceIds : []);
       setAuthPassword('');
       setBootstrapped(true);
       flash('Signed in to Administrator Console');
     } catch (err) {
-      flash(err instanceof Error ? err.message : 'Authentication failed', 'err');
+      const msg = err instanceof Error ? err.message : 'Authentication failed';
+      if (msg.toLowerCase().includes('enroll')) {
+        setEnrollOpen(true);
+      }
+      flash(msg, 'err');
     } finally {
       setAuthBusy(false);
+    }
+  };
+
+  const handleEnrollDevice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setEnrollBusy(true);
+    try {
+      const resp = await fetch('/api/admin/devices/enroll', {
+        method: 'POST',
+        credentials: 'include',
+        headers: {
+          'Content-Type': 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+        },
+        body: JSON.stringify({
+          enrollmentToken: enrollToken.trim(),
+          deviceLabel: enrollLabel.trim() || undefined,
+          email: enrollEmail.trim() || authEmail.trim() || undefined,
+          password: enrollPassword || authPassword || undefined,
+        }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        if (data?.code === 'REENROLL_CREDENTIALS_REQUIRED') {
+          setEnrollNeedsCreds(true);
+        }
+        throw new Error(data.error || `Enrollment failed (${resp.status})`);
+      }
+      setEnrollToken('');
+      setEnrollPassword('');
+      setEnrollNeedsCreds(false);
+      setEnrollOpen(false);
+      await refreshBrowserDeviceStatus();
+      flash(`Device ${data.device?.device_uid || ''} cryptographically verified and bound to this browser`);
+    } catch (err) {
+      flash(err instanceof Error ? err.message : 'Device enrollment failed', 'err');
+    } finally {
+      setEnrollBusy(false);
     }
   };
 
@@ -362,9 +532,16 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     }).catch(() => {});
     currentAdminReauthToken = '';
     setAdminUser(null);
+    setPermissions([]);
+    setIsSuperAdmin(false);
+    setAssignedDeviceIds([]);
     setOverview(null);
     setDiagnostics(null);
     setAdminsList([]);
+    setRolesList([]);
+    setDevicesList([]);
+    setSessionsList([]);
+    setOwnershipClients([]);
   };
 
   const loadDiagnostics = useCallback(async () => {
@@ -434,6 +611,28 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
     }
   };
 
+  const handleDownloadExport = async (url: string, filename: string) => {
+    try {
+      const resp = await fetch(url, { credentials: 'include' });
+      if (!resp.ok) {
+        const data = await resp.json().catch(() => ({}));
+        throw new Error(data.error || `Export failed (${resp.status})`);
+      }
+      const blob = await resp.blob();
+      const blobUrl = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = blobUrl;
+      link.download = filename;
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      URL.revokeObjectURL(blobUrl);
+      flash(`Downloaded ${filename}`);
+    } catch (err) {
+      flash(err instanceof Error ? err.message : 'Export failed', 'err');
+    }
+  };
+
   if (loadingStatus) {
     return (
       <div className="min-h-screen bg-[#111319] text-white flex items-center justify-center">
@@ -478,6 +677,24 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             </div>
           )}
 
+          <div className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] flex items-center justify-between gap-2 text-[11px]">
+            <div className="flex items-center gap-2 min-w-0">
+              <Laptop className={`w-3.5 h-3.5 shrink-0 ${browserDeviceStatus.verified ? 'text-[#00A878]' : 'text-amber-400'}`} />
+              <span className="truncate text-slate-300">
+                {browserDeviceStatus.verified && browserDeviceStatus.device
+                  ? `Verified Device: ${browserDeviceStatus.device.device_uid}`
+                  : 'Unregistered Device (Super Admin Bypass Only)'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setEnrollOpen((v) => !v)}
+              className="text-[11px] font-bold text-[#FF444F] hover:underline shrink-0 cursor-pointer"
+            >
+              {enrollOpen ? 'Hide' : browserDeviceStatus.verified ? 'Re-Enroll' : 'Enroll Device'}
+            </button>
+          </div>
+
           <form onSubmit={handleBootstrapOrLogin} className="space-y-4">
             {!bootstrapped && (
               <div>
@@ -492,7 +709,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               </div>
             )}
             <div>
-              <label className="block text-xs font-semibold text-slate-400 mb-1">Owner Email</label>
+              <label className="block text-xs font-semibold text-slate-400 mb-1">Administrator Email</label>
               <input
                 type="email"
                 required
@@ -519,26 +736,100 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               {authBusy ? 'Authenticating...' : bootstrapped ? 'Sign In to MIS' : 'Create Owner Account'}
             </button>
           </form>
+
+          {bootstrapped && enrollOpen && (
+            <form onSubmit={handleEnrollDevice} className="pt-4 border-t border-[#2A2F3D] space-y-3 text-xs">
+              <div className="flex items-center gap-2 font-bold text-slate-200">
+                <KeyRound className="w-4 h-4 text-[#00A878]" />
+                <span>Cryptographic Device Enrollment / Replacement</span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Paste the one-time enrollment token issued by the Super Admin to bind a signed cryptographic credential to this browser.
+              </p>
+              <input
+                type="text"
+                required
+                placeholder="One-time token (tdv_enr_...)"
+                value={enrollToken}
+                onChange={(e) => setEnrollToken(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num"
+              />
+              <input
+                type="text"
+                placeholder="Device Label (e.g. Ops Terminal Chrome)"
+                value={enrollLabel}
+                onChange={(e) => setEnrollLabel(e.target.value)}
+                className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+              />
+              {enrollNeedsCreds && (
+                <div className="p-2.5 rounded-xl bg-amber-500/10 border border-amber-500/30 space-y-2">
+                  <p className="text-[11px] text-amber-300 font-semibold">
+                    Device replacement requires administrator email &amp; password verification:
+                  </p>
+                  <input
+                    type="email"
+                    required
+                    placeholder="Admin Email"
+                    value={enrollEmail}
+                    onChange={(e) => setEnrollEmail(e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <input
+                    type="password"
+                    required
+                    placeholder="Admin Password"
+                    value={enrollPassword}
+                    onChange={(e) => setEnrollPassword(e.target.value)}
+                    className="w-full px-3 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+              )}
+              <button
+                type="submit"
+                disabled={enrollBusy}
+                className="w-full py-2.5 rounded-full bg-[#00A878] hover:bg-[#00966B] text-white font-bold cursor-pointer"
+              >
+                {enrollBusy ? 'Verifying Credential...' : 'Verify & Enroll This Device'}
+              </button>
+            </form>
+          )}
         </div>
       </div>
     );
   }
 
-  const navItems: Array<{ id: AdminTab; label: string; icon: React.ComponentType<any> }> = [
-    { id: 'overview', label: 'MIS Overview', icon: LayoutDashboard },
-    { id: 'commissions', label: 'Commissions & Markup', icon: DollarSign },
-    { id: 'users', label: 'Users CRUD', icon: Users },
-    { id: 'accounts', label: 'Connected Deriv', icon: Link2 },
-    { id: 'engine', label: 'Trading Engine Control', icon: Sliders },
-    { id: 'markets', label: 'Instruments & Pricing', icon: BarChart3 },
-    { id: 'strategies', label: 'Bot Strategies', icon: Bot },
-    { id: 'orders', label: 'Orders Oversight', icon: Activity },
-    { id: 'cashier', label: 'Cashier Logs', icon: Wallet },
-    { id: 'settings', label: 'Global Settings', icon: Settings },
-    { id: 'announcements', label: 'Announcements', icon: Megaphone },
-    { id: 'logs', label: 'Audit & Email Logs', icon: FileText },
-    { id: 'security', label: 'Security & Diagnostics', icon: Shield },
+  const allNavItems: Array<{
+    id: AdminTab;
+    label: string;
+    icon: React.ComponentType<any>;
+    visible: boolean;
+  }> = [
+    { id: 'overview', label: 'MIS Overview', icon: LayoutDashboard, visible: hasPerm('dashboard.view') },
+    { id: 'admins', label: 'Admins & RBAC', icon: ShieldCheck, visible: isSuperAdmin },
+    { id: 'devices', label: 'Devices & Ownership', icon: Laptop, visible: hasPerm('devices.view') },
+    { id: 'commissions', label: 'Commissions & Markup', icon: DollarSign, visible: isSuperAdmin },
+    { id: 'users', label: 'Users CRUD', icon: Users, visible: hasPerm('users.view') },
+    { id: 'accounts', label: 'Connected Deriv', icon: Link2, visible: hasPerm('clients.view') },
+    { id: 'engine', label: 'Trading Engine Control', icon: Sliders, visible: hasPerm('engine.manage') },
+    { id: 'markets', label: 'Instruments & Pricing', icon: BarChart3, visible: hasPerm('markets.manage') },
+    { id: 'strategies', label: 'Bot Strategies', icon: Bot, visible: hasPerm('strategies.manage') },
+    {
+      id: 'orders',
+      label: 'Orders Oversight',
+      icon: Activity,
+      visible: hasPerm('clients.view') || hasPerm('reports.view') || hasPerm('users.view'),
+    },
+    { id: 'cashier', label: 'Cashier Logs', icon: Wallet, visible: hasPerm('transactions.view') },
+    { id: 'settings', label: 'Global Settings', icon: Settings, visible: isSuperAdmin },
+    { id: 'announcements', label: 'Announcements', icon: Megaphone, visible: hasPerm('settings.manage') },
+    { id: 'logs', label: 'Audit & Email Logs', icon: FileText, visible: hasPerm('audit_logs.view') },
+    { id: 'security', label: 'Security & Diagnostics', icon: Shield, visible: isSuperAdmin },
   ];
+
+  const navItems = allNavItems.filter((item) => item.visible);
+  const activeTab: AdminTab = navItems.some((item) => item.id === tab)
+    ? tab
+    : navItems[0]?.id || 'overview';
 
   const kpis = overview?.kpis || {};
 
@@ -569,7 +860,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   setMobileMenuOpen(false);
                 }}
                 className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-xl text-xs font-semibold cursor-pointer ${
-                  tab === item.id ? 'bg-[#FF444F] text-white' : 'text-slate-400 hover:bg-white/5 hover:text-white'
+                  activeTab === item.id ? 'bg-[#FF444F] text-white' : 'text-slate-400 hover:bg-white/5 hover:text-white'
                 }`}
               >
                 <Icon className="w-4 h-4 shrink-0" />
@@ -580,11 +871,23 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
         </nav>
 
         <div className="p-3 border-t border-[#2A2F3D] space-y-2">
-          <div className="px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] flex items-center justify-between gap-2 text-[11px]">
-            <span className="text-slate-300 truncate">{adminUser.email}</span>
-            <span className="px-2 py-0.5 rounded bg-[#00A878]/20 text-[#00A878] font-bold uppercase text-[9px] shrink-0">
-              {adminUser.role}
-            </span>
+          <div className="px-2.5 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-1 text-[11px]">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-slate-300 truncate">{adminUser.email}</span>
+              <span
+                className={`px-2 py-0.5 rounded font-bold uppercase text-[9px] shrink-0 ${
+                  isSuperAdmin ? 'bg-[#FF444F]/20 text-[#FF444F]' : 'bg-[#00A878]/20 text-[#00A878]'
+                }`}
+              >
+                {isSuperAdmin ? 'Super Admin' : adminUser.admin_role_name || adminUser.role}
+              </span>
+            </div>
+            {currentDevice?.device_uid && (
+              <div className="flex items-center gap-1 text-[10px] font-mono-num text-[#00A878]">
+                <Laptop className="w-3 h-3 shrink-0" />
+                <span className="truncate">{currentDevice.device_uid}</span>
+              </div>
+            )}
           </div>
           <button
             type="button"
@@ -633,7 +936,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 type="button"
                 onClick={() => setTab(item.id)}
                 className={`px-3 py-1.5 rounded-xl text-[11px] font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
-                  tab === item.id ? 'bg-[#FF444F] text-white' : 'bg-white/5 text-slate-300'
+                  activeTab === item.id ? 'bg-[#FF444F] text-white' : 'bg-white/5 text-slate-300'
                 }`}
               >
                 <Icon className="w-3.5 h-3.5 shrink-0" />
@@ -657,11 +960,29 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
         <main className="p-5 sm:p-6 space-y-6">
           {/* 1. Overview */}
-          {tab === 'overview' && (
+          {activeTab === 'overview' && (
             <div className="space-y-6">
+              {!isSuperAdmin && (
+                <div className="p-4 rounded-2xl bg-[#181C25] border border-[#00A878]/30 flex flex-wrap items-center justify-between gap-3 text-xs">
+                  <div>
+                    <p className="font-bold text-white flex items-center gap-2">
+                      <ShieldCheck className="w-4 h-4 text-[#00A878]" />
+                      Device-Bound Delegated Scope Active ({adminUser.admin_role_name || 'Delegated Admin'})
+                    </p>
+                    <p className="text-slate-400 mt-0.5">
+                      Statistics and client records below reflect strictly your authorized client scope
+                      {currentDevice?.device_uid ? ` · Active Verified Device: ${currentDevice.device_uid}` : ''}.
+                    </p>
+                  </div>
+                  <span className="px-2.5 py-1 rounded-full bg-[#00A878]/15 text-[#00A878] font-mono-num text-[11px] font-bold">
+                    {assignedDeviceIds.length} Assigned Device{assignedDeviceIds.length === 1 ? '' : 's'}
+                  </span>
+                </div>
+              )}
+
               <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                 {[
-                  { label: 'Total Traders', val: kpis.totalUsers ?? 0 },
+                  { label: isSuperAdmin ? 'Total Traders' : 'Scoped Traders', val: kpis.totalUsers ?? 0 },
                   { label: 'Real / Demo Accounts', val: `${kpis.realAccounts ?? 0} / ${kpis.demoAccounts ?? 0}` },
                   { label: 'Gross Order Volume', val: `$${Number(kpis.grossVolume || 0).toFixed(2)}` },
                   { label: 'Total Deposits / Withdrawals', val: `$${Number(kpis.totalDeposits || 0).toFixed(0)} / $${Number(kpis.totalWithdrawals || 0).toFixed(0)}` },
@@ -691,8 +1012,1045 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             </div>
           )}
 
+          {/* 1b. Super Admin: Administrator Management & Dynamic RBAC Matrix */}
+          {activeTab === 'admins' && isSuperAdmin && (
+            <div className="space-y-6">
+              {/* Create Delegated Administrator */}
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  await runWithReauth(async () => {
+                    await adminFetch('/api/admin/admins', {
+                      method: 'POST',
+                      body: JSON.stringify({
+                        full_name: createAdminName || 'Delegated Operator',
+                        username: createAdminUsername || undefined,
+                        email: createAdminEmail,
+                        password: createAdminPassword,
+                        admin_role_id: createAdminRoleId ? Number(createAdminRoleId) : undefined,
+                        deviceIds: createAdminDeviceIds,
+                        notes: createAdminNotes,
+                      }),
+                    });
+                    setCreateAdminEmail('');
+                    setCreateAdminName('');
+                    setCreateAdminUsername('');
+                    setCreateAdminPassword('');
+                    setCreateAdminDeviceIds([]);
+                    setCreateAdminNotes('');
+                    await loadAllAdminData();
+                    flash('Delegated administrator created with assigned RBAC role & devices');
+                  });
+                }}
+                className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-4 text-xs"
+              >
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <h2 className="font-display text-sm font-bold flex items-center gap-2">
+                      <UserPlus className="w-4 h-4 text-[#FF444F]" /> Create Delegated Administrator
+                    </h2>
+                    <p className="text-slate-400 mt-0.5">
+                      Assign an RBAC role and explicit verified devices. Delegated administrators can only access their assigned device &amp; client scope.
+                    </p>
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
+                  <input
+                    type="text"
+                    required
+                    placeholder="Full Name"
+                    value={createAdminName}
+                    onChange={(e) => setCreateAdminName(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <input
+                    type="text"
+                    placeholder="Username"
+                    value={createAdminUsername}
+                    onChange={(e) => setCreateAdminUsername(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <input
+                    type="email"
+                    required
+                    placeholder="Admin Email"
+                    value={createAdminEmail}
+                    onChange={(e) => setCreateAdminEmail(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <input
+                    type="password"
+                    required
+                    minLength={8}
+                    placeholder="Password (min 8 chars)"
+                    value={createAdminPassword}
+                    onChange={(e) => setCreateAdminPassword(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <select
+                    value={createAdminRoleId}
+                    onChange={(e) => setCreateAdminRoleId(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    {rolesList
+                      .filter((r: any) => r.slug !== 'super_admin')
+                      .map((r: any) => (
+                        <option key={r.id} value={r.id}>
+                          {r.name}
+                        </option>
+                      ))}
+                  </select>
+                </div>
+
+                {devicesList.length > 0 && (
+                  <div className="space-y-1.5">
+                    <p className="text-[11px] font-semibold text-slate-400">Assign Authorized Devices (optional):</p>
+                    <div className="flex flex-wrap gap-2">
+                      {devicesList.map((d: any) => {
+                        const checked = createAdminDeviceIds.includes(d.id);
+                        return (
+                          <label
+                            key={d.id}
+                            className={`px-3 py-1.5 rounded-xl border cursor-pointer flex items-center gap-2 ${
+                              checked ? 'bg-[#00A878]/15 border-[#00A878]/40 text-white' : 'bg-[#111319] border-[#2A2F3D] text-slate-300'
+                            }`}
+                          >
+                            <input
+                              type="checkbox"
+                              checked={checked}
+                              onChange={(e) =>
+                                setCreateAdminDeviceIds((prev) =>
+                                  e.target.checked ? [...prev, d.id] : prev.filter((x) => x !== d.id)
+                                )
+                              }
+                              className="accent-[#00A878]"
+                            />
+                            <span className="font-mono-num">{d.device_uid}</span>
+                            <span className="text-slate-400">({d.device_name})</span>
+                          </label>
+                        );
+                      })}
+                    </div>
+                  </div>
+                )}
+
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <input
+                    type="text"
+                    placeholder="Operational notes (optional)"
+                    value={createAdminNotes}
+                    onChange={(e) => setCreateAdminNotes(e.target.value)}
+                    className="flex-1 min-w-[220px] px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <button type="submit" className="px-5 py-2.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer">
+                    Create Delegated Admin
+                  </button>
+                </div>
+              </form>
+
+              {/* Administrator Directory */}
+              <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between text-xs">
+                  <h3 className="font-display font-bold">Administrators ({adminsList.length})</h3>
+                  <span className="text-slate-400">Super Admin + Delegated Operators</span>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-[#2A2F3D] text-slate-400">
+                      <th className="text-left px-4 py-3">Administrator</th>
+                      <th className="text-left px-4 py-3">RBAC Role</th>
+                      <th className="text-left px-4 py-3">Status</th>
+                      <th className="text-left px-4 py-3">Assigned Devices</th>
+                      <th className="text-right px-4 py-3">Clients / Sessions</th>
+                      <th className="text-right px-4 py-3">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#2A2F3D]">
+                    {adminsList.map((adm: any) => (
+                      <tr key={adm.id}>
+                        <td className="px-4 py-3">
+                          <p className="font-bold text-white">
+                            {adm.full_name} <span className="text-slate-400 font-normal">@{adm.username}</span>
+                          </p>
+                          <p className="text-slate-400">{adm.email}</p>
+                          <p className="text-[10px] font-mono-num text-slate-500">
+                            Last login: {formatLoginTime(adm.last_login_at)}
+                          </p>
+                        </td>
+                        <td className="px-4 py-3">
+                          {adm.role === 'owner' ? (
+                            <span className="px-2.5 py-1 rounded-full bg-[#FF444F]/20 text-[#FF444F] text-[10px] font-bold uppercase">
+                              Super Admin (System Owner)
+                            </span>
+                          ) : (
+                            <select
+                              value={adm.admin_role_id || ''}
+                              onChange={async (e) => {
+                                try {
+                                  await adminFetch(`/api/admin/admins/${adm.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ admin_role_id: Number(e.target.value) }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Updated RBAC role for ${adm.email}`);
+                                } catch (err) {
+                                  flash(err instanceof Error ? err.message : 'Role update failed', 'err');
+                                }
+                              }}
+                              className="px-2.5 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] text-xs"
+                            >
+                              {rolesList
+                                .filter((r: any) => r.slug !== 'super_admin')
+                                .map((r: any) => (
+                                  <option key={r.id} value={r.id}>
+                                    {r.name}
+                                  </option>
+                                ))}
+                            </select>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                              adm.status === 'active'
+                                ? 'bg-[#00A878]/20 text-[#00A878]'
+                                : adm.status === 'suspended'
+                                  ? 'bg-amber-500/20 text-amber-300'
+                                  : 'bg-[#FF444F]/20 text-[#FF444F]'
+                            }`}
+                          >
+                            {adm.status}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3">
+                          {(adm.assignedDevices || []).length === 0 ? (
+                            <span className="text-slate-500">{adm.role === 'owner' ? 'All / Unrestricted' : 'None assigned'}</span>
+                          ) : (
+                            <div className="flex flex-wrap gap-1">
+                              {adm.assignedDevices.map((d: any) => (
+                                <span
+                                  key={d.device_id}
+                                  className="px-1.5 py-0.5 rounded bg-white/5 border border-[#2A2F3D] font-mono-num text-[10px]"
+                                >
+                                  {d.device_uid}
+                                </span>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-right font-mono-num">
+                          <span className="text-white font-bold">{adm.managedClientCount ?? 0}</span> clients ·{' '}
+                          <span className="text-[#00A878] font-bold">{adm.activeSessionCount ?? 0}</span> active
+                        </td>
+                        <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              try {
+                                const act = await adminFetch(`/api/admin/admins/${adm.id}/activity`);
+                                setAdminActivityModal(act);
+                              } catch (err) {
+                                flash(err instanceof Error ? err.message : 'Failed to load activity', 'err');
+                              }
+                            }}
+                            className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <History className="w-3 h-3" /> Activity
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setEditingAdmin({ ...adm, password: '' })}
+                            className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-white font-semibold cursor-pointer"
+                          >
+                            Edit
+                          </button>
+                          {adm.role !== 'owner' && (
+                            <>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const nextStatus = adm.status === 'active' ? 'suspended' : 'active';
+                                  await adminFetch(`/api/admin/admins/${adm.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ status: nextStatus }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Administrator ${adm.email} set to ${nextStatus}`);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
+                              >
+                                {adm.status === 'suspended' ? 'Reactivate' : 'Suspend'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  const nextStatus = adm.status === 'deactivated' ? 'active' : 'deactivated';
+                                  await adminFetch(`/api/admin/admins/${adm.id}`, {
+                                    method: 'PATCH',
+                                    body: JSON.stringify({ status: nextStatus }),
+                                  });
+                                  await loadAllAdminData();
+                                  flash(`Administrator ${adm.email} ${nextStatus}`);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-300 cursor-pointer"
+                              >
+                                {adm.status === 'deactivated' ? 'Activate' : 'Deactivate'}
+                              </button>
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  await adminFetch(`/api/admin/admins/${adm.id}/revoke-sessions`, { method: 'POST' });
+                                  await loadAllAdminData();
+                                  flash(`Revoked all active sessions for ${adm.email}`);
+                                }}
+                                className="px-2 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold cursor-pointer"
+                              >
+                                Revoke Sessions
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  runWithReauth(async () => {
+                                    await adminFetch(`/api/admin/admins/${adm.id}`, { method: 'DELETE' });
+                                    await loadAllAdminData();
+                                    flash(`Deleted delegated administrator ${adm.email} (clients preserved as pending_verification)`);
+                                  })
+                                }
+                                className="p-1 text-[#FF444F] cursor-pointer"
+                              >
+                                <Trash2 className="w-3.5 h-3.5 inline" />
+                              </button>
+                            </>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Dynamic RBAC Role & Permission Manager */}
+              <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-5 space-y-5 text-xs">
+                <div>
+                  <h3 className="font-display text-sm font-bold">Dynamic RBAC Roles &amp; Permission Matrix</h3>
+                  <p className="text-slate-400 mt-0.5">
+                    Create custom roles and adjust granular permissions. Updates invalidate security caches immediately.
+                  </p>
+                </div>
+
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    try {
+                      await adminFetch('/api/admin/roles', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          name: newRoleName,
+                          description: newRoleDesc,
+                          permissions: newRolePerms,
+                        }),
+                      });
+                      setNewRoleName('');
+                      setNewRoleDesc('');
+                      await loadAllAdminData();
+                      flash('Custom RBAC role created');
+                    } catch (err) {
+                      flash(err instanceof Error ? err.message : 'Failed to create role', 'err');
+                    }
+                  }}
+                  className="p-4 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-3"
+                >
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+                    <input
+                      type="text"
+                      required
+                      placeholder="Custom Role Name (e.g. Support Desk L2)"
+                      value={newRoleName}
+                      onChange={(e) => setNewRoleName(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-[#181C25] border border-[#2A2F3D]"
+                    />
+                    <input
+                      type="text"
+                      placeholder="Role Description"
+                      value={newRoleDesc}
+                      onChange={(e) => setNewRoleDesc(e.target.value)}
+                      className="px-3 py-2 rounded-xl bg-[#181C25] border border-[#2A2F3D]"
+                    />
+                    <button type="submit" className="px-4 py-2 rounded-full bg-[#00A878] text-white font-bold cursor-pointer">
+                      Create Custom Role
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap gap-2 pt-1">
+                    {permissionsCatalog.map((p: any) => {
+                      const active = newRolePerms.includes(p.key);
+                      return (
+                        <label
+                          key={p.key}
+                          className={`px-2.5 py-1 rounded-lg border cursor-pointer flex items-center gap-1.5 text-[11px] ${
+                            active ? 'bg-[#FF444F]/15 border-[#FF444F]/40 text-white' : 'bg-[#181C25] border-[#2A2F3D] text-slate-400'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            checked={active}
+                            onChange={(e) =>
+                              setNewRolePerms((prev) =>
+                                e.target.checked ? [...prev, p.key] : prev.filter((k) => k !== p.key)
+                              )
+                            }
+                            className="accent-[#FF444F]"
+                          />
+                          <span className="font-mono-num">{p.key}</span>
+                        </label>
+                      );
+                    })}
+                  </div>
+                </form>
+
+                <div className="space-y-3">
+                  {rolesList.map((role: any) => {
+                    const isSysOwner = role.slug === 'super_admin';
+                    const draft = rolePermDrafts[role.id] || role.permissions || [];
+                    return (
+                      <div key={role.id} className="p-4 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-3">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
+                          <div>
+                            <div className="flex items-center gap-2">
+                              <span className="font-bold text-sm text-white">{role.name}</span>
+                              <span className="px-2 py-0.5 rounded bg-white/5 font-mono-num text-[10px] text-slate-400">
+                                {role.slug}
+                              </span>
+                              {role.is_system && (
+                                <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 text-[10px] font-bold">
+                                  SYSTEM
+                                </span>
+                              )}
+                              <span className="text-[11px] text-slate-400 font-mono-num">
+                                · {role.adminCount ?? 0} admin{role.adminCount === 1 ? '' : 's'}
+                              </span>
+                            </div>
+                            {role.description && <p className="text-slate-400 mt-0.5">{role.description}</p>}
+                          </div>
+                          {!isSysOwner && (
+                            <div className="flex items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={async () => {
+                                  try {
+                                    await adminFetch(`/api/admin/roles/${role.id}`, {
+                                      method: 'PUT',
+                                      body: JSON.stringify({ permissions: draft }),
+                                    });
+                                    await loadAllAdminData();
+                                    flash(`Updated permissions for ${role.name} immediately`);
+                                  } catch (err) {
+                                    flash(err instanceof Error ? err.message : 'Save failed', 'err');
+                                  }
+                                }}
+                                className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-bold cursor-pointer"
+                              >
+                                Save Permissions
+                              </button>
+                              {!role.is_system && (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await adminFetch(`/api/admin/roles/${role.id}`, { method: 'DELETE' });
+                                      await loadAllAdminData();
+                                      flash(`Deleted custom role ${role.name}`);
+                                    } catch (err) {
+                                      flash(err instanceof Error ? err.message : 'Cannot delete role', 'err');
+                                    }
+                                  }}
+                                  className="p-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex flex-wrap gap-1.5">
+                          {permissionsCatalog.map((p: any) => {
+                            const has = isSysOwner || draft.includes(p.key);
+                            return (
+                              <label
+                                key={p.key}
+                                title={p.description}
+                                className={`px-2 py-1 rounded-lg border text-[11px] flex items-center gap-1.5 ${
+                                  isSysOwner ? 'opacity-80 cursor-default' : 'cursor-pointer'
+                                } ${
+                                  has
+                                    ? 'bg-[#00A878]/15 border-[#00A878]/35 text-slate-100'
+                                    : 'bg-[#181C25] border-[#2A2F3D] text-slate-500'
+                                }`}
+                              >
+                                <input
+                                  type="checkbox"
+                                  disabled={isSysOwner}
+                                  checked={has}
+                                  onChange={(e) => {
+                                    setRolePermDrafts((prev) => {
+                                      const cur = prev[role.id] || [];
+                                      const next = e.target.checked
+                                        ? Array.from(new Set([...cur, p.key]))
+                                        : cur.filter((k) => k !== p.key);
+                                      return { ...prev, [role.id]: next };
+                                    });
+                                  }}
+                                  className="accent-[#00A878]"
+                                />
+                                <span className="font-mono-num">{p.key}</span>
+                              </label>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {/* 1c. Registered Devices, Cryptographic Tokens, Sessions & Client Ownership */}
+          {activeTab === 'devices' && (
+            <div className="space-y-6 text-xs">
+              {/* Current Browser Verification Banner */}
+              <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] flex flex-wrap items-center justify-between gap-3">
+                <div className="flex items-center gap-3">
+                  <Laptop className={`w-5 h-5 ${browserDeviceStatus.verified ? 'text-[#00A878]' : 'text-amber-400'}`} />
+                  <div>
+                    <p className="font-bold text-white">
+                      {browserDeviceStatus.verified && browserDeviceStatus.device
+                        ? `Current Browser Verified: ${browserDeviceStatus.device.device_uid} (${browserDeviceStatus.device.device_name})`
+                        : 'Current Browser Has No Active Cryptographic Device Credential'}
+                    </p>
+                    <p className="text-slate-400">
+                      Device credentials are HMAC-signed HttpOnly cookies validated against hashed credentials in PostgreSQL.
+                    </p>
+                  </div>
+                </div>
+                <button
+                  type="button"
+                  onClick={refreshBrowserDeviceStatus}
+                  className="px-3 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 font-semibold cursor-pointer"
+                >
+                  Re-check Browser Credential
+                </button>
+              </div>
+
+              {issuedTokenBanner && (
+                <div className="p-4 rounded-2xl bg-[#00A878]/15 border border-[#00A878]/40 space-y-2">
+                  <div className="flex items-center justify-between">
+                    <p className="font-bold text-[#00A878] flex items-center gap-2">
+                      <KeyRound className="w-4 h-4" />
+                      {issuedTokenBanner.isReplacement
+                        ? `Re-Enrollment Token Issued for ${issuedTokenBanner.deviceUid}`
+                        : `New Device Registered (${issuedTokenBanner.deviceUid}) — One-Time Enrollment Token`}
+                    </p>
+                    <button
+                      type="button"
+                      onClick={() => setIssuedTokenBanner(null)}
+                      className="text-slate-300 hover:text-white cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-2">
+                    <code className="flex-1 px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-white select-all">
+                      {issuedTokenBanner.token}
+                    </code>
+                    <button
+                      type="button"
+                      onClick={() => {
+                        navigator.clipboard?.writeText(issuedTokenBanner.token);
+                        flash('Enrollment token copied to clipboard');
+                      }}
+                      className="px-3.5 py-2 rounded-xl bg-[#00A878] text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <Copy className="w-3.5 h-3.5" /> Copy Token
+                    </button>
+                  </div>
+                  <p className="text-[11px] text-slate-300">
+                    Copy this token now (it is only hashed on the server and cannot be viewed again). Use “Enroll Device” on the target browser/device
+                    {issuedTokenBanner.isReplacement
+                      ? ' along with administrator email & password verification.'
+                      : ' to activate its cryptographic credential.'}
+                  </p>
+                </div>
+              )}
+
+              {/* Super Admin Register New Device */}
+              {isSuperAdmin && (
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    try {
+                      const res = await adminFetch<{ device: any; enrollmentToken: string }>('/api/admin/devices', {
+                        method: 'POST',
+                        body: JSON.stringify({
+                          device_name: newDeviceName,
+                          device_type: newDeviceType,
+                          platform: newDevicePlatform,
+                          assignAdminId: newDeviceAdminId ? Number(newDeviceAdminId) : undefined,
+                        }),
+                      });
+                      setNewDeviceName('');
+                      setIssuedTokenBanner({
+                        deviceUid: res.device.device_uid,
+                        token: res.enrollmentToken,
+                        isReplacement: false,
+                      });
+                      await loadAllAdminData();
+                      flash(`Device ${res.device.device_uid} registered`);
+                    } catch (err) {
+                      flash(err instanceof Error ? err.message : 'Failed to register device', 'err');
+                    }
+                  }}
+                  className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-5 gap-3"
+                >
+                  <input
+                    type="text"
+                    required
+                    placeholder="Device Name (e.g. Desk-01 Chrome)"
+                    value={newDeviceName}
+                    onChange={(e) => setNewDeviceName(e.target.value)}
+                    className="sm:col-span-2 px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                  <select
+                    value={newDeviceType}
+                    onChange={(e) => setNewDeviceType(e.target.value as any)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="browser">Browser</option>
+                    <option value="desktop">Desktop</option>
+                    <option value="mobile">Mobile App</option>
+                    <option value="terminal">Terminal</option>
+                  </select>
+                  <select
+                    value={newDeviceAdminId}
+                    onChange={(e) => setNewDeviceAdminId(e.target.value)}
+                    className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  >
+                    <option value="">Assign Later</option>
+                    {adminsList.map((a: any) => (
+                      <option key={a.id} value={a.id}>
+                        {a.full_name} ({a.email})
+                      </option>
+                    ))}
+                  </select>
+                  <button type="submit" className="px-4 py-2 rounded-full bg-[#FF444F] text-white font-bold cursor-pointer">
+                    + Register Device
+                  </button>
+                </form>
+              )}
+
+              {/* Registered Devices List */}
+              <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                <div className="px-4 py-3 border-b border-[#2A2F3D] flex items-center justify-between">
+                  <h3 className="font-display font-bold">Registered Devices ({devicesList.length})</h3>
+                  <span className="text-slate-400">Cryptographic Device Registry</span>
+                </div>
+                <table className="w-full text-xs">
+                  <thead>
+                    <tr className="border-b border-[#2A2F3D] text-slate-400">
+                      <th className="text-left px-4 py-3">Device UID / Name</th>
+                      <th className="text-left px-4 py-3">Verification</th>
+                      <th className="text-left px-4 py-3">Assigned Admins</th>
+                      <th className="text-right px-4 py-3">Clients / Seen</th>
+                      <th className="text-right px-4 py-3">Controls</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-[#2A2F3D]">
+                    {devicesList.length === 0 ? (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-6 text-center text-slate-400">
+                          No registered devices found.
+                        </td>
+                      </tr>
+                    ) : (
+                      devicesList.map((d: any) => (
+                        <tr key={d.id}>
+                          <td className="px-4 py-3">
+                            <p className="font-mono-num font-bold text-white">{d.device_uid}</p>
+                            <p className="text-slate-300">{d.device_name}</p>
+                            <p className="text-[10px] text-slate-500 uppercase">
+                              {d.device_type} · {d.platform}
+                            </p>
+                          </td>
+                          <td className="px-4 py-3">
+                            <div className="flex flex-col gap-1 items-start">
+                              <span
+                                className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                  d.verification_status === 'verified' && d.is_active
+                                    ? 'bg-[#00A878]/20 text-[#00A878]'
+                                    : d.verification_status === 'revoked' || !d.is_active
+                                      ? 'bg-[#FF444F]/20 text-[#FF444F]'
+                                      : 'bg-amber-500/20 text-amber-300'
+                                }`}
+                              >
+                                {!d.is_active && d.verification_status !== 'revoked' ? 'inactive' : d.verification_status}
+                              </span>
+                              <span className="text-[10px] font-mono-num text-slate-400">
+                                IP: {d.last_ip || '—'}
+                              </span>
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 min-w-[230px]">
+                            <div className="space-y-1.5">
+                              <div className="flex flex-wrap gap-1">
+                                {(d.assignedAdmins || []).length === 0 ? (
+                                  <span className="text-slate-500">Unassigned</span>
+                                ) : (
+                                  d.assignedAdmins.map((ad: any) => (
+                                    <span
+                                      key={ad.admin_user_id}
+                                      className="px-2 py-0.5 rounded bg-white/5 border border-[#2A2F3D] text-[10px]"
+                                    >
+                                      {ad.email}
+                                    </span>
+                                  ))
+                                )}
+                              </div>
+                              {isSuperAdmin && (
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  <select
+                                    value={deviceAssignTarget[d.id] || ''}
+                                    onChange={(e) =>
+                                      setDeviceAssignTarget((prev) => ({ ...prev, [d.id]: e.target.value }))
+                                    }
+                                    className="px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] text-[11px]"
+                                  >
+                                    <option value="">Select Admin...</option>
+                                    {adminsList.map((a: any) => (
+                                      <option key={a.id} value={a.id}>
+                                        {a.email}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const targetId = Number(deviceAssignTarget[d.id]);
+                                      if (!targetId) return;
+                                      await adminFetch(`/api/admin/devices/${d.id}/assign`, {
+                                        method: 'POST',
+                                        body: JSON.stringify({ adminUserId: targetId }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Assigned ${d.device_uid}`);
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-[#00A878]/15 text-[#00A878] font-semibold cursor-pointer"
+                                  >
+                                    Add Assign
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const targetId = Number(deviceAssignTarget[d.id]);
+                                      if (!targetId) return;
+                                      await adminFetch(`/api/admin/devices/${d.id}/reassign`, {
+                                        method: 'POST',
+                                        body: JSON.stringify({
+                                          newAdminId: targetId,
+                                          transferClients: deviceReassignTransfer[d.id] !== false,
+                                        }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Reassigned ${d.device_uid}`);
+                                    }}
+                                    className="px-2 py-1 rounded-lg bg-amber-500/15 text-amber-300 font-semibold cursor-pointer"
+                                  >
+                                    Reassign
+                                  </button>
+                                  <label className="flex items-center gap-1 text-[10px] text-slate-400 cursor-pointer">
+                                    <input
+                                      type="checkbox"
+                                      checked={deviceReassignTransfer[d.id] !== false}
+                                      onChange={(e) =>
+                                        setDeviceReassignTransfer((prev) => ({ ...prev, [d.id]: e.target.checked }))
+                                      }
+                                      className="accent-[#00A878]"
+                                    />
+                                    Transfer Clients
+                                  </label>
+                                </div>
+                              )}
+                            </div>
+                          </td>
+                          <td className="px-4 py-3 text-right font-mono-num">
+                            <p className="font-bold text-white">{d.connectedClientCount ?? 0} clients</p>
+                            <p className="text-[10px] text-slate-400">{formatLoginTime(d.last_seen_at)}</p>
+                          </td>
+                          <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                try {
+                                  const hist = await adminFetch<{ logs: any[] }>(`/api/admin/devices/${d.id}/history`);
+                                  setDeviceHistoryModal({ device: d, logs: hist.logs || [] });
+                                } catch (err) {
+                                  flash(err instanceof Error ? err.message : 'Failed to load history', 'err');
+                                }
+                              }}
+                              className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                            >
+                              <History className="w-3 h-3" /> History
+                            </button>
+                            {isSuperAdmin && (
+                              <>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    const tok = await adminFetch<{ enrollmentToken: string; isReplacement: boolean }>(
+                                      `/api/admin/devices/${d.id}/enrollment-token`,
+                                      { method: 'POST' }
+                                    );
+                                    setIssuedTokenBanner({
+                                      deviceUid: d.device_uid,
+                                      token: tok.enrollmentToken,
+                                      isReplacement: tok.isReplacement,
+                                    });
+                                    await loadAllAdminData();
+                                    flash(`Issued enrollment token for ${d.device_uid}`);
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold cursor-pointer"
+                                >
+                                  Token
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await adminFetch(`/api/admin/devices/${d.id}/status`, {
+                                      method: 'PATCH',
+                                      body: JSON.stringify({ is_active: !d.is_active }),
+                                    });
+                                    await loadAllAdminData();
+                                    flash(`${d.device_uid} ${!d.is_active ? 'activated' : 'deactivated'}`);
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 text-slate-200 cursor-pointer"
+                                >
+                                  {d.is_active ? 'Deactivate' : 'Activate'}
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    await adminFetch(`/api/admin/devices/${d.id}/revoke`, {
+                                      method: 'POST',
+                                      body: JSON.stringify({ reason: 'Super Admin device revocation' }),
+                                    });
+                                    await loadAllAdminData();
+                                    flash(`Device ${d.device_uid} revoked & sessions terminated`);
+                                  }}
+                                  className="px-2 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                >
+                                  <Ban className="w-3 h-3" /> Revoke
+                                </button>
+                              </>
+                            )}
+                          </td>
+                        </tr>
+                      ))
+                    )}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Super Admin Client Ownership Management */}
+              {isSuperAdmin && (
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-3">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div>
+                      <h3 className="font-display text-sm font-bold flex items-center gap-2">
+                        <UserCheck className="w-4 h-4 text-[#00A878]" /> Client Ownership &amp; Verification Registry ({ownershipClients.length})
+                      </h3>
+                      <p className="text-slate-400">
+                        Legacy or unmapped clients remain in <span className="font-mono-num text-amber-300">pending_verification</span> until explicitly assigned to an administrator/device.
+                      </p>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <input
+                        type="text"
+                        placeholder="Search client email/name..."
+                        value={ownershipSearch}
+                        onChange={(e) => setOwnershipSearch(e.target.value)}
+                        className="px-3 py-1.5 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                      />
+                      <select
+                        value={ownershipFilter}
+                        onChange={(e) => setOwnershipFilter(e.target.value as any)}
+                        className="px-3 py-1.5 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                      >
+                        <option value="all">All Clients</option>
+                        <option value="verified">Verified Only</option>
+                        <option value="pending_verification">Pending Verification</option>
+                      </select>
+                    </div>
+                  </div>
+
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[#2A2F3D] text-slate-400">
+                          <th className="text-left px-3 py-2.5">Client Trader</th>
+                          <th className="text-left px-3 py-2.5">Ownership Status</th>
+                          <th className="text-left px-3 py-2.5">Originating Device</th>
+                          <th className="text-left px-3 py-2.5">Assigned Admin</th>
+                          <th className="text-right px-3 py-2.5">Reassign Ownership</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#2A2F3D]">
+                        {ownershipClients
+                          .filter((c: any) => {
+                            if (ownershipFilter !== 'all' && c.ownership_verification_status !== ownershipFilter) return false;
+                            const q = ownershipSearch.trim().toLowerCase();
+                            if (!q) return true;
+                            return (
+                              String(c.email || '').toLowerCase().includes(q) ||
+                              String(c.full_name || '').toLowerCase().includes(q) ||
+                              String(c.deriv_client_id || '').toLowerCase().includes(q)
+                            );
+                          })
+                          .map((c: any) => (
+                            <tr key={c.id}>
+                              <td className="px-3 py-2.5">
+                                <p className="font-bold text-white">{c.full_name}</p>
+                                <p className="text-slate-400">{c.email}</p>
+                              </td>
+                              <td className="px-3 py-2.5">
+                                <span
+                                  className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                                    c.ownership_verification_status === 'verified'
+                                      ? 'bg-[#00A878]/20 text-[#00A878]'
+                                      : 'bg-amber-500/20 text-amber-300'
+                                  }`}
+                                >
+                                  {c.ownership_verification_status}
+                                </span>
+                              </td>
+                              <td className="px-3 py-2.5 font-mono-num">
+                                {c.originating_device_uid ? `${c.originating_device_uid} (${c.originating_device_name || ''})` : 'None'}
+                              </td>
+                              <td className="px-3 py-2.5">{c.assigned_admin_email || 'Unassigned'}</td>
+                              <td className="px-3 py-2.5 text-right">
+                                <div className="inline-flex flex-wrap items-center justify-end gap-1.5">
+                                  <select
+                                    value={clientReassignAdmin[c.id] ?? (c.assigned_admin_id ? String(c.assigned_admin_id) : '')}
+                                    onChange={(e) =>
+                                      setClientReassignAdmin((prev) => ({ ...prev, [c.id]: e.target.value }))
+                                    }
+                                    className="px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D]"
+                                  >
+                                    <option value="">Unassigned (Pending)</option>
+                                    {adminsList.map((a: any) => (
+                                      <option key={a.id} value={a.id}>
+                                        {a.email}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <select
+                                    value={clientReassignDevice[c.id] ?? (c.originating_device_id ? String(c.originating_device_id) : '')}
+                                    onChange={(e) =>
+                                      setClientReassignDevice((prev) => ({ ...prev, [c.id]: e.target.value }))
+                                    }
+                                    className="px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D]"
+                                  >
+                                    <option value="">Keep Device</option>
+                                    {devicesList.map((d: any) => (
+                                      <option key={d.id} value={d.id}>
+                                        {d.device_uid}
+                                      </option>
+                                    ))}
+                                  </select>
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      const admId = clientReassignAdmin[c.id] ?? (c.assigned_admin_id ? String(c.assigned_admin_id) : '');
+                                      const devId = clientReassignDevice[c.id] ?? (c.originating_device_id ? String(c.originating_device_id) : '');
+                                      await adminFetch(`/api/admin/ownership/clients/${c.id}/assign`, {
+                                        method: 'POST',
+                                        body: JSON.stringify({
+                                          adminUserId: admId ? Number(admId) : null,
+                                          deviceId: devId ? Number(devId) : null,
+                                        }),
+                                      });
+                                      await loadAllAdminData();
+                                      flash(`Updated ownership for ${c.email}`);
+                                    }}
+                                    className="px-2.5 py-1 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer"
+                                  >
+                                    Save
+                                  </button>
+                                </div>
+                              </td>
+                            </tr>
+                          ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Super Admin Active Login Sessions Monitor */}
+              {isSuperAdmin && (
+                <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="font-display text-sm font-bold flex items-center gap-2">
+                      <Clock className="w-4 h-4 text-[#FF444F]" /> Administrator Login Sessions ({sessionsList.length})
+                    </h3>
+                  </div>
+                  <div className="max-h-72 overflow-y-auto divide-y divide-[#2A2F3D]">
+                    {sessionsList.map((s: any) => (
+                      <div key={s.session_jti} className="py-2.5 flex flex-wrap items-center justify-between gap-2">
+                        <div>
+                          <p className="font-bold text-white">
+                            {s.admin_email} <span className="text-[10px] uppercase text-slate-400">({s.admin_role})</span>
+                          </p>
+                          <p className="text-[11px] font-mono-num text-slate-400">
+                            Device: {s.device_uid || 'Super Admin Bypass'} · IP: {s.ip_address || '—'} ·{' '}
+                            {formatLoginTime(s.created_at)}
+                          </p>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <span
+                            className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase ${
+                              s.status === 'active' && !s.revoked_at
+                                ? 'bg-[#00A878]/20 text-[#00A878]'
+                                : 'bg-[#FF444F]/20 text-[#FF444F]'
+                            }`}
+                          >
+                            {s.revoked_at ? `revoked (${s.revoke_reason || ''})` : s.status}
+                          </span>
+                          {s.status === 'active' && !s.revoked_at && (
+                            <button
+                              type="button"
+                              onClick={async () => {
+                                await adminFetch(`/api/admin/sessions/${encodeURIComponent(s.session_jti)}/revoke`, {
+                                  method: 'POST',
+                                });
+                                await loadAllAdminData();
+                                flash('Session revoked');
+                              }}
+                              className="px-2.5 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold cursor-pointer"
+                            >
+                              Revoke
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
+
           {/* 2. Commissions & App Markup */}
-          {tab === 'commissions' && commData && (
+          {activeTab === 'commissions' && isSuperAdmin && commData && (
             <div className="space-y-6">
               <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
                 <div className="p-5 rounded-2xl bg-[#181C25] border border-[#2A2F3D]">
@@ -985,9 +2343,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 3. Users CRUD */}
-          {tab === 'users' &&
+          {activeTab === 'users' && hasPerm('users.view') &&
             (() => {
-              const q = userSearch.trim().toLowerCase();
+              const q = hasPerm('users.search') ? userSearch.trim().toLowerCase() : '';
               const filteredUsers = [...(overview?.users || [])]
                 .filter((u: any) => {
                   if (userStatusFilter === 'active' && u.status !== 'active') return false;
@@ -1050,68 +2408,72 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
 
               return (
                 <div className="space-y-4">
-                  <form
-                    onSubmit={async (e) => {
-                      e.preventDefault();
-                      try {
-                        await adminFetch('/api/admin/users', {
-                          method: 'POST',
-                          body: JSON.stringify({
-                            email: newUserEmail,
-                            full_name: newUserName,
-                            virtual_workspace_balance: Number(newUserBal),
-                          }),
-                        });
-                        setNewUserEmail('');
-                        setNewUserName('');
-                        await loadAllAdminData();
-                        flash('Trader user created');
-                      } catch (err) {
-                        flash(err instanceof Error ? err.message : 'Failed', 'err');
-                      }
-                    }}
-                    className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-4 gap-3"
-                  >
-                    <input
-                      type="email"
-                      required
-                      placeholder="Email"
-                      value={newUserEmail}
-                      onChange={(e) => setNewUserEmail(e.target.value)}
-                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                    />
-                    <input
-                      type="text"
-                      required
-                      placeholder="Full Name"
-                      value={newUserName}
-                      onChange={(e) => setNewUserName(e.target.value)}
-                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
-                    />
-                    <input
-                      type="number"
-                      placeholder="Virtual Balance"
-                      value={newUserBal}
-                      onChange={(e) => setNewUserBal(e.target.value)}
-                      className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-xs"
-                    />
-                    <button type="submit" className="px-4 py-2 rounded-full bg-[#FF444F] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
-                      <Plus className="w-3.5 h-3.5" /> Add User
-                    </button>
-                  </form>
-
-                  {/* Search & Filter Bar */}
-                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-3 flex flex-wrap items-center gap-3 text-xs">
-                    <div className="relative flex-1 min-w-[200px]">
-                      <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                  {hasPerm('users.create') && (
+                    <form
+                      onSubmit={async (e) => {
+                        e.preventDefault();
+                        try {
+                          await adminFetch('/api/admin/users', {
+                            method: 'POST',
+                            body: JSON.stringify({
+                              email: newUserEmail,
+                              full_name: newUserName,
+                              virtual_workspace_balance: Number(newUserBal),
+                            }),
+                          });
+                          setNewUserEmail('');
+                          setNewUserName('');
+                          await loadAllAdminData();
+                          flash('Trader user created & bound to active admin/device scope');
+                        } catch (err) {
+                          flash(err instanceof Error ? err.message : 'Failed', 'err');
+                        }
+                      }}
+                      className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 grid grid-cols-1 sm:grid-cols-4 gap-3"
+                    >
+                      <input
+                        type="email"
+                        required
+                        placeholder="Email"
+                        value={newUserEmail}
+                        onChange={(e) => setNewUserEmail(e.target.value)}
+                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                      />
                       <input
                         type="text"
-                        placeholder="Search by trader name, email, or client ID..."
-                        value={userSearch}
-                        onChange={(e) => setUserSearch(e.target.value)}
-                        className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                        required
+                        placeholder="Full Name"
+                        value={newUserName}
+                        onChange={(e) => setNewUserName(e.target.value)}
+                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
                       />
-                    </div>
+                      <input
+                        type="number"
+                        placeholder="Virtual Balance"
+                        value={newUserBal}
+                        onChange={(e) => setNewUserBal(e.target.value)}
+                        className="px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] font-mono-num text-xs"
+                      />
+                      <button type="submit" className="px-4 py-2 rounded-full bg-[#FF444F] text-xs font-bold flex items-center justify-center gap-1 cursor-pointer">
+                        <Plus className="w-3.5 h-3.5" /> Add User
+                      </button>
+                    </form>
+                  )}
+
+                  {/* Search, Filter & Export Bar */}
+                  <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-3 flex flex-wrap items-center gap-3 text-xs">
+                    {hasPerm('users.search') && (
+                      <div className="relative flex-1 min-w-[200px]">
+                        <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="text"
+                          placeholder="Search by trader name, email, or client ID..."
+                          value={userSearch}
+                          onChange={(e) => setUserSearch(e.target.value)}
+                          className="w-full pl-8 pr-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] text-xs"
+                        />
+                      </div>
+                    )}
                     <select
                       value={userStatusFilter}
                       onChange={(e) => setUserStatusFilter(e.target.value as any)}
@@ -1122,6 +2484,15 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       <option value="suspended">Suspended Only</option>
                       <option value="trading_frozen">Trading Frozen</option>
                     </select>
+                    {hasPerm('users.export') && (
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadExport('/api/admin/users/export?format=csv', 'deriv-scoped-users.csv')}
+                        className="px-3 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Export Scoped CSV
+                      </button>
+                    )}
                     <span className="text-slate-400 font-mono-num">
                       {filteredUsers.length} trader{filteredUsers.length === 1 ? '' : 's'}
                     </span>
@@ -1149,42 +2520,46 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                           <div key={u.id} className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] space-y-3 text-xs">
                             <div className="flex items-start justify-between gap-2">
                               <div className="min-w-0 flex-1 space-y-1.5">
-                                <div className="flex items-center gap-1.5">
-                                  <input
-                                    type="text"
-                                    value={userNames[u.id] ?? u.full_name ?? ''}
-                                    onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                    placeholder="Display Profile Name"
-                                    className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `uname-${u.id}`}
-                                    onClick={async () => {
-                                      const nextName = String(userNames[u.id] ?? u.full_name ?? '').trim();
-                                      if (!nextName) {
-                                        flash('Display profile name cannot be empty', 'err');
-                                        return;
-                                      }
-                                      setBusyAction(`uname-${u.id}`);
-                                      try {
-                                        await adminFetch(`/api/admin/users/${u.id}`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ full_name: nextName }),
-                                        });
-                                        await loadAllAdminData();
-                                        flash(`Display name updated to "${nextName}"`);
-                                      } catch (err) {
-                                        flash(err instanceof Error ? err.message : 'Failed to save name', 'err');
-                                      } finally {
-                                        setBusyAction(null);
-                                      }
-                                    }}
-                                    className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
-                                  >
-                                    {busyAction === `uname-${u.id}` ? '...' : 'Save Name'}
-                                  </button>
-                                </div>
+                                {hasPerm('users.edit') ? (
+                                  <div className="flex items-center gap-1.5">
+                                    <input
+                                      type="text"
+                                      value={userNames[u.id] ?? u.full_name ?? ''}
+                                      onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                      placeholder="Display Profile Name"
+                                      className="flex-1 min-w-0 px-2.5 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `uname-${u.id}`}
+                                      onClick={async () => {
+                                        const nextName = String(userNames[u.id] ?? u.full_name ?? '').trim();
+                                        if (!nextName) {
+                                          flash('Display profile name cannot be empty', 'err');
+                                          return;
+                                        }
+                                        setBusyAction(`uname-${u.id}`);
+                                        try {
+                                          await adminFetch(`/api/admin/users/${u.id}`, {
+                                            method: 'PATCH',
+                                            body: JSON.stringify({ full_name: nextName }),
+                                          });
+                                          await loadAllAdminData();
+                                          flash(`Display name updated to "${nextName}"`);
+                                        } catch (err) {
+                                          flash(err instanceof Error ? err.message : 'Failed to save name', 'err');
+                                        } finally {
+                                          setBusyAction(null);
+                                        }
+                                      }}
+                                      className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                                    >
+                                      {busyAction === `uname-${u.id}` ? '...' : 'Save Name'}
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <p className="font-bold text-sm text-white truncate">{u.full_name}</p>
+                                )}
                                 <p className="text-slate-400 truncate">
                                   {u.email} · {u.preferred_currency || 'USD'}
                                 </p>
@@ -1192,6 +2567,25 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                   Last login: {formatLoginTime(u.last_login_at || u.updated_at || u.created_at)}
                                   {u.deriv_client_id ? ` · ${u.deriv_client_id}` : ''}
                                 </p>
+                                <div className="flex flex-wrap items-center gap-1.5 text-[10px]">
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded font-bold ${
+                                      u.ownership_verification_status === 'verified'
+                                        ? 'bg-[#00A878]/15 text-[#00A878]'
+                                        : 'bg-amber-500/15 text-amber-300'
+                                    }`}
+                                  >
+                                    {u.ownership_verification_status === 'verified' ? 'Verified Scope' : 'Pending Verification'}
+                                  </span>
+                                  {u.originating_device_uid && (
+                                    <span className="px-1.5 py-0.5 rounded bg-white/5 text-slate-300 font-mono-num">
+                                      {u.originating_device_uid}
+                                    </span>
+                                  )}
+                                  {u.assigned_admin_email && (
+                                    <span className="text-slate-400 truncate">Admin: {u.assigned_admin_email}</span>
+                                  )}
+                                </div>
                               </div>
                               <div className="flex flex-col items-end gap-1 shrink-0">
                                 <span
@@ -1228,252 +2622,12 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                     type="number"
                                     step="0.01"
                                     min="0"
+                                    disabled={!hasPerm('users.edit')}
                                     value={realBalances[u.id] ?? parsedRw.toFixed(2)}
                                     onChange={(e) => setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
                                   />
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `real-${u.id}`}
-                                    onClick={async () => {
-                                      const val = Number(realBalances[u.id] ?? parsedRw);
-                                      if (Number.isNaN(val) || val < 0) {
-                                        flash('Enter a valid non-negative Real balance', 'err');
-                                        return;
-                                      }
-                                      setBusyAction(`real-${u.id}`);
-                                      await runWithReauth(async () => {
-                                        await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ balance: val }),
-                                        });
-                                        await loadAllAdminData();
-                                        flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
-                                      });
-                                      setBusyAction(null);
-                                    }}
-                                    className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
-                                  >
-                                    {busyAction === `real-${u.id}` ? '...' : 'Save'}
-                                  </button>
-                                </div>
-                              </div>
-
-                              <div className="p-2.5 rounded-xl bg-[#111319] border border-[#00A878]/25 space-y-2">
-                                <div className="flex items-center justify-between">
-                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#00A878]">
-                                    Demo Account ({matchedDemo.length})
-                                  </span>
-                                  {matchedDemo.length > 0 && (
-                                    <span className="text-[10px] font-mono-num text-slate-400">
-                                      {matchedDemo.map((a: any) => `${a.deriv_login_id || a.deriv_account_id} (${a.account_type})`).join(', ')}
-                                    </span>
-                                  )}
-                                </div>
-                                <div className="flex items-center gap-2">
-                                  <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
-                                  <input
-                                    type="number"
-                                    step="0.01"
-                                    min="0"
-                                    value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
-                                    onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `user-${u.id}`}
-                                    onClick={async () => {
-                                      const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                      if (Number.isNaN(val) || val < 0) {
-                                        flash('Enter a valid non-negative Demo balance', 'err');
-                                        return;
-                                      }
-                                      setBusyAction(`user-${u.id}`);
-                                      await runWithReauth(async () => {
-                                        await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ balance: val }),
-                                        });
-                                        await loadAllAdminData();
-                                        flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                      });
-                                      setBusyAction(null);
-                                    }}
-                                    className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
-                                  >
-                                    {busyAction === `user-${u.id}` ? '...' : 'Save'}
-                                  </button>
-                                </div>
-                              </div>
-                            </div>
-
-                            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[#2A2F3D]">
-                              <button
-                                type="button"
-                                onClick={() => openAdjustModal(u)}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/15 text-[#00A878] font-semibold cursor-pointer"
-                              >
-                                Adjust +/-
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openUserActivity(u.id)}
-                                className="px-2.5 py-1.5 rounded-lg bg-white/5 text-slate-200 font-semibold flex items-center gap-1 cursor-pointer"
-                              >
-                                <Eye className="w-3 h-3" /> Activity
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => openFullEditModal(u)}
-                                className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] font-semibold flex items-center gap-1 cursor-pointer"
-                              >
-                                <Edit3 className="w-3 h-3" /> Edit All
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => toggleTradingFreeze(u)}
-                                className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 font-semibold cursor-pointer"
-                              >
-                                {u.trading_suspended ? 'Unfreeze Trade' : 'Freeze Trade'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  runWithReauth(async () => {
-                                    await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                      method: 'PATCH',
-                                      body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                                    });
-                                    await loadAllAdminData();
-                                    flash(`Updated user status for ${u.email}`);
-                                  })
-                                }
-                                className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                              >
-                                {u.status === 'active' ? 'Suspend' : 'Activate'}
-                              </button>
-                              <button
-                                type="button"
-                                onClick={async () => {
-                                  try {
-                                    await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
-                                    loadAllAdminData();
-                                  } catch (err) {
-                                    flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
-                                  }
-                                }}
-                                className="p-1.5 text-[#FF444F] cursor-pointer"
-                              >
-                                <Trash2 className="w-3.5 h-3.5 inline" />
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })
-                    )}
-                  </div>
-
-                  {/* Desktop Table for Users CRUD */}
-                  <div className="hidden md:block bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
-                    <table className="w-full text-xs">
-                      <thead>
-                        <tr className="border-b border-[#2A2F3D] text-slate-400">
-                          <th className="text-left px-4 py-3">Display Profile Name &amp; Trader</th>
-                          <th className="text-left px-4 py-3">Status</th>
-                          <th className="text-right px-4 py-3 text-[#FF444F]">Real Account &amp; Bal (DB)</th>
-                          <th className="text-right px-4 py-3 text-[#00A878]">Demo Account &amp; Bal (DB)</th>
-                          <th className="text-right px-4 py-3">Actions</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-[#2A2F3D]">
-                        {filteredUsers.map((u: any) => {
-                          let parsedRw = 0;
-                          try {
-                            parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
-                          } catch {
-                            parsedRw = 0;
-                          }
-                          const matchedAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === u.id);
-                          const matchedReal = matchedAccounts.filter((a: any) => !a.is_virtual);
-                          const matchedDemo = matchedAccounts.filter((a: any) => Boolean(a.is_virtual));
-
-                          return (
-                            <tr key={u.id}>
-                              <td className="px-4 py-3 min-w-[230px]">
-                                <div className="flex items-center gap-1.5 mb-1">
-                                  <input
-                                    type="text"
-                                    value={userNames[u.id] ?? u.full_name ?? ''}
-                                    onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
-                                    placeholder="Display Profile Name"
-                                    className="w-40 px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
-                                  />
-                                  <button
-                                    type="button"
-                                    disabled={busyAction === `uname-${u.id}`}
-                                    onClick={async () => {
-                                      const nextName = String(userNames[u.id] ?? u.full_name ?? '').trim();
-                                      if (!nextName) {
-                                        flash('Display profile name cannot be empty', 'err');
-                                        return;
-                                      }
-                                      setBusyAction(`uname-${u.id}`);
-                                      try {
-                                        await adminFetch(`/api/admin/users/${u.id}`, {
-                                          method: 'PATCH',
-                                          body: JSON.stringify({ full_name: nextName }),
-                                        });
-                                        await loadAllAdminData();
-                                        flash(`Display profile name updated for ${u.email}`);
-                                      } catch (err) {
-                                        flash(err instanceof Error ? err.message : 'Failed to save name', 'err');
-                                      } finally {
-                                        setBusyAction(null);
-                                      }
-                                    }}
-                                    className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer whitespace-nowrap"
-                                  >
-                                    {busyAction === `uname-${u.id}` ? '...' : 'Save'}
-                                  </button>
-                                </div>
-                                <p className="text-slate-400">
-                                  {u.email}
-                                  {u.deriv_nickname ? ` · @${u.deriv_nickname}` : ''}
-                                </p>
-                                <p className="text-[10px] text-slate-500 font-mono-num mt-0.5">
-                                  Login: {formatLoginTime(u.last_login_at || u.updated_at || u.created_at)}
-                                  {u.deriv_client_id ? ` · ${u.deriv_client_id}` : ''}
-                                </p>
-                              </td>
-                              <td className="px-4 py-3">
-                                <div className="flex flex-col gap-1 items-start">
-                                  <span className={u.status === 'active' ? 'text-[#00A878] font-semibold' : 'text-[#FF444F] font-semibold'}>
-                                    {u.status}
-                                  </span>
-                                  <span className="text-[10px] font-mono-num text-slate-400">
-                                    Pref: {u.preferred_currency || 'USD'}
-                                  </span>
-                                  {u.trading_suspended && (
-                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold">
-                                      TRADING FROZEN
-                                    </span>
-                                  )}
-                                </div>
-                              </td>
-                              <td className="px-4 py-3 text-right">
-                                <div className="inline-flex flex-col items-end gap-1">
-                                  <div className="inline-flex items-center justify-end gap-1.5">
-                                    <input
-                                      type="number"
-                                      step="0.01"
-                                      min="0"
-                                      value={realBalances[u.id] ?? parsedRw.toFixed(2)}
-                                      onChange={(e) =>
-                                        setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
-                                      }
-                                      className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
-                                    />
+                                  {hasPerm('users.edit') && (
                                     <button
                                       type="button"
                                       disabled={busyAction === `real-${u.id}`}
@@ -1494,10 +2648,287 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                         });
                                         setBusyAction(null);
                                       }}
-                                      className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
+                                      className="px-3 py-1.5 rounded-lg bg-[#FF444F]/20 text-[#FF444F] font-semibold cursor-pointer"
                                     >
-                                      {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                      {busyAction === `real-${u.id}` ? '...' : 'Save'}
                                     </button>
+                                  )}
+                                </div>
+                              </div>
+
+                              <div className="p-2.5 rounded-xl bg-[#111319] border border-[#00A878]/25 space-y-2">
+                                <div className="flex items-center justify-between">
+                                  <span className="text-[10px] font-bold uppercase tracking-wider text-[#00A878]">
+                                    Demo Account ({matchedDemo.length})
+                                  </span>
+                                  {matchedDemo.length > 0 && (
+                                    <span className="text-[10px] font-mono-num text-slate-400">
+                                      {matchedDemo.map((a: any) => `${a.deriv_login_id || a.deriv_account_id} (${a.account_type})`).join(', ')}
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-[11px] text-[#00A878] font-bold w-16">Demo ($):</span>
+                                  <input
+                                    type="number"
+                                    step="0.01"
+                                    min="0"
+                                    disabled={!hasPerm('users.edit')}
+                                    value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
+                                    onChange={(e) => setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                    className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
+                                  />
+                                  {hasPerm('users.edit') && (
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `user-${u.id}`}
+                                      onClick={async () => {
+                                        const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                        if (Number.isNaN(val) || val < 0) {
+                                          flash('Enter a valid non-negative Demo balance', 'err');
+                                          return;
+                                        }
+                                        setBusyAction(`user-${u.id}`);
+                                        await runWithReauth(async () => {
+                                          await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                            method: 'PATCH',
+                                            body: JSON.stringify({ balance: val }),
+                                          });
+                                          await loadAllAdminData();
+                                          flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
+                                        });
+                                        setBusyAction(null);
+                                      }}
+                                      className="px-3 py-1.5 rounded-lg bg-[#00A878]/20 text-[#00A878] font-semibold cursor-pointer"
+                                    >
+                                      {busyAction === `user-${u.id}` ? '...' : 'Save'}
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                            </div>
+
+                            <div className="flex flex-wrap items-center justify-end gap-2 pt-2 border-t border-[#2A2F3D]">
+                              {hasPerm('users.edit') && (
+                                <button
+                                  type="button"
+                                  onClick={() => openAdjustModal(u)}
+                                  className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/15 text-[#00A878] font-semibold cursor-pointer"
+                                >
+                                  Adjust +/-
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => openUserActivity(u.id)}
+                                className="px-2.5 py-1.5 rounded-lg bg-white/5 text-slate-200 font-semibold flex items-center gap-1 cursor-pointer"
+                              >
+                                <Eye className="w-3 h-3" /> Activity
+                              </button>
+                              {hasPerm('users.edit') && (
+                                <>
+                                  <button
+                                    type="button"
+                                    onClick={() => openFullEditModal(u)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 text-[#FF444F] font-semibold flex items-center gap-1 cursor-pointer"
+                                  >
+                                    <Edit3 className="w-3 h-3" /> Edit All
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => toggleTradingFreeze(u)}
+                                    className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 text-amber-300 font-semibold cursor-pointer"
+                                  >
+                                    {u.trading_suspended ? 'Unfreeze Trade' : 'Freeze Trade'}
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      runWithReauth(async () => {
+                                        await adminFetch(`/api/admin/users/${u.id}/status`, {
+                                          method: 'PATCH',
+                                          body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
+                                        });
+                                        await loadAllAdminData();
+                                        flash(`Updated user status for ${u.email}`);
+                                      })
+                                    }
+                                    className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                                  >
+                                    {u.status === 'active' ? 'Suspend' : 'Activate'}
+                                  </button>
+                                </>
+                              )}
+                              {hasPerm('users.delete') && (
+                                <button
+                                  type="button"
+                                  onClick={async () => {
+                                    try {
+                                      await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+                                      loadAllAdminData();
+                                    } catch (err) {
+                                      flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
+                                    }
+                                  }}
+                                  className="p-1.5 text-[#FF444F] cursor-pointer"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5 inline" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })
+                    )}
+                  </div>
+
+                  {/* Desktop Table for Users CRUD */}
+                  <div className="hidden md:block bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
+                    <table className="w-full text-xs">
+                      <thead>
+                        <tr className="border-b border-[#2A2F3D] text-slate-400">
+                          <th className="text-left px-4 py-3">Display Profile Name &amp; Trader</th>
+                          <th className="text-left px-4 py-3">Status &amp; Scope</th>
+                          <th className="text-right px-4 py-3 text-[#FF444F]">Real Account &amp; Bal (DB)</th>
+                          <th className="text-right px-4 py-3 text-[#00A878]">Demo Account &amp; Bal (DB)</th>
+                          <th className="text-right px-4 py-3">Actions</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-[#2A2F3D]">
+                        {filteredUsers.map((u: any) => {
+                          let parsedRw = 0;
+                          try {
+                            parsedRw = Number(JSON.parse(u.real_wallets_json || '{}').options ?? 0);
+                          } catch {
+                            parsedRw = 0;
+                          }
+                          const matchedAccounts = (overview?.connectedAccounts || []).filter((a: any) => a.user_id === u.id);
+                          const matchedReal = matchedAccounts.filter((a: any) => !a.is_virtual);
+                          const matchedDemo = matchedAccounts.filter((a: any) => Boolean(a.is_virtual));
+
+                          return (
+                            <tr key={u.id}>
+                              <td className="px-4 py-3 min-w-[230px]">
+                                {hasPerm('users.edit') ? (
+                                  <div className="flex items-center gap-1.5 mb-1">
+                                    <input
+                                      type="text"
+                                      value={userNames[u.id] ?? u.full_name ?? ''}
+                                      onChange={(e) => setUserNames((prev) => ({ ...prev, [u.id]: e.target.value }))}
+                                      placeholder="Display Profile Name"
+                                      className="w-40 px-2 py-1 rounded-lg bg-[#111319] border border-[#2A2F3D] font-bold text-xs text-white"
+                                    />
+                                    <button
+                                      type="button"
+                                      disabled={busyAction === `uname-${u.id}`}
+                                      onClick={async () => {
+                                        const nextName = String(userNames[u.id] ?? u.full_name ?? '').trim();
+                                        if (!nextName) {
+                                          flash('Display profile name cannot be empty', 'err');
+                                          return;
+                                        }
+                                        setBusyAction(`uname-${u.id}`);
+                                        try {
+                                          await adminFetch(`/api/admin/users/${u.id}`, {
+                                            method: 'PATCH',
+                                            body: JSON.stringify({ full_name: nextName }),
+                                          });
+                                          await loadAllAdminData();
+                                          flash(`Display profile name updated for ${u.email}`);
+                                        } catch (err) {
+                                          flash(err instanceof Error ? err.message : 'Failed to save name', 'err');
+                                        } finally {
+                                          setBusyAction(null);
+                                        }
+                                      }}
+                                      className="px-2 py-1 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer whitespace-nowrap"
+                                    >
+                                      {busyAction === `uname-${u.id}` ? '...' : 'Save'}
+                                    </button>
+                                  </div>
+                                ) : (
+                                  <p className="font-bold text-white mb-0.5">{u.full_name}</p>
+                                )}
+                                <p className="text-slate-400">
+                                  {u.email}
+                                  {u.deriv_nickname ? ` · @${u.deriv_nickname}` : ''}
+                                </p>
+                                <p className="text-[10px] text-slate-500 font-mono-num mt-0.5">
+                                  Login: {formatLoginTime(u.last_login_at || u.updated_at || u.created_at)}
+                                  {u.deriv_client_id ? ` · ${u.deriv_client_id}` : ''}
+                                </p>
+                              </td>
+                              <td className="px-4 py-3">
+                                <div className="flex flex-col gap-1 items-start">
+                                  <span className={u.status === 'active' ? 'text-[#00A878] font-semibold' : 'text-[#FF444F] font-semibold'}>
+                                    {u.status}
+                                  </span>
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] font-bold ${
+                                      u.ownership_verification_status === 'verified'
+                                        ? 'bg-[#00A878]/15 text-[#00A878]'
+                                        : 'bg-amber-500/15 text-amber-300'
+                                    }`}
+                                  >
+                                    {u.ownership_verification_status === 'verified' ? 'Verified Scope' : 'Pending Verification'}
+                                  </span>
+                                  {u.originating_device_uid && (
+                                    <span className="text-[10px] font-mono-num text-slate-400">
+                                      {u.originating_device_uid}
+                                    </span>
+                                  )}
+                                  {u.assigned_admin_email && (
+                                    <span className="text-[10px] text-slate-500 truncate max-w-[160px]">
+                                      {u.assigned_admin_email}
+                                    </span>
+                                  )}
+                                  {u.trading_suspended && (
+                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 text-amber-300 text-[10px] font-bold">
+                                      TRADING FROZEN
+                                    </span>
+                                  )}
+                                </div>
+                              </td>
+                              <td className="px-4 py-3 text-right">
+                                <div className="inline-flex flex-col items-end gap-1">
+                                  <div className="inline-flex items-center justify-end gap-1.5">
+                                    <input
+                                      type="number"
+                                      step="0.01"
+                                      min="0"
+                                      disabled={!hasPerm('users.edit')}
+                                      value={realBalances[u.id] ?? parsedRw.toFixed(2)}
+                                      onChange={(e) =>
+                                        setRealBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
+                                      }
+                                      className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
+                                    />
+                                    {hasPerm('users.edit') && (
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `real-${u.id}`}
+                                        onClick={async () => {
+                                          const val = Number(realBalances[u.id] ?? parsedRw);
+                                          if (Number.isNaN(val) || val < 0) {
+                                            flash('Enter a valid non-negative Real balance', 'err');
+                                            return;
+                                          }
+                                          setBusyAction(`real-${u.id}`);
+                                          await runWithReauth(async () => {
+                                            await adminFetch(`/api/admin/users/${u.id}/real-balance`, {
+                                              method: 'PATCH',
+                                              body: JSON.stringify({ balance: val }),
+                                            });
+                                            await loadAllAdminData();
+                                            flash(`Saved DB Real balance ($${val.toFixed(2)}) for ${u.email}`);
+                                          });
+                                          setBusyAction(null);
+                                        }}
+                                        className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/20 hover:bg-[#FF444F]/30 text-[#FF444F] font-semibold cursor-pointer whitespace-nowrap"
+                                      >
+                                        {busyAction === `real-${u.id}` ? '...' : 'Save Real'}
+                                      </button>
+                                    )}
                                   </div>
                                   {matchedReal.length > 0 && (
                                     <div className="flex flex-wrap justify-end gap-1">
@@ -1520,36 +2951,39 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                       type="number"
                                       step="0.01"
                                       min="0"
+                                      disabled={!hasPerm('users.edit')}
                                       value={userBalances[u.id] ?? String(Number(u.virtual_workspace_balance ?? 0).toFixed(2))}
                                       onChange={(e) =>
                                         setUserBalances((prev) => ({ ...prev, [u.id]: e.target.value }))
                                       }
-                                      className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs"
+                                      className="w-24 px-2 py-1.5 rounded-lg bg-[#111319] border border-[#2A2F3D] font-mono-num text-right text-xs disabled:opacity-70"
                                     />
-                                    <button
-                                      type="button"
-                                      disabled={busyAction === `user-${u.id}`}
-                                      onClick={async () => {
-                                        const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
-                                        if (Number.isNaN(val) || val < 0) {
-                                          flash('Enter a valid non-negative balance', 'err');
-                                          return;
-                                        }
-                                        setBusyAction(`user-${u.id}`);
-                                        await runWithReauth(async () => {
-                                          await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
-                                            method: 'PATCH',
-                                            body: JSON.stringify({ balance: val }),
+                                    {hasPerm('users.edit') && (
+                                      <button
+                                        type="button"
+                                        disabled={busyAction === `user-${u.id}`}
+                                        onClick={async () => {
+                                          const val = Number(userBalances[u.id] ?? u.virtual_workspace_balance);
+                                          if (Number.isNaN(val) || val < 0) {
+                                            flash('Enter a valid non-negative balance', 'err');
+                                            return;
+                                          }
+                                          setBusyAction(`user-${u.id}`);
+                                          await runWithReauth(async () => {
+                                            await adminFetch(`/api/admin/users/${u.id}/virtual-balance`, {
+                                              method: 'PATCH',
+                                              body: JSON.stringify({ balance: val }),
+                                            });
+                                            await loadAllAdminData();
+                                            flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
                                           });
-                                          await loadAllAdminData();
-                                          flash(`Saved DB Demo balance ($${val.toFixed(2)}) for ${u.email}`);
-                                        });
-                                        setBusyAction(null);
-                                      }}
-                                      className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
-                                    >
-                                      {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
-                                    </button>
+                                          setBusyAction(null);
+                                        }}
+                                        className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer whitespace-nowrap"
+                                      >
+                                        {busyAction === `user-${u.id}` ? '...' : 'Save Demo'}
+                                      </button>
+                                    )}
                                   </div>
                                   {matchedDemo.length > 0 && (
                                     <div className="flex flex-wrap justify-end gap-1">
@@ -1566,13 +3000,15 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 </div>
                               </td>
                               <td className="px-4 py-3 text-right space-x-1.5 whitespace-nowrap">
-                                <button
-                                  type="button"
-                                  onClick={() => openAdjustModal(u)}
-                                  className="px-2 py-1 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold cursor-pointer"
-                                >
-                                  Credit/Debit
-                                </button>
+                                {hasPerm('users.edit') && (
+                                  <button
+                                    type="button"
+                                    onClick={() => openAdjustModal(u)}
+                                    className="px-2 py-1 rounded-lg bg-[#00A878]/15 hover:bg-[#00A878]/25 text-[#00A878] font-semibold cursor-pointer"
+                                  >
+                                    Credit/Debit
+                                  </button>
+                                )}
                                 <button
                                   type="button"
                                   onClick={() => openUserActivity(u.id)}
@@ -1580,52 +3016,58 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                                 >
                                   <Eye className="w-3 h-3" /> Activity
                                 </button>
-                                <button
-                                  type="button"
-                                  onClick={() => openFullEditModal(u)}
-                                  className="px-2 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
-                                >
-                                  <Edit3 className="w-3 h-3" /> Wallets
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() => toggleTradingFreeze(u)}
-                                  title={u.trading_suspended ? 'Restore Trading Access' : 'Freeze Trading Access'}
-                                  className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold inline-flex items-center gap-1 cursor-pointer"
-                                >
-                                  {u.trading_suspended ? <PlayCircle className="w-3 h-3" /> : <PauseCircle className="w-3 h-3" />}
-                                  {u.trading_suspended ? 'Unfreeze' : 'Freeze'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    runWithReauth(async () => {
-                                      await adminFetch(`/api/admin/users/${u.id}/status`, {
-                                        method: 'PATCH',
-                                        body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
-                                      });
-                                      await loadAllAdminData();
-                                      flash(`Updated user status for ${u.email}`);
-                                    })
-                                  }
-                                  className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                                >
-                                  {u.status === 'active' ? 'Suspend' : 'Activate'}
-                                </button>
-                                <button
-                                  type="button"
-                                  onClick={async () => {
-                                    try {
-                                      await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
-                                      loadAllAdminData();
-                                    } catch (err) {
-                                      flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
-                                    }
-                                  }}
-                                  className="p-1 text-[#FF444F] cursor-pointer"
-                                >
-                                  <Trash2 className="w-3.5 h-3.5 inline" />
-                                </button>
+                                {hasPerm('users.edit') && (
+                                  <>
+                                    <button
+                                      type="button"
+                                      onClick={() => openFullEditModal(u)}
+                                      className="px-2 py-1 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <Edit3 className="w-3 h-3" /> Wallets
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => toggleTradingFreeze(u)}
+                                      title={u.trading_suspended ? 'Restore Trading Access' : 'Freeze Trading Access'}
+                                      className="px-2 py-1 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      {u.trading_suspended ? <PlayCircle className="w-3 h-3" /> : <PauseCircle className="w-3 h-3" />}
+                                      {u.trading_suspended ? 'Unfreeze' : 'Freeze'}
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        runWithReauth(async () => {
+                                          await adminFetch(`/api/admin/users/${u.id}/status`, {
+                                            method: 'PATCH',
+                                            body: JSON.stringify({ status: u.status === 'active' ? 'suspended' : 'active' }),
+                                          });
+                                          await loadAllAdminData();
+                                          flash(`Updated user status for ${u.email}`);
+                                        })
+                                      }
+                                      className="px-2 py-1 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                                    >
+                                      {u.status === 'active' ? 'Suspend' : 'Activate'}
+                                    </button>
+                                  </>
+                                )}
+                                {hasPerm('users.delete') && (
+                                  <button
+                                    type="button"
+                                    onClick={async () => {
+                                      try {
+                                        await adminFetch(`/api/admin/users/${u.id}`, { method: 'DELETE' });
+                                        loadAllAdminData();
+                                      } catch (err) {
+                                        flash(err instanceof Error ? err.message : 'Cannot delete', 'err');
+                                      }
+                                    }}
+                                    className="p-1 text-[#FF444F] cursor-pointer"
+                                  >
+                                    <Trash2 className="w-3.5 h-3.5 inline" />
+                                  </button>
+                                )}
                               </td>
                             </tr>
                           );
@@ -1638,7 +3080,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             })()}
 
           {/* 4. Connected Deriv Accounts — Sorted by Login Time, Real Alongside Demo per Login */}
-          {tab === 'accounts' &&
+          {activeTab === 'accounts' && hasPerm('clients.view') &&
             (() => {
               const allAcc = overview?.connectedAccounts || [];
               const allUsers = overview?.users || [];
@@ -1726,38 +3168,41 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                   <div className="flex items-center gap-1.5">
                     <input
                       type="text"
+                      disabled={!hasPerm('clients.manage')}
                       value={accountNames[a.id] ?? a.account_type ?? ''}
                       onChange={(e) => setAccountNames((prev) => ({ ...prev, [a.id]: e.target.value }))}
                       placeholder="Account Display Name"
-                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] text-xs text-white"
+                      className="flex-1 min-w-0 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] text-xs text-white disabled:opacity-70"
                     />
-                    <button
-                      type="button"
-                      disabled={busyAction === `aname-${a.id}`}
-                      onClick={async () => {
-                        const nextType = String(accountNames[a.id] ?? a.account_type ?? '').trim();
-                        if (!nextType) {
-                          flash('Account display name cannot be empty', 'err');
-                          return;
-                        }
-                        setBusyAction(`aname-${a.id}`);
-                        try {
-                          await adminFetch(`/api/admin/connected-accounts/${a.id}`, {
-                            method: 'PATCH',
-                            body: JSON.stringify({ account_type: nextType }),
-                          });
-                          await loadAllAdminData();
-                          flash(`Account display name updated for ${a.deriv_login_id || a.deriv_account_id}`);
-                        } catch (err) {
-                          flash(err instanceof Error ? err.message : 'Rename failed', 'err');
-                        } finally {
-                          setBusyAction(null);
-                        }
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
-                    >
-                      {busyAction === `aname-${a.id}` ? '...' : 'Save Name'}
-                    </button>
+                    {hasPerm('clients.manage') && (
+                      <button
+                        type="button"
+                        disabled={busyAction === `aname-${a.id}`}
+                        onClick={async () => {
+                          const nextType = String(accountNames[a.id] ?? a.account_type ?? '').trim();
+                          if (!nextType) {
+                            flash('Account display name cannot be empty', 'err');
+                            return;
+                          }
+                          setBusyAction(`aname-${a.id}`);
+                          try {
+                            await adminFetch(`/api/admin/connected-accounts/${a.id}`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ account_type: nextType }),
+                            });
+                            await loadAllAdminData();
+                            flash(`Account display name updated for ${a.deriv_login_id || a.deriv_account_id}`);
+                          } catch (err) {
+                            flash(err instanceof Error ? err.message : 'Rename failed', 'err');
+                          } finally {
+                            setBusyAction(null);
+                          }
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-white font-semibold cursor-pointer shrink-0"
+                      >
+                        {busyAction === `aname-${a.id}` ? '...' : 'Save Name'}
+                      </button>
+                    )}
                   </div>
 
                   <div className="flex items-center gap-2">
@@ -1765,85 +3210,88 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       type="number"
                       step="0.01"
                       min="0"
+                      disabled={!hasPerm('clients.manage')}
                       value={accountBalances[a.id] ?? String(Number(a.last_known_balance ?? a.balance ?? 0).toFixed(2))}
                       onChange={(e) => setAccountBalances((prev) => ({ ...prev, [a.id]: e.target.value }))}
-                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs text-white"
+                      className="flex-1 px-2.5 py-1.5 rounded-lg bg-[#181C25] border border-[#2A2F3D] font-mono-num text-right text-xs text-white disabled:opacity-70"
                     />
                     <span className="text-slate-400 font-mono-num text-[11px] shrink-0">{a.currency || 'USD'}</span>
                   </div>
 
-                  <div className="flex flex-wrap items-center justify-end gap-1.5">
-                    <button
-                      type="button"
-                      disabled={busyAction === `save-${a.id}`}
-                      onClick={async () => {
-                        const val = Number(accountBalances[a.id] ?? a.balance);
-                        if (Number.isNaN(val) || val < 0) {
-                          flash('Enter a valid non-negative balance', 'err');
-                          return;
-                        }
-                        setBusyAction(`save-${a.id}`);
-                        await runWithReauth(async () => {
-                          await adminFetch(`/api/admin/connected-accounts/${a.id}/balance`, {
+                  {hasPerm('clients.manage') && (
+                    <div className="flex flex-wrap items-center justify-end gap-1.5">
+                      <button
+                        type="button"
+                        disabled={busyAction === `save-${a.id}`}
+                        onClick={async () => {
+                          const val = Number(accountBalances[a.id] ?? a.balance);
+                          if (Number.isNaN(val) || val < 0) {
+                            flash('Enter a valid non-negative balance', 'err');
+                            return;
+                          }
+                          setBusyAction(`save-${a.id}`);
+                          await runWithReauth(async () => {
+                            await adminFetch(`/api/admin/connected-accounts/${a.id}/balance`, {
+                              method: 'PATCH',
+                              body: JSON.stringify({ balance: val }),
+                            });
+                            await loadAllAdminData();
+                            flash(
+                              `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency})`
+                            );
+                          });
+                          setBusyAction(null);
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
+                      >
+                        {busyAction === `save-${a.id}` ? 'Saving...' : 'Save DB Bal'}
+                      </button>
+                      <button
+                        type="button"
+                        disabled={busyAction === `sync-${a.id}`}
+                        onClick={async () => {
+                          setBusyAction(`sync-${a.id}`);
+                          try {
+                            await adminFetch(`/api/admin/connected-accounts/${a.id}/sync`, { method: 'POST' });
+                            await loadAllAdminData();
+                            flash(`Unlocked & synced live balance for ${a.deriv_login_id || a.deriv_account_id}`);
+                          } catch (err) {
+                            flash(err instanceof Error ? err.message : 'Sync failed', 'err');
+                          } finally {
+                            setBusyAction(null);
+                          }
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                      >
+                        {busyAction === `sync-${a.id}` ? 'Syncing...' : 'Sync Live'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const nextStatus = a.status === 'frozen' ? 'active' : 'frozen';
+                          await adminFetch(`/api/admin/connected-accounts/${a.id}/status`, {
                             method: 'PATCH',
-                            body: JSON.stringify({ balance: val }),
+                            body: JSON.stringify({ status: nextStatus }),
                           });
                           await loadAllAdminData();
-                          flash(
-                            `Saved & DB Locked ${a.deriv_login_id || a.deriv_account_id} (${val.toFixed(2)} ${a.currency})`
-                          );
-                        });
-                        setBusyAction(null);
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878] font-semibold cursor-pointer"
-                    >
-                      {busyAction === `save-${a.id}` ? 'Saving...' : 'Save DB Bal'}
-                    </button>
-                    <button
-                      type="button"
-                      disabled={busyAction === `sync-${a.id}`}
-                      onClick={async () => {
-                        setBusyAction(`sync-${a.id}`);
-                        try {
-                          await adminFetch(`/api/admin/connected-accounts/${a.id}/sync`, { method: 'POST' });
-                          await loadAllAdminData();
-                          flash(`Unlocked & synced live balance for ${a.deriv_login_id || a.deriv_account_id}`);
-                        } catch (err) {
-                          flash(err instanceof Error ? err.message : 'Sync failed', 'err');
-                        } finally {
-                          setBusyAction(null);
-                        }
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
-                    >
-                      {busyAction === `sync-${a.id}` ? 'Syncing...' : 'Sync Live'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        const nextStatus = a.status === 'frozen' ? 'active' : 'frozen';
-                        await adminFetch(`/api/admin/connected-accounts/${a.id}/status`, {
-                          method: 'PATCH',
-                          body: JSON.stringify({ status: nextStatus }),
-                        });
-                        await loadAllAdminData();
-                        flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
-                    >
-                      {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
-                    </button>
-                    <button
-                      type="button"
-                      onClick={async () => {
-                        await adminFetch(`/api/admin/connected-accounts/${a.id}/revoke`, { method: 'POST' });
-                        loadAllAdminData();
-                      }}
-                      className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] cursor-pointer"
-                    >
-                      Revoke
-                    </button>
-                  </div>
+                          flash(`Account ${a.deriv_login_id || a.deriv_account_id} marked ${nextStatus}`);
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 font-semibold cursor-pointer"
+                      >
+                        {a.status === 'frozen' ? 'Unfreeze' : 'Freeze'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          await adminFetch(`/api/admin/connected-accounts/${a.id}/revoke`, { method: 'POST' });
+                          loadAllAdminData();
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-[#FF444F]/15 hover:bg-[#FF444F]/25 text-[#FF444F] cursor-pointer"
+                      >
+                        Revoke
+                      </button>
+                    </div>
+                  )}
                 </div>
               );
 
@@ -1926,7 +3374,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             })()}
 
           {/* 5. Bot Strategies CRUD */}
-          {tab === 'strategies' && (
+          {activeTab === 'strategies' && hasPerm('strategies.manage') && (
             <div className="space-y-4">
               <form
                 onSubmit={async (e) => {
@@ -2011,7 +3459,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 6. Orders Oversight (Immutable Closed Audit Ledger) */}
-          {tab === 'orders' &&
+          {activeTab === 'orders' && (hasPerm('clients.view') || hasPerm('reports.view') || hasPerm('users.view')) &&
             (() => {
               const sourceOrders = serverTrades ?? (overview?.orders || []);
               const uQ = orderUserFilter.trim().toLowerCase();
@@ -2080,6 +3528,15 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                     >
                       Query Server ({filteredOrders.length})
                     </button>
+                    {hasPerm('reports.export') && (
+                      <button
+                        type="button"
+                        onClick={() => handleDownloadExport('/api/admin/trades/export?format=csv', 'deriv-scoped-trades.csv')}
+                        className="px-3.5 py-2 rounded-xl bg-white/5 hover:bg-white/10 text-slate-200 font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                      >
+                        <Download className="w-3.5 h-3.5" /> Export Trades CSV
+                      </button>
+                    )}
                   </div>
 
                   <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
@@ -2142,7 +3599,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                               >
                                 <Eye className="w-3 h-3" /> Inspect / Notes
                               </button>
-                              {o.status === 'OPEN' && (
+                              {o.status === 'OPEN' && hasPerm('clients.manage') && (
                                 <button
                                   type="button"
                                   onClick={async () => {
@@ -2166,7 +3623,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
             })()}
 
           {/* 6b. Trading Engine Control (Admin Only) */}
-          {tab === 'engine' && (
+          {activeTab === 'engine' && hasPerm('engine.manage') && (
             <form
               onSubmit={async (e) => {
                 e.preventDefault();
@@ -2263,7 +3720,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 6c. Instruments & Pricing Overrides */}
-          {tab === 'markets' && (
+          {activeTab === 'markets' && hasPerm('markets.manage') && (
             <div className="space-y-4">
               <div className="p-4 rounded-2xl bg-[#181C25] border border-[#2A2F3D] flex flex-wrap items-center justify-between gap-3">
                 <div>
@@ -2410,7 +3867,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 7. Cashier Logs */}
-          {tab === 'cashier' && (
+          {activeTab === 'cashier' && hasPerm('transactions.view') && (
             <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl overflow-x-auto">
               <table className="w-full text-xs">
                 <thead>
@@ -2438,7 +3895,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 8. Global Settings & Branding */}
-          {tab === 'settings' && (
+          {activeTab === 'settings' && isSuperAdmin && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <form
                 onSubmit={async (e) => {
@@ -2733,7 +4190,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 9. Announcements */}
-          {tab === 'announcements' && (
+          {activeTab === 'announcements' && hasPerm('settings.manage') && (
             <div className="space-y-4">
               <form
                 onSubmit={async (e) => {
@@ -2794,7 +4251,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 10. Audit & Email Logs */}
-          {tab === 'logs' && (
+          {activeTab === 'logs' && hasPerm('audit_logs.view') && (
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
               <div className="bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-4 space-y-2">
                 <h2 className="font-display text-sm font-bold mb-2">Immutable Admin Audit Trail</h2>
@@ -2840,7 +4297,7 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
           )}
 
           {/* 11. Security & Diagnostics */}
-          {tab === 'security' && (
+          {activeTab === 'security' && isSuperAdmin && (
             <div className="space-y-6">
               <div className="flex items-center justify-between">
                 <p className="text-xs text-slate-400">
@@ -2951,11 +4408,35 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
               <div>
                 <h3 className="font-display text-base font-bold">Edit Trader Profile &amp; All Wallets</h3>
                 <p className="text-xs text-slate-400">#{editingUser.id} · {editingUser.email}</p>
+                <div className="flex flex-wrap items-center gap-1.5 mt-1 text-[10px]">
+                  <span
+                    className={`px-1.5 py-0.5 rounded font-bold ${
+                      editingUser.ownership_verification_status === 'verified'
+                        ? 'bg-[#00A878]/15 text-[#00A878]'
+                        : 'bg-amber-500/15 text-amber-300'
+                    }`}
+                  >
+                    {editingUser.ownership_verification_status === 'verified' ? 'Verified Scope' : 'Pending Verification'}
+                  </span>
+                  {editingUser.originating_device_uid && (
+                    <span className="px-1.5 py-0.5 rounded bg-white/5 text-slate-300 font-mono-num">
+                      Device: {editingUser.originating_device_uid}
+                    </span>
+                  )}
+                  {editingUser.assigned_admin_email && (
+                    <span className="text-slate-400">Assigned Admin: {editingUser.assigned_admin_email}</span>
+                  )}
+                </div>
               </div>
               <button type="button" onClick={() => setEditingUser(null)} className="text-slate-400 hover:text-white cursor-pointer">
                 <X className="w-5 h-5" />
               </button>
             </div>
+            {!isSuperAdmin && (
+              <div className="px-3 py-2 rounded-xl bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-200">
+                Ownership &amp; device binding are read-only for delegated administrators. Only the Super Admin can reassign clients or devices.
+              </div>
+            )}
 
             <form
               onSubmit={async (e) => {
@@ -3398,23 +4879,26 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 <label className="block text-slate-400 mb-1">Admin Audit Notes (Trade P/L is immutable)</label>
                 <textarea
                   rows={3}
+                  disabled={!hasPerm('clients.manage')}
                   value={editingOrder.notes}
                   onChange={(e) => setEditingOrder((p: any) => ({ ...p, notes: e.target.value }))}
                   placeholder="Record compliance or settlement review notes..."
-                  className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] disabled:opacity-70"
                 />
               </div>
               <div className="flex justify-end gap-2 pt-1">
                 <button type="button" onClick={() => setEditingOrder(null)} className="px-4 py-2 rounded-xl bg-white/5 cursor-pointer">
                   Close
                 </button>
-                <button
-                  type="submit"
-                  disabled={busyAction === 'edit-order-modal'}
-                  className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
-                >
-                  {busyAction === 'edit-order-modal' ? 'Saving...' : 'Save Audit Notes'}
-                </button>
+                {hasPerm('clients.manage') && (
+                  <button
+                    type="submit"
+                    disabled={busyAction === 'edit-order-modal'}
+                    className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
+                  >
+                    {busyAction === 'edit-order-modal' ? 'Saving...' : 'Save Audit Notes'}
+                  </button>
+                )}
               </div>
             </form>
           </div>
@@ -3548,7 +5032,9 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 </h3>
                 {!activityLoading && activityData?.user && (
                   <p className="text-slate-400">
-                    {activityData.user.email} · {activityData.user.deriv_client_id} · Status: {activityData.user.status}
+                    {activityData.user.email} · {activityData.user.deriv_client_id || 'No CID'} · Status: {activityData.user.status}
+                    {activityData.user.originating_device_uid ? ` · Device: ${activityData.user.originating_device_uid}` : ''}
+                    {activityData.user.assigned_admin_email ? ` · Admin: ${activityData.user.assigned_admin_email}` : ''}
                   </p>
                 )}
               </div>
@@ -3622,6 +5108,280 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                 </div>
               )
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Edit Administrator Modal (Super Admin Only) */}
+      {editingAdmin && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-lg bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4 text-xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">Edit Administrator</h3>
+                <p className="text-slate-400">
+                  #{editingAdmin.id} · {editingAdmin.email}
+                </p>
+              </div>
+              <button type="button" onClick={() => setEditingAdmin(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <form
+              onSubmit={async (e) => {
+                e.preventDefault();
+                setBusyAction(`edit-adm-${editingAdmin.id}`);
+                await runWithReauth(async () => {
+                  await adminFetch(`/api/admin/admins/${editingAdmin.id}`, {
+                    method: 'PATCH',
+                    body: JSON.stringify({
+                      full_name: editingAdmin.full_name,
+                      username: editingAdmin.username,
+                      email: editingAdmin.email,
+                      admin_role_id: editingAdmin.role === 'owner' ? undefined : Number(editingAdmin.admin_role_id),
+                      status: editingAdmin.status,
+                      notes: editingAdmin.notes || '',
+                      password: editingAdmin.password?.trim().length >= 8 ? editingAdmin.password.trim() : undefined,
+                    }),
+                  });
+                  setEditingAdmin(null);
+                  await loadAllAdminData();
+                  flash('Administrator details & RBAC role updated');
+                });
+                setBusyAction(null);
+              }}
+              className="space-y-3"
+            >
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-slate-400 mb-1">Full Name</label>
+                  <input
+                    type="text"
+                    required
+                    value={editingAdmin.full_name || ''}
+                    onChange={(e) => setEditingAdmin((p: any) => ({ ...p, full_name: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Username</label>
+                  <input
+                    type="text"
+                    required
+                    value={editingAdmin.username || ''}
+                    onChange={(e) => setEditingAdmin((p: any) => ({ ...p, username: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Email</label>
+                  <input
+                    type="email"
+                    required
+                    value={editingAdmin.email || ''}
+                    onChange={(e) => setEditingAdmin((p: any) => ({ ...p, email: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Account Status</label>
+                  <select
+                    disabled={editingAdmin.role === 'owner'}
+                    value={editingAdmin.status || 'active'}
+                    onChange={(e) => setEditingAdmin((p: any) => ({ ...p, status: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] disabled:opacity-60"
+                  >
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                    <option value="deactivated">Deactivated</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">RBAC Role</label>
+                  <select
+                    disabled={editingAdmin.role === 'owner'}
+                    value={String(editingAdmin.admin_role_id || '')}
+                    onChange={(e) => setEditingAdmin((p: any) => ({ ...p, admin_role_id: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D] disabled:opacity-60"
+                  >
+                    {rolesList.map((r: any) => (
+                      <option key={r.id} value={String(r.id)} disabled={r.slug === 'super_admin' && editingAdmin.role !== 'owner'}>
+                        {r.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-slate-400 mb-1">Reset Password (optional, min 8 chars)</label>
+                  <input
+                    type="password"
+                    placeholder="Leave blank to keep current"
+                    value={editingAdmin.password || ''}
+                    onChange={(e) => setEditingAdmin((p: any) => ({ ...p, password: e.target.value }))}
+                    className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                  />
+                </div>
+              </div>
+              <div>
+                <label className="block text-slate-400 mb-1">Scope Notes</label>
+                <textarea
+                  rows={2}
+                  value={editingAdmin.notes || ''}
+                  onChange={(e) => setEditingAdmin((p: any) => ({ ...p, notes: e.target.value }))}
+                  className="w-full px-3 py-2 rounded-xl bg-[#111319] border border-[#2A2F3D]"
+                />
+              </div>
+              <div className="flex justify-end gap-2 pt-1">
+                <button type="button" onClick={() => setEditingAdmin(null)} className="px-4 py-2 rounded-xl bg-white/5 cursor-pointer">
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={busyAction === `edit-adm-${editingAdmin.id}`}
+                  className="px-5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
+                >
+                  {busyAction === `edit-adm-${editingAdmin.id}` ? 'Saving...' : 'Save Administrator'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* Administrator Activity & Scope Inspection Modal */}
+      {adminActivityModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-3xl max-h-[90vh] overflow-y-auto bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-5 text-xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">
+                  Administrator Activity · {adminActivityModal.admin?.full_name}
+                </h3>
+                <p className="text-slate-400">
+                  {adminActivityModal.admin?.email} ·{' '}
+                  {adminActivityModal.admin?.role_name || adminActivityModal.admin?.role} ·{' '}
+                  {adminActivityModal.admin?.status}
+                </p>
+              </div>
+              <button type="button" onClick={() => setAdminActivityModal(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-2">
+                <p className="font-bold text-slate-200">
+                  Assigned Devices ({(adminActivityModal.devices || []).length})
+                </p>
+                {(adminActivityModal.devices || []).length === 0 ? (
+                  <p className="text-slate-400">No devices assigned.</p>
+                ) : (
+                  <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                    {adminActivityModal.devices.map((d: any) => (
+                      <div key={d.id} className="flex items-center justify-between gap-2">
+                        <span className="font-mono-num text-white">{d.device_uid} · {d.device_name}</span>
+                        <span className={d.is_active ? 'text-[#00A878]' : 'text-[#FF444F]'}>
+                          {d.is_active ? d.verification_status : 'inactive'}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+
+              <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-2">
+                <p className="font-bold text-slate-200">
+                  Managed Clients ({(adminActivityModal.clients || []).length})
+                </p>
+                {(adminActivityModal.clients || []).length === 0 ? (
+                  <p className="text-slate-400">No clients within scope.</p>
+                ) : (
+                  <div className="space-y-1.5 max-h-40 overflow-y-auto">
+                    {adminActivityModal.clients.map((c: any) => (
+                      <div key={c.id} className="flex items-center justify-between gap-2">
+                        <span className="truncate">{c.full_name} ({c.email})</span>
+                        <span className="font-mono-num text-slate-400 shrink-0">{c.deriv_client_id || `#${c.id}`}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-2">
+              <p className="font-bold text-slate-200">Recent Sessions ({(adminActivityModal.sessions || []).length})</p>
+              <div className="max-h-36 overflow-y-auto divide-y divide-[#2A2F3D]">
+                {(adminActivityModal.sessions || []).map((s: any) => (
+                  <div key={s.session_jti} className="py-1.5 flex items-center justify-between gap-2">
+                    <span className="font-mono-num">
+                      {s.device_uid || 'Super/No Device'} · IP {s.ip_address || '—'}
+                    </span>
+                    <span className={s.status === 'active' ? 'text-[#00A878] font-bold' : 'text-slate-400'}>
+                      {s.status} · {new Date(s.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D] space-y-2">
+              <p className="font-bold text-slate-200">Admin Audit History ({(adminActivityModal.auditLogs || []).length})</p>
+              <div className="max-h-44 overflow-y-auto divide-y divide-[#2A2F3D]">
+                {(adminActivityModal.auditLogs || []).map((l: any) => (
+                  <div key={l.id} className="py-1.5 flex items-center justify-between gap-2">
+                    <span>
+                      <strong>{l.action}</strong> · {l.target_type} #{l.target_id}
+                    </span>
+                    <span className="text-slate-400 shrink-0">
+                      {l.action_result || 'success'} · {new Date(l.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Device Access History Modal */}
+      {deviceHistoryModal && (
+        <div className="fixed inset-0 z-50 bg-black/75 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="w-full max-w-2xl max-h-[85vh] overflow-y-auto bg-[#181C25] border border-[#2A2F3D] rounded-2xl p-6 space-y-4 text-xs">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="font-display text-base font-bold">
+                  Device Activity · {deviceHistoryModal.device?.device_name}
+                </h3>
+                <p className="font-mono-num text-slate-400">
+                  {deviceHistoryModal.device?.device_uid} · Status:{' '}
+                  {deviceHistoryModal.device?.is_active ? deviceHistoryModal.device?.verification_status : 'inactive'}
+                </p>
+              </div>
+              <button type="button" onClick={() => setDeviceHistoryModal(null)} className="text-slate-400 hover:text-white cursor-pointer">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="p-3.5 rounded-xl bg-[#111319] border border-[#2A2F3D] divide-y divide-[#2A2F3D] max-h-96 overflow-y-auto">
+              {(deviceHistoryModal.logs || []).length === 0 ? (
+                <p className="text-slate-400 py-4 text-center">No device events recorded yet.</p>
+              ) : (
+                deviceHistoryModal.logs.map((ev: any) => (
+                  <div key={ev.id} className="py-2 space-y-0.5">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-bold text-white">{ev.event_type}</span>
+                      <span className="font-mono-num text-[11px] text-slate-400">
+                        {new Date(ev.created_at).toLocaleString()}
+                      </span>
+                    </div>
+                    <p className="text-[11px] text-slate-400">
+                      {ev.admin_email || 'System'} · IP {ev.ip_address || '—'} · {ev.details_json || ''}
+                    </p>
+                  </div>
+                ))
+              )}
+            </div>
           </div>
         </div>
       )}

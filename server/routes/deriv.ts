@@ -18,6 +18,7 @@ import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth
 import { derivWs, derivRestRequest, getActiveDerivAppId, OtpDerivClient } from '../deriv-client.ts';
 import { getDecryptedAccountToken } from '../trade-execution.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
+import { bindClientToVerifiedRequestDevice } from '../rbac-device.ts';
 
 const router = Router();
 const usedStateJtis = new Map<string, number>();
@@ -459,6 +460,7 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       }
 
       const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
+      await bindClientToVerifiedRequestDevice(req, session.user.id, 'deriv_oauth_legacy').catch(() => {});
       await logSecurityEvent(session.user.id, 'deriv_oauth_legacy_login', req.ip, {
         accounts: entries.length,
         isNew: session.isNew,
@@ -717,6 +719,7 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
     }
 
     const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
+    await bindClientToVerifiedRequestDevice(req, session.user.id, 'deriv_oauth2_pkce').catch(() => {});
     await logSecurityEvent(session.user.id, 'deriv_oauth2_pkce_login', req.ip, {
       accounts: derivAccounts.length,
       isNew: session.isNew,
@@ -812,6 +815,7 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
     } else {
       await execute('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [req.user!.id]);
     }
+    await bindClientToVerifiedRequestDevice(req, req.user!.id, 'deriv_oauth_exchange').catch(() => {});
 
     const updated = await query(
       `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
@@ -882,6 +886,7 @@ router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, r
     } catch {
       // ignore if token lacks read scope or timed out
     }
+    await bindClientToVerifiedRequestDevice(req, req.user!.id, 'deriv_pat_connect').catch(() => {});
 
     const user = await queryOne<{ email: string; full_name: string }>('SELECT email, full_name FROM users WHERE id = $1', [
       req.user!.id,

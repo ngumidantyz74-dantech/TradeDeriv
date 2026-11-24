@@ -17,9 +17,11 @@ import {
   ADMIN_SESSION_COOKIE,
   getAdminCookieOptions,
   requireAdmin,
-  signUserToken,
+  extractRawToken,
+  signAdminSessionToken,
   signAdminReauthToken,
   verifyAdminReauthToken,
+  verifyJwtToken,
   invalidateAuthUserCache,
   type AuthRequest,
 } from '../middleware/auth.ts';
@@ -28,8 +30,25 @@ import { isVirtualDerivAccount } from './deriv.ts';
 import { closeOrderById } from '../trade-execution.ts';
 import { invalidateInstrumentsCache } from './market.ts';
 import { invalidateBotStrategiesCache } from './orders.ts';
+import adminRbacDevicesRouter from './admin-rbac-devices.ts';
+import {
+  ALL_PERMISSION_KEYS,
+  assertAdminCanAccessClient,
+  buildScopedClientCondition,
+  createAdminSessionRecord,
+  getAdminRequestContext,
+  hasPermission,
+  invalidateAdminSecurityCaches,
+  loadAdminSecurityProfile,
+  logDeviceActivity,
+  requirePermission,
+  requireSuperAdmin,
+  resolveVerifiedDevice,
+  revokeAdminSessionByJti,
+} from '../rbac-device.ts';
 
 const router = Router();
+router.use(adminRbacDevicesRouter);
 
 const ADMIN_ORDER_COLS = `vo.id, vo.user_id, vo.symbol, vo.side, vo.contract_type, vo.lots, vo.stake, vo.multiplier, vo.entry_price, vo.current_price, vo.exit_price, vo.pnl, vo.sl_usd, vo.tp_usd, vo.sl_price, vo.tp_price, vo.barrier, vo.duration, vo.duration_unit, vo.execution_mode, vo.connected_account_id, vo.account_mode, vo.source, vo.strategy_key, vo.timeframe, vo.notes, vo.deriv_contract_id, vo.status, vo.opened_at, vo.closed_at`;
 const BOT_STRATEGY_COLS = `id, name, slug, category, symbol, contract_type, description, win_rate_est, rating, is_premium, is_active, config_json, updated_at, created_at`;
@@ -78,26 +97,61 @@ router.post('/admin/bootstrap', requireDb, async (req, res) => {
 
   const cleanEmail = String(email).trim().toLowerCase();
   const hash = await hashPasswordArgon2id(String(password));
+  const superRole = await queryOne<{ id: number }>("SELECT id FROM admin_roles WHERE slug = 'super_admin' LIMIT 1");
 
   const owner = await queryOne<any>(
-    `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
-     VALUES ($1, $2, $3, 'owner', 'active', TRUE, 100000.00, $4)
-     RETURNING id, email, full_name, role`,
-    [cleanEmail, hash, String(full_name), `OWNER-${randomId(3).toUpperCase()}`]
+    `INSERT INTO users (email, password_hash, full_name, role, admin_role_id, status, email_verified, virtual_workspace_balance, deriv_client_id)
+     VALUES ($1, $2, $3, 'owner', $4, 'active', TRUE, 100000.00, $5)
+     RETURNING id, email, full_name, role, admin_role_id`,
+    [cleanEmail, hash, String(full_name), superRole?.id ?? null, `OWNER-${randomId(3).toUpperCase()}`]
   );
 
-  const token = signUserToken({ id: owner.id, email: owner.email, role: owner.role }, '12h');
+  await execute(
+    `INSERT INTO administrators (user_id, admin_role_id, username, status, notes)
+     VALUES ($1, $2, $3, 'active', 'Primary system owner')
+     ON CONFLICT (user_id) DO NOTHING`,
+    [owner.id, superRole?.id ?? null, cleanEmail.split('@')[0]]
+  );
+
+  const devCheck = await resolveVerifiedDevice(req);
+  const deviceId = devCheck.ok && devCheck.device ? devCheck.device.id : null;
+  const ip = reqIp(req);
+  const ua = String(req.headers['user-agent'] || '').slice(0, 240);
+  const jti = await createAdminSessionRecord({
+    adminUserId: owner.id,
+    deviceId,
+    ipAddress: ip,
+    userAgent: ua,
+  });
+
+  const token = signAdminSessionToken({ id: owner.id, email: owner.email, role: owner.role, jti }, '12h');
   res.cookie(ADMIN_SESSION_COOKIE, token, getAdminCookieOptions(req));
   await logAdminAction(owner.id, 'owner_bootstrap', 'users', String(owner.id), { email: cleanEmail }, {
     previousValue: 'none',
     newValue: cleanEmail,
-    ipAddress: reqIp(req),
+    ipAddress: ip,
     actionResult: 'success',
+    deviceId,
+    sessionJti: jti,
+    actorRole: 'super_admin',
   });
 
   res.status(201).json({
     token,
-    user: { id: owner.id, email: owner.email, full_name: owner.full_name, role: owner.role },
+    user: {
+      id: owner.id,
+      email: owner.email,
+      full_name: owner.full_name,
+      role: owner.role,
+      status: 'active',
+      admin_role_id: owner.admin_role_id,
+      admin_role_name: 'Super Admin',
+      admin_role_slug: 'super_admin',
+    },
+    permissions: [...ALL_PERMISSION_KEYS],
+    isSuperAdmin: true,
+    currentDevice: devCheck.ok ? devCheck.device : null,
+    assignedDeviceIds: [],
   });
 });
 
@@ -109,6 +163,7 @@ router.post('/admin/login', requireDb, async (req, res) => {
   }
   const cleanEmail = String(email).trim().toLowerCase();
   const ip = reqIp(req);
+  const ua = String(req.headers['user-agent'] || '').slice(0, 240);
 
   // Progressive rate limiting / temporary lockout (5 failures in 15 mins per IP or email)
   const failCountRow = await queryOne<{ cnt: number }>(
@@ -131,7 +186,7 @@ router.post('/admin/login', requireDb, async (req, res) => {
   }
 
   const user = await queryOne<any>(
-    "SELECT id, email, full_name, role, status, password_hash FROM users WHERE email = $1 AND role IN ('admin', 'owner')",
+    "SELECT id, email, full_name, role, status, admin_role_id, password_hash FROM users WHERE email = $1 AND role IN ('admin', 'owner')",
     [cleanEmail]
   );
   if (!user) {
@@ -142,11 +197,15 @@ router.post('/admin/login', requireDb, async (req, res) => {
     res.status(401).json({ error: 'Invalid administrator credentials' });
     return;
   }
-  if (user.status === 'suspended' || user.status === 'closed') {
+  if (user.status !== 'active') {
     await execute(
       'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
       [cleanEmail, ip, `account_${user.status}`]
     );
+    await logAdminAction(user.id, 'blocked_login_inactive_admin', 'users', String(user.id), { status: user.status }, {
+      ipAddress: ip,
+      actionResult: 'denied',
+    });
     res.status(403).json({ error: `Administrator account is ${user.status}` });
     return;
   }
@@ -166,36 +225,182 @@ router.post('/admin/login', requireDb, async (req, res) => {
     await execute('UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2', [upgraded, user.id]);
   }
 
+  invalidateAdminSecurityCaches({ adminUserId: user.id });
+  const profile = await loadAdminSecurityProfile(user.id);
+  if (!profile) {
+    res.status(403).json({ error: 'Administrator security profile unavailable.' });
+    return;
+  }
+
+  const devCheck = await resolveVerifiedDevice(req);
+
+  // Strict Device-Bound Authentication Gate for Delegated Administrators
+  if (!profile.isSuperAdmin) {
+    if (!devCheck.ok || !devCheck.device) {
+      await execute(
+        'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
+        [cleanEmail, ip, `blocked_unverified_device:${devCheck.reason}`]
+      );
+      await logDeviceActivity({
+        deviceId: devCheck.device?.id ?? null,
+        adminUserId: user.id,
+        actorAdminId: user.id,
+        eventType: 'blocked_login_unverified_device',
+        ipAddress: ip,
+        userAgent: ua,
+        details: { reason: devCheck.reason, email: cleanEmail },
+      });
+      await logAdminAction(user.id, 'blocked_login_unverified_device', 'registered_devices', String(devCheck.device?.id ?? 'unverified'), {
+        reason: devCheck.reason,
+      }, {
+        ipAddress: ip,
+        actionResult: 'denied',
+        actorRole: profile.adminRoleSlug,
+      });
+
+      const isRevoked = devCheck.reason === 'device_revoked_or_inactive';
+      res.status(403).json({
+        error: isRevoked
+          ? 'This device has been revoked or deactivated by the Super Admin.'
+          : 'Unregistered or unverified device. Enroll this device using a Super Admin enrollment token before signing in.',
+        code: isRevoked ? 'DEVICE_REVOKED' : 'DEVICE_UNAUTHORIZED',
+        deviceReason: devCheck.reason,
+      });
+      return;
+    }
+
+    if (!profile.assignedDeviceIds.includes(devCheck.device.id)) {
+      await execute(
+        'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, FALSE, $3)',
+        [cleanEmail, ip, 'blocked_unassigned_device']
+      );
+      await logDeviceActivity({
+        deviceId: devCheck.device.id,
+        adminUserId: user.id,
+        actorAdminId: user.id,
+        eventType: 'blocked_login_unassigned_device',
+        ipAddress: ip,
+        userAgent: ua,
+        details: { deviceUid: devCheck.device.device_uid, email: cleanEmail },
+      });
+      await logAdminAction(user.id, 'blocked_login_unassigned_device', 'registered_devices', String(devCheck.device.id), {
+        deviceUid: devCheck.device.device_uid,
+      }, {
+        ipAddress: ip,
+        actionResult: 'denied',
+        deviceId: devCheck.device.id,
+        actorRole: profile.adminRoleSlug,
+      });
+
+      res.status(403).json({
+        error: `Device ${devCheck.device.device_uid} is not assigned to administrator ${cleanEmail}.`,
+        code: 'DEVICE_NOT_ASSIGNED',
+      });
+      return;
+    }
+  }
+
+  const boundDeviceId = devCheck.ok && devCheck.device ? devCheck.device.id : null;
+
+  await execute('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [user.id]);
+  if (boundDeviceId) {
+    await execute(
+      'UPDATE registered_devices SET last_seen_at = NOW(), last_ip = $1, updated_at = NOW() WHERE id = $2',
+      [ip, boundDeviceId]
+    );
+    await logDeviceActivity({
+      deviceId: boundDeviceId,
+      adminUserId: user.id,
+      actorAdminId: user.id,
+      eventType: 'admin_login',
+      ipAddress: ip,
+      userAgent: ua,
+      details: { role: profile.adminRoleSlug },
+    });
+  }
+
   await execute(
     'INSERT INTO admin_login_attempts (email, ip_address, success, reason) VALUES ($1, $2, TRUE, $3)',
-    [cleanEmail, ip, 'authenticated']
+    [cleanEmail, ip, boundDeviceId ? `authenticated_dev_${boundDeviceId}` : 'authenticated_super_admin']
   );
 
-  const token = signUserToken({ id: user.id, email: user.email, role: user.role }, '12h');
+  const jti = await createAdminSessionRecord({
+    adminUserId: user.id,
+    deviceId: boundDeviceId,
+    ipAddress: ip,
+    userAgent: ua,
+  });
+
+  const token = signAdminSessionToken({ id: user.id, email: user.email, role: user.role, jti }, '12h');
   res.cookie(ADMIN_SESSION_COOKIE, token, getAdminCookieOptions(req));
-  await logAdminAction(user.id, 'owner_login', 'users', String(user.id), { email: cleanEmail }, {
+  await logAdminAction(user.id, profile.isSuperAdmin ? 'owner_login' : 'admin_login', 'users', String(user.id), {
+    email: cleanEmail,
+    deviceId: boundDeviceId,
+  }, {
     ipAddress: ip,
     actionResult: 'success',
+    deviceId: boundDeviceId,
+    sessionJti: jti,
+    actorRole: profile.adminRoleSlug,
   });
+
   res.json({
     token,
-    user: { id: user.id, email: user.email, full_name: user.full_name, role: user.role },
+    user: {
+      id: user.id,
+      email: user.email,
+      full_name: user.full_name,
+      role: user.role,
+      status: user.status,
+      admin_role_id: profile.adminRoleId,
+      admin_role_name: profile.adminRoleName,
+      admin_role_slug: profile.adminRoleSlug,
+    },
+    permissions: profile.permissions,
+    isSuperAdmin: profile.isSuperAdmin,
+    currentDevice: devCheck.ok ? devCheck.device : null,
+    assignedDeviceIds: profile.assignedDeviceIds,
   });
 });
 
 router.get('/admin/me', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  const adminUser = await queryOne<{ id: number; email: string; full_name: string; role: string }>(
-    'SELECT id, email, full_name, role FROM users WHERE id = $1',
-    [req.user!.id]
-  );
-  if (!adminUser) {
-    res.status(401).json({ error: 'Admin session expired' });
-    return;
-  }
-  res.json({ user: adminUser });
+  const ctx = getAdminRequestContext(req)!;
+  res.json({
+    user: {
+      id: ctx.userId,
+      email: ctx.email,
+      full_name: ctx.fullName,
+      role: ctx.role,
+      status: 'active',
+      admin_role_id: ctx.adminRoleId,
+      admin_role_name: ctx.adminRoleName,
+      admin_role_slug: ctx.adminRoleSlug,
+    },
+    permissions: ctx.permissions,
+    isSuperAdmin: ctx.isSuperAdmin,
+    currentDevice: ctx.deviceId
+      ? {
+          id: ctx.deviceId,
+          device_uid: ctx.deviceUid,
+          device_name: ctx.deviceName,
+        }
+      : null,
+    assignedDeviceIds: ctx.assignedDeviceIds,
+  });
 });
 
-router.post('/admin/logout', (req, res) => {
+router.post('/admin/logout', async (req, res) => {
+  try {
+    const { token: rawToken } = extractRawToken(req, true);
+    if (rawToken) {
+      const decoded = verifyJwtToken(rawToken);
+      if (decoded?.jti) {
+        await revokeAdminSessionByJti(decoded.jti, decoded.id, 'admin_logout');
+      }
+    }
+  } catch {
+    // ignore malformed token during logout
+  }
   const opts = getAdminCookieOptions(req);
   res.clearCookie(ADMIN_SESSION_COOKIE, {
     path: '/',
@@ -234,50 +439,7 @@ router.post('/admin/reauth', requireDb, requireAdmin, async (req: AuthRequest, r
   res.json({ reauthToken, expiresInSeconds: 600 });
 });
 
-router.get('/admin/admins', requireDb, requireAdmin, async (_req, res) => {
-  const admins = await query(
-    `SELECT id, email, full_name, role, status, created_at
-     FROM users
-     WHERE role IN ('owner', 'admin')
-     ORDER BY id ASC`
-  );
-  res.json({ admins });
-});
-
-router.post('/admin/admins', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  if (req.user!.role !== 'owner') {
-    res.status(403).json({ error: 'Only the primary Owner can provision additional administrator accounts.' });
-    return;
-  }
-  if (!checkReauthHeader(req, res)) return;
-  const { email, password, full_name = 'Operations Admin' } = req.body || {};
-  if (!email || !password || String(password).length < 8) {
-    res.status(400).json({ error: 'Email and strong password (min 8 chars) are required' });
-    return;
-  }
-  const cleanEmail = String(email).trim().toLowerCase();
-  const exists = await queryOne('SELECT id FROM users WHERE email = $1', [cleanEmail]);
-  if (exists) {
-    res.status(409).json({ error: 'An account with this email already exists' });
-    return;
-  }
-  const hash = await hashPasswordArgon2id(String(password));
-  const created = await queryOne<any>(
-    `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
-     VALUES ($1, $2, $3, 'admin', 'active', TRUE, 0, $4)
-     RETURNING id, email, full_name, role, status, created_at`,
-    [cleanEmail, hash, String(full_name), `ADM-${randomId(3).toUpperCase()}`]
-  );
-  await logAdminAction(req.user!.id, 'create_admin', 'users', String(created.id), { email: cleanEmail }, {
-    previousValue: 'none',
-    newValue: `${cleanEmail} (admin)`,
-    ipAddress: reqIp(req),
-    actionResult: 'success',
-  });
-  res.status(201).json({ admin: created });
-});
-
-router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
+router.get('/admin/diagnostics', requireDb, requireAdmin, requireSuperAdmin, async (_req, res) => {
   const [database, loginAttempts, errorLogs, securityLogs] = await Promise.all([
     checkDatabaseHealth(),
     query('SELECT id, email, ip_address, success, reason, created_at FROM admin_login_attempts ORDER BY id DESC LIMIT 50'),
@@ -299,19 +461,26 @@ router.get('/admin/diagnostics', requireDb, requireAdmin, async (_req, res) => {
   });
 });
 
-router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
+router.get('/admin/overview', requireDb, requireAdmin, requirePermission('dashboard.view'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
+  const kpiParams: unknown[] = [];
+  const kpiScopeWhere = buildScopedClientCondition(ctx, 'u', kpiParams);
+
   const totalUsersRow = await queryOne<{ c: number }>(
-    "SELECT COUNT(*)::int as c FROM users WHERE role NOT IN ('owner', 'admin')"
+    `SELECT COUNT(*)::int as c FROM users u WHERE ${kpiScopeWhere}`,
+    kpiParams
   );
   const realAccountsRow = await queryOne<{ c: number }>(
     `SELECT COUNT(*)::int as c FROM connected_accounts ca
      JOIN users u ON ca.user_id = u.id
-     WHERE ca.is_virtual = FALSE AND ca.status = 'active' AND u.role NOT IN ('owner', 'admin')`
+     WHERE ca.is_virtual = FALSE AND ca.status = 'active' AND ${kpiScopeWhere}`,
+    kpiParams
   );
   const demoAccountsRow = await queryOne<{ c: number }>(
     `SELECT COUNT(*)::int as c FROM connected_accounts ca
      JOIN users u ON ca.user_id = u.id
-     WHERE ca.is_virtual = TRUE AND ca.status = 'active' AND u.role NOT IN ('owner', 'admin')`
+     WHERE ca.is_virtual = TRUE AND ca.status = 'active' AND ${kpiScopeWhere}`,
+    kpiParams
   );
   const orderStats =
     (await queryOne<any>(
@@ -322,7 +491,8 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
         COALESCE(SUM(CASE WHEN vo.status = 'CLOSED' THEN vo.pnl ELSE 0 END), 0) as "realizedPnl"
        FROM virtual_orders vo
        JOIN users u ON vo.user_id = u.id
-       WHERE u.role NOT IN ('owner', 'admin')`
+       WHERE ${kpiScopeWhere}`,
+      kpiParams
     )) || {};
 
   const cashierStats =
@@ -333,77 +503,127 @@ router.get('/admin/overview', requireDb, requireAdmin, async (_req, res) => {
         COALESCE(SUM(CASE WHEN ct.tx_type = 'transfer' THEN ct.amount ELSE 0 END), 0) as "totalTransfers"
        FROM cashier_transactions ct
        JOIN users u ON ct.user_id = u.id
-       WHERE u.role NOT IN ('owner', 'admin')`
+       WHERE ${kpiScopeWhere}`,
+      kpiParams
     )) || {};
 
-  const users = await query(
-    `SELECT id, email, full_name, phone, country, role, status,
-            COALESCE(trading_suspended, FALSE) as trading_suspended, locked_until,
-            email_verified, preferred_currency,
-            virtual_workspace_balance, demo_wallets_json, real_wallets_json,
-            exchange_balances_json, real_exchange_balances_json, deriv_nickname, deriv_client_id,
-            COALESCE(last_login_at, updated_at, created_at) as last_login_at, created_at
-     FROM users
-     WHERE role NOT IN ('owner', 'admin')
-     ORDER BY COALESCE(last_login_at, updated_at, created_at) DESC, id DESC LIMIT 100`
-  );
-  const connectedAccounts = await query(
-    `SELECT ca.id, ca.user_id, ca.deriv_login_id, ca.deriv_account_id, ca.account_type, ca.platform, ca.currency,
-            ca.is_virtual, ca.last_known_balance as balance, ca.last_known_balance,
-            COALESCE(ca.balance_locked_by_admin, FALSE) as balance_locked_by_admin,
-            ca.status, ca.scopes, ca.created_at, ca.updated_at,
-            u.email as user_email, u.full_name as user_name, u.deriv_client_id,
-            COALESCE(u.last_login_at, ca.updated_at, ca.created_at) as last_login_at
-     FROM connected_accounts ca
-     JOIN users u ON ca.user_id = u.id
-     WHERE u.role NOT IN ('owner', 'admin')
-     ORDER BY COALESCE(u.last_login_at, ca.updated_at, ca.created_at) DESC, ca.id DESC LIMIT 120`
-  );
-  const strategies = await query(`SELECT ${BOT_STRATEGY_COLS} FROM bot_strategies ORDER BY id DESC LIMIT 100`);
-  const orders = await query(
-    `SELECT ${ADMIN_ORDER_COLS}, u.email as user_email
-     FROM virtual_orders vo
-     JOIN users u ON vo.user_id = u.id
-     WHERE u.role NOT IN ('owner', 'admin')
-     ORDER BY vo.id DESC LIMIT 60`
-  );
-  const rawInstruments = await query(
-    `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
-            m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
-     FROM market_instruments m
-     LEFT JOIN market_data_cache c ON m.symbol = c.symbol
-     ORDER BY m.category, m.display_name
-     LIMIT 250`
-  );
+  const canViewUsers = hasPermission(ctx, 'users.view') || hasPermission(ctx, 'clients.view');
+  const users = canViewUsers
+    ? await query(
+        `SELECT u.id, u.email, u.full_name, u.phone, u.country, u.role, u.status,
+                COALESCE(u.trading_suspended, FALSE) as trading_suspended, u.locked_until,
+                u.email_verified, u.preferred_currency,
+                u.virtual_workspace_balance, u.demo_wallets_json, u.real_wallets_json,
+                u.exchange_balances_json, u.real_exchange_balances_json, u.deriv_nickname, u.deriv_client_id,
+                u.originating_device_id, u.assigned_admin_id,
+                COALESCE(u.ownership_verification_status, 'pending_verification') as ownership_verification_status,
+                rd.device_uid as originating_device_uid, rd.device_name as originating_device_name,
+                adm.email as assigned_admin_email, adm.full_name as assigned_admin_name,
+                COALESCE(u.last_login_at, u.updated_at, u.created_at) as last_login_at, u.created_at
+         FROM users u
+         LEFT JOIN registered_devices rd ON rd.id = u.originating_device_id
+         LEFT JOIN users adm ON adm.id = u.assigned_admin_id
+         WHERE ${kpiScopeWhere}
+         ORDER BY COALESCE(u.last_login_at, u.updated_at, u.created_at) DESC, u.id DESC LIMIT 100`,
+        kpiParams
+      )
+    : [];
+
+  const connectedAccounts = canViewUsers
+    ? await query(
+        `SELECT ca.id, ca.user_id, ca.deriv_login_id, ca.deriv_account_id, ca.account_type, ca.platform, ca.currency,
+                ca.is_virtual, ca.last_known_balance as balance, ca.last_known_balance,
+                COALESCE(ca.balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+                ca.status, ca.scopes, ca.created_at, ca.updated_at,
+                u.email as user_email, u.full_name as user_name, u.deriv_client_id,
+                COALESCE(u.last_login_at, ca.updated_at, ca.created_at) as last_login_at
+         FROM connected_accounts ca
+         JOIN users u ON ca.user_id = u.id
+         WHERE ${kpiScopeWhere}
+         ORDER BY COALESCE(u.last_login_at, ca.updated_at, ca.created_at) DESC, ca.id DESC LIMIT 120`,
+        kpiParams
+      )
+    : [];
+
+  const canViewStrategies = hasPermission(ctx, 'strategies.manage');
+  const strategies = canViewStrategies
+    ? await query(`SELECT ${BOT_STRATEGY_COLS} FROM bot_strategies ORDER BY id DESC LIMIT 100`)
+    : [];
+
+  const canViewOrders = hasPermission(ctx, 'clients.view') || hasPermission(ctx, 'reports.view') || hasPermission(ctx, 'users.view');
+  const orders = canViewOrders
+    ? await query(
+        `SELECT ${ADMIN_ORDER_COLS}, u.email as user_email
+         FROM virtual_orders vo
+         JOIN users u ON vo.user_id = u.id
+         WHERE ${kpiScopeWhere}
+         ORDER BY vo.id DESC LIMIT 60`,
+        kpiParams
+      )
+    : [];
+
+  const canViewMarkets = hasPermission(ctx, 'markets.manage');
+  const rawInstruments = canViewMarkets
+    ? await query(
+        `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
+                m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
+         FROM market_instruments m
+         LEFT JOIN market_data_cache c ON m.symbol = c.symbol
+         ORDER BY m.category, m.display_name
+         LIMIT 250`
+      )
+    : [];
   const latestTicks = derivWs.getAllLatestTicks();
   const instruments = rawInstruments.map((inst: any) => ({
     ...inst,
     price: latestTicks[inst.symbol]?.quote ?? inst.price ?? 0,
     change_pct: derivWs.getChangePct(inst.symbol),
   }));
-  const auditLogs = await query(
-    `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
-            l.ip_address, l.action_result, l.details_json, l.created_at,
-            a.email as admin_email, a.full_name as admin_name
-     FROM administrator_audit_logs l
-     LEFT JOIN users a ON l.admin_user_id = a.id
-     ORDER BY l.id DESC LIMIT 50`
-  );
-  const emailLogs = await query(
-    'SELECT id, recipient_email, subject, template, status, error_message, created_at FROM email_logs ORDER BY id DESC LIMIT 40'
-  );
-  const branding = await getSetting('branding', {});
-  const global = await getSetting('global', {});
-  const commissions = await getSetting('commissions', {});
-  const tradingEngine = await getSetting('trading_engine', {
-    botWinRatePct: 76,
-    analyserWinRatePct: 82,
-    accuWinRatePct: 78,
-    manualOptionsWinRatePct: 68,
-    siteSettlementForLockedReal: true,
-    liveMicroTickEnabled: true,
-  });
-  const announcements = await getSetting<{ items?: any[] }>('announcements', { items: [] });
+
+  const canViewAudit = hasPermission(ctx, 'audit_logs.view');
+  const auditLogs = canViewAudit
+    ? ctx.isSuperAdmin
+      ? await query(
+          `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
+                  l.ip_address, l.action_result, l.details_json, l.device_id, l.session_jti, l.actor_role, l.created_at,
+                  a.email as admin_email, a.full_name as admin_name
+           FROM administrator_audit_logs l
+           LEFT JOIN users a ON l.admin_user_id = a.id
+           ORDER BY l.id DESC LIMIT 60`
+        )
+      : await query(
+          `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
+                  l.ip_address, l.action_result, l.details_json, l.device_id, l.session_jti, l.actor_role, l.created_at,
+                  a.email as admin_email, a.full_name as admin_name
+           FROM administrator_audit_logs l
+           LEFT JOIN users a ON l.admin_user_id = a.id
+           WHERE l.admin_user_id = $1
+           ORDER BY l.id DESC LIMIT 60`,
+          [ctx.userId]
+        )
+    : [];
+
+  const emailLogs = ctx.isSuperAdmin
+    ? await query(
+        'SELECT id, recipient_email, subject, template, status, error_message, created_at FROM email_logs ORDER BY id DESC LIMIT 40'
+      )
+    : [];
+
+  const canViewSettings = hasPermission(ctx, 'settings.manage');
+  const branding = canViewSettings ? await getSetting('branding', {}) : {};
+  const global = ctx.isSuperAdmin ? await getSetting('global', {}) : {};
+  const commissions = ctx.isSuperAdmin ? await getSetting('commissions', {}) : {};
+  const tradingEngine = hasPermission(ctx, 'engine.manage')
+    ? await getSetting('trading_engine', {
+        botWinRatePct: 76,
+        analyserWinRatePct: 82,
+        accuWinRatePct: 78,
+        manualOptionsWinRatePct: 68,
+        siteSettlementForLockedReal: true,
+        liveMicroTickEnabled: true,
+      })
+    : null;
+  const announcements = canViewSettings ? await getSetting<{ items?: any[] }>('announcements', { items: [] }) : { items: [] };
 
   res.json({
     kpis: {
@@ -458,7 +678,7 @@ router.put('/admin/settings/admin-credentials', requireDb, requireAdmin, async (
   res.json({ ok: true });
 });
 
-router.put('/admin/settings/branding', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.put('/admin/settings/branding', requireDb, requireAdmin, requirePermission('settings.manage'), async (req: AuthRequest, res) => {
   const current = await getSetting('branding', {});
   const updated = { ...current, ...(req.body || {}) };
   await setSetting('branding', updated);
@@ -466,7 +686,7 @@ router.put('/admin/settings/branding', requireDb, requireAdmin, async (req: Auth
   res.json({ branding: updated });
 });
 
-router.put('/admin/settings/global', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.put('/admin/settings/global', requireDb, requireAdmin, requireSuperAdmin, async (req: AuthRequest, res) => {
   const payload = { ...(req.body || {}) };
   if (payload.derivAppId !== undefined) {
     const cleanId = String(payload.derivAppId).trim();
@@ -483,7 +703,7 @@ router.put('/admin/settings/global', requireDb, requireAdmin, async (req: AuthRe
   res.json({ global: updated });
 });
 
-router.get('/admin/settings/trading-engine', requireDb, requireAdmin, async (_req, res) => {
+router.get('/admin/settings/trading-engine', requireDb, requireAdmin, requirePermission('engine.manage'), async (_req, res) => {
   const tradingEngine = await getSetting('trading_engine', {
     botWinRatePct: 76,
     analyserWinRatePct: 82,
@@ -495,7 +715,7 @@ router.get('/admin/settings/trading-engine', requireDb, requireAdmin, async (_re
   res.json({ tradingEngine });
 });
 
-router.put('/admin/settings/trading-engine', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.put('/admin/settings/trading-engine', requireDb, requireAdmin, requirePermission('engine.manage'), async (req: AuthRequest, res) => {
   const b = req.body || {};
   const current = await getSetting<any>('trading_engine', {});
   const clamp = (v: unknown, def: number) => Math.max(5, Math.min(96, Number(v ?? def)));
@@ -517,7 +737,7 @@ router.put('/admin/settings/trading-engine', requireDb, requireAdmin, async (req
 });
 
 // Deriv Commissions & App Markup — powered by real Deriv Partners REST GET /applications/v1/markup-statistics
-router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
+router.get('/admin/commissions', requireDb, requireAdmin, requireSuperAdmin, async (req, res) => {
   const dateFrom = String(req.query.date_from || new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10));
   const dateTo = String(req.query.date_to || new Date().toISOString().slice(0, 10));
   const commConfig = await getSetting<any>('commissions', {});
@@ -655,7 +875,7 @@ router.get('/admin/commissions', requireDb, requireAdmin, async (req, res) => {
   });
 });
 
-router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.put('/admin/commissions/config', requireDb, requireAdmin, requireSuperAdmin, async (req: AuthRequest, res) => {
   const { derivAppId, markupPercentage, affiliateLink, affiliateCode, affiliateToken, affiliateTierRate, ownerAdminToken } =
     req.body || {};
   if (derivAppId !== undefined && String(derivAppId).trim() !== '') {
@@ -698,36 +918,234 @@ router.put('/admin/commissions/config', requireDb, requireAdmin, async (req: Aut
   res.json({ config: updated });
 });
 
-// Users CRUD
-router.post('/admin/users', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  const { email, password = 'ChangeMe123!', full_name = 'New Trader', role = 'user', virtual_workspace_balance = 10000 } = req.body || {};
+// Scoped Users Search, Export & CRUD
+router.get('/admin/users', requireDb, requireAdmin, requirePermission('users.view'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
+  const q = typeof req.query.q === 'string' ? req.query.q.trim().toLowerCase() : '';
+  const statusFilter = typeof req.query.status === 'string' ? req.query.status.trim().toLowerCase() : '';
+  const limit = Math.min(200, Math.max(1, Number(req.query.limit || 80)));
+  const offset = Math.max(0, Number(req.query.offset || 0));
+
+  if (q && !hasPermission(ctx, 'users.search')) {
+    res.status(403).json({ error: "Permission 'users.search' is required to search user records.", code: 'PERMISSION_DENIED' });
+    return;
+  }
+
+  const params: unknown[] = [];
+  const where: string[] = [buildScopedClientCondition(ctx, 'u', params)];
+
+  if (q) {
+    params.push(`%${q}%`);
+    where.push(`(LOWER(u.email) LIKE $${params.length} OR LOWER(u.full_name) LIKE $${params.length} OR LOWER(COALESCE(u.deriv_client_id, '')) LIKE $${params.length})`);
+  }
+  if (statusFilter === 'active' || statusFilter === 'suspended') {
+    params.push(statusFilter);
+    where.push(`u.status = $${params.length}`);
+  } else if (statusFilter === 'trading_frozen') {
+    where.push('COALESCE(u.trading_suspended, FALSE) = TRUE');
+  }
+
+  params.push(limit, offset);
+  const users = await query(
+    `SELECT u.id, u.email, u.full_name, u.phone, u.country, u.role, u.status,
+            COALESCE(u.trading_suspended, FALSE) as trading_suspended, u.locked_until,
+            u.email_verified, u.preferred_currency,
+            u.virtual_workspace_balance, u.demo_wallets_json, u.real_wallets_json,
+            u.exchange_balances_json, u.real_exchange_balances_json, u.deriv_nickname, u.deriv_client_id,
+            u.originating_device_id, u.assigned_admin_id,
+            COALESCE(u.ownership_verification_status, 'pending_verification') as ownership_verification_status,
+            rd.device_uid as originating_device_uid, adm.email as assigned_admin_email,
+            COALESCE(u.last_login_at, u.updated_at, u.created_at) as last_login_at, u.created_at
+     FROM users u
+     LEFT JOIN registered_devices rd ON rd.id = u.originating_device_id
+     LEFT JOIN users adm ON adm.id = u.assigned_admin_id
+     WHERE ${where.join(' AND ')}
+     ORDER BY COALESCE(u.last_login_at, u.updated_at, u.created_at) DESC, u.id DESC
+     LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params
+  );
+
+  res.json({ users });
+});
+
+router.get('/admin/users/export', requireDb, requireAdmin, requirePermission('users.export'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
+  const format = String(req.query.format || 'csv').toLowerCase() === 'json' ? 'json' : 'csv';
+  const params: unknown[] = [];
+  const scopeWhere = buildScopedClientCondition(ctx, 'u', params);
+
+  const rows = await query<any>(
+    `SELECT u.id, u.email, u.full_name, u.deriv_client_id, u.status, u.preferred_currency,
+            u.virtual_workspace_balance, u.real_wallets_json, u.originating_device_id, u.assigned_admin_id,
+            COALESCE(u.ownership_verification_status, 'pending_verification') as ownership_verification_status,
+            u.last_login_at, u.created_at
+     FROM users u
+     WHERE ${scopeWhere}
+     ORDER BY u.id DESC LIMIT 500`,
+    params
+  );
+
+  await logAdminAction(ctx.userId, 'export_scoped_users', 'users', String(rows.length), { format, count: rows.length }, {
+    ipAddress: reqIp(req),
+    actionResult: 'success',
+    deviceId: ctx.deviceId,
+    actorRole: ctx.adminRoleSlug,
+  });
+
+  if (format === 'json') {
+    res.json({ users: rows });
+    return;
+  }
+
+  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [
+    ['ID', 'Email', 'Full Name', 'Client ID', 'Status', 'Currency', 'Demo USD', 'Real Options USD', 'Ownership Status', 'Originating Device ID', 'Last Login'].join(','),
+    ...rows.map((r: any) => {
+      let realOpt = 0;
+      try {
+        realOpt = Number(JSON.parse(r.real_wallets_json || '{}').options ?? 0);
+      } catch {
+        realOpt = 0;
+      }
+      return [
+        r.id,
+        esc(r.email),
+        esc(r.full_name),
+        esc(r.deriv_client_id),
+        esc(r.status),
+        esc(r.preferred_currency || 'USD'),
+        Number(r.virtual_workspace_balance ?? 0).toFixed(2),
+        realOpt.toFixed(2),
+        esc(r.ownership_verification_status),
+        r.originating_device_id ?? '',
+        esc(r.last_login_at || r.created_at),
+      ].join(',');
+    }),
+  ];
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="scoped-traders-export.csv"');
+  res.send(lines.join('\n'));
+});
+
+router.post('/admin/users', requireDb, requireAdmin, requirePermission('users.create'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
+  const {
+    email,
+    password = 'ChangeMe123!',
+    full_name = 'New Trader',
+    role = 'user',
+    virtual_workspace_balance = 10000,
+    assignedAdminId,
+    originatingDeviceId,
+  } = req.body || {};
   if (!email) {
     res.status(400).json({ error: 'Email is required' });
     return;
   }
+  const cleanRole = String(role || 'user').trim().toLowerCase();
+  if (!ctx.isSuperAdmin && !['user', 'trader'].includes(cleanRole)) {
+    await logAdminAction(ctx.userId, 'blocked_admin_escalation_create_user', 'users', String(email), { attemptedRole: cleanRole }, {
+      ipAddress: reqIp(req),
+      actionResult: 'denied',
+      actorRole: ctx.adminRoleSlug,
+    });
+    res.status(403).json({ error: 'Delegated administrators can only create standard trader client accounts.' });
+    return;
+  }
+
   const cleanEmail = String(email).trim().toLowerCase();
   const hash = await hashPasswordArgon2id(String(password));
+
+  const targetAdminId = ctx.isSuperAdmin
+    ? assignedAdminId !== undefined
+      ? assignedAdminId
+        ? Number(assignedAdminId)
+        : null
+      : null
+    : ctx.userId;
+
+  const targetDeviceId = ctx.isSuperAdmin
+    ? originatingDeviceId !== undefined
+      ? originatingDeviceId
+        ? Number(originatingDeviceId)
+        : null
+      : ctx.deviceId
+    : ctx.deviceId;
+
+  const verificationStatus = targetAdminId || targetDeviceId ? 'verified' : 'pending_verification';
+
   try {
-    const user = await queryOne<any>(
-      `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
-       VALUES ($1, $2, $3, $4, 'active', TRUE, $5, $6)
-       RETURNING id, email, full_name, phone, country, role, status, email_verified, preferred_currency, virtual_workspace_balance, deriv_client_id, created_at`,
-      [cleanEmail, hash, full_name, role, Number(virtual_workspace_balance), `TD${randomId(4).toUpperCase()}`]
-    );
-    await logAdminAction(req.user!.id, 'create_user', 'users', String(user.id), { email: cleanEmail });
+    const user = await withTransaction(async (client) => {
+      const uRes = await client.query<any>(
+        `INSERT INTO users
+          (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id,
+           originating_device_id, assigned_admin_id, ownership_verification_status)
+         VALUES ($1, $2, $3, $4, 'active', TRUE, $5, $6, $7, $8, $9)
+         RETURNING id, email, full_name, phone, country, role, status, email_verified, preferred_currency,
+                   virtual_workspace_balance, deriv_client_id, originating_device_id, assigned_admin_id,
+                   ownership_verification_status, created_at`,
+        [
+          cleanEmail,
+          hash,
+          full_name,
+          ctx.isSuperAdmin ? cleanRole : 'user',
+          Number(virtual_workspace_balance),
+          `TD${randomId(4).toUpperCase()}`,
+          targetDeviceId,
+          targetAdminId,
+          verificationStatus,
+        ]
+      );
+      const created = uRes.rows[0];
+
+      if (targetDeviceId) {
+        await client.query(
+          `INSERT INTO client_device_assignments (user_id, device_id, assigned_by_admin_id, assignment_source, verification_status, is_active)
+           VALUES ($1, $2, $3, 'admin_created_user', 'verified', TRUE)
+           ON CONFLICT (user_id, device_id) DO NOTHING`,
+          [created.id, targetDeviceId, ctx.userId]
+        );
+      }
+      if (targetAdminId) {
+        await client.query(
+          `INSERT INTO client_admin_assignments (user_id, admin_user_id, device_id, assigned_by_admin_id, verification_status, is_active)
+           VALUES ($1, $2, $3, $4, 'verified', TRUE)
+           ON CONFLICT (user_id, admin_user_id) DO NOTHING`,
+          [created.id, targetAdminId, targetDeviceId, ctx.userId]
+        );
+      }
+      return created;
+    });
+
+    await logAdminAction(ctx.userId, 'create_user', 'users', String(user.id), {
+      email: cleanEmail,
+      assignedAdminId: targetAdminId,
+      originatingDeviceId: targetDeviceId,
+    }, {
+      ipAddress: reqIp(req),
+      actionResult: 'success',
+      deviceId: targetDeviceId,
+      actorRole: ctx.adminRoleSlug,
+    });
     res.status(201).json({ user });
   } catch (err) {
     res.status(400).json({ error: err instanceof Error ? err.message : 'Failed to create user' });
   }
 });
 
-router.get('/admin/users/:id/activity', requireDb, requireAdmin, async (req, res) => {
+router.get('/admin/users/:id/activity', requireDb, requireAdmin, requirePermission('users.view'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'view_user_activity'))) return;
   const [user, accounts, orders, transactions] = await Promise.all([
     queryOne(
-      `SELECT id, email, full_name, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended,
-              locked_until, virtual_workspace_balance, demo_wallets_json, real_wallets_json, deriv_client_id, created_at
-       FROM users WHERE id = $1`,
+      `SELECT u.id, u.email, u.full_name, u.phone, u.country, u.role, u.status, COALESCE(u.trading_suspended, FALSE) as trading_suspended,
+              u.locked_until, u.virtual_workspace_balance, u.demo_wallets_json, u.real_wallets_json, u.deriv_client_id,
+              u.originating_device_id, u.assigned_admin_id, u.ownership_verification_status, u.created_at,
+              rd.device_uid as originating_device_uid, adm.email as assigned_admin_email
+       FROM users u
+       LEFT JOIN registered_devices rd ON rd.id = u.originating_device_id
+       LEFT JOIN users adm ON adm.id = u.assigned_admin_id
+       WHERE u.id = $1`,
       [id]
     ),
     query(`SELECT ${ACCOUNT_COLS} FROM connected_accounts WHERE user_id = $1 ORDER BY id DESC LIMIT 30`, [id]),
@@ -748,8 +1166,7 @@ router.get('/admin/users/:id/activity', requireDb, requireAdmin, async (req, res
   res.json({ user, accounts, orders, transactions });
 });
 
-router.post('/admin/balances/adjust', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  if (!checkReauthHeader(req, res)) return;
+router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
   const {
     userId,
     accountMode = 'demo',
@@ -760,8 +1177,15 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, async (req: AuthR
   } = req.body || {};
 
   const targetUserId = Number(userId);
+  if (!targetUserId) {
+    res.status(400).json({ error: 'Valid userId is required' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, targetUserId, 'adjust_balance'))) return;
+  if (!checkReauthHeader(req, res)) return;
+
   const amountCents = toCents(amount);
-  if (!targetUserId || Number.isNaN(Number(amount)) || amountCents < 0 || (operation !== 'set' && amountCents <= 0)) {
+  if (Number.isNaN(Number(amount)) || amountCents < 0 || (operation !== 'set' && amountCents <= 0)) {
     res.status(400).json({ error: 'Valid userId and positive adjustment amount are required' });
     return;
   }
@@ -915,8 +1339,11 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, async (req: AuthR
   }
 });
 
-router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
   const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'edit_user'))) return;
+
   const {
     email,
     full_name,
@@ -934,7 +1361,37 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
     real_wallets,
     exchange_balances,
     real_exchange_balances,
+    assigned_admin_id,
+    originating_device_id,
+    admin_role_id,
+    ownership_verification_status,
   } = req.body || {};
+
+  if (!ctx.isSuperAdmin) {
+    if (
+      assigned_admin_id !== undefined ||
+      originating_device_id !== undefined ||
+      ownership_verification_status !== undefined ||
+      admin_role_id !== undefined
+    ) {
+      await logAdminAction(ctx.userId, 'blocked_ownership_or_role_mutation', 'users', String(id), req.body || {}, {
+        ipAddress: reqIp(req),
+        actionResult: 'denied',
+        actorRole: ctx.adminRoleSlug,
+      });
+      res.status(403).json({ error: 'Super Admin authorization is required to modify client ownership or admin role attributes.' });
+      return;
+    }
+    if (role !== undefined && !['user', 'trader'].includes(String(role).toLowerCase())) {
+      await logAdminAction(ctx.userId, 'blocked_privilege_escalation', 'users', String(id), { attemptedRole: role }, {
+        ipAddress: reqIp(req),
+        actionResult: 'denied',
+        actorRole: ctx.adminRoleSlug,
+      });
+      res.status(403).json({ error: 'Delegated administrators cannot elevate a user role.' });
+      return;
+    }
+  }
 
   const touchesSensitive =
     password !== undefined ||
@@ -1110,12 +1567,13 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReques
   }
 });
 
-router.patch('/admin/users/:id/role', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/users/:id/role', requireDb, requireAdmin, requireSuperAdmin, async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const role = String(req.body?.role || 'user');
   const prev = await queryOne<{ role: string }>('SELECT role FROM users WHERE id = $1', [id]);
   await execute('UPDATE users SET role = $1, updated_at = NOW() WHERE id = $2', [role, id]);
   invalidateAuthUserCache(id);
+  invalidateAdminSecurityCaches({ adminUserId: id });
   await logAdminAction(req.user!.id, 'update_user_role', 'users', String(id), { role }, {
     previousValue: prev?.role || '',
     newValue: role,
@@ -1125,8 +1583,9 @@ router.patch('/admin/users/:id/role', requireDb, requireAdmin, async (req: AuthR
   res.json({ ok: true });
 });
 
-router.patch('/admin/users/:id/status', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/users/:id/status', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'update_user_status'))) return;
   const status = String(req.body?.status || 'active');
   if (status === 'suspended' || status === 'closed') {
     if (!checkReauthHeader(req, res)) return;
@@ -1143,9 +1602,10 @@ router.patch('/admin/users/:id/status', requireDb, requireAdmin, async (req: Aut
   res.json({ ok: true });
 });
 
-router.patch('/admin/users/:id/trading-access', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  if (!checkReauthHeader(req, res)) return;
+router.patch('/admin/users/:id/trading-access', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'freeze_user_trading'))) return;
+  if (!checkReauthHeader(req, res)) return;
   const { trading_suspended, locked_until } = req.body || {};
   const prev = await queryOne<{ trading_suspended: boolean; locked_until: string | null }>(
     'SELECT COALESCE(trading_suspended, FALSE) as trading_suspended, locked_until FROM users WHERE id = $1',
@@ -1178,9 +1638,10 @@ router.patch('/admin/users/:id/trading-access', requireDb, requireAdmin, async (
   res.json({ ok: true, trading_suspended: nextSuspended, locked_until: nextLocked });
 });
 
-router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  if (!checkReauthHeader(req, res)) return;
+router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'update_virtual_balance'))) return;
+  if (!checkReauthHeader(req, res)) return;
   const nextCents = toCents(req.body?.balance);
   if (Number.isNaN(Number(req.body?.balance)) || nextCents < 0) {
     res.status(400).json({ error: 'Valid non-negative balance is required' });
@@ -1247,9 +1708,10 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, async 
   }
 });
 
-router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  if (!checkReauthHeader(req, res)) return;
+router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePermission('users.edit'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  if (!(await assertAdminCanAccessClient(req, res, id, 'update_real_balance'))) return;
+  if (!checkReauthHeader(req, res)) return;
   const nextCents = toCents(req.body?.balance);
   if (Number.isNaN(Number(req.body?.balance)) || nextCents < 0) {
     res.status(400).json({ error: 'Valid non-negative Real balance is required' });
@@ -1326,12 +1788,13 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, async (re
   }
 });
 
-router.delete('/admin/users/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.delete('/admin/users/:id', requireDb, requireAdmin, requirePermission('users.delete'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   if (id === req.user!.id) {
     res.status(400).json({ error: 'Cannot delete currently signed-in owner account' });
     return;
   }
+  if (!(await assertAdminCanAccessClient(req, res, id, 'delete_user'))) return;
   const prev = await queryOne<{ email: string }>('SELECT email FROM users WHERE id = $1', [id]);
   await execute('DELETE FROM users WHERE id = $1', [id]);
   invalidateAuthUserCache(id);
@@ -1345,12 +1808,13 @@ router.delete('/admin/users/:id', requireDb, requireAdmin, async (req: AuthReque
 });
 
 // Connected Deriv Accounts CRUD
-router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const { userId, token, accountType = 'Deriv Account' } = req.body || {};
   if (!userId || !token) {
     res.status(400).json({ error: 'userId and Deriv token are required' });
     return;
   }
+  if (!(await assertAdminCanAccessClient(req, res, Number(userId), 'connect_deriv_account'))) return;
   try {
     const resp = await derivWs.requestWithToken(String(token), { balance: 1 }, 5500);
     const loginid = String(resp?.balance?.loginid || `CR${randomId(3).toUpperCase()}`);
@@ -1399,9 +1863,15 @@ router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, async 
   }
 });
 
-router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, async (req: AuthRequest, res) => {
-  if (!checkReauthHeader(req, res)) return;
+router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  const accOwner = await queryOne<{ user_id: number }>('SELECT user_id FROM connected_accounts WHERE id = $1', [id]);
+  if (!accOwner) {
+    res.status(404).json({ error: 'Connected account not found' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, accOwner.user_id, 'adjust_account_balance'))) return;
+  if (!checkReauthHeader(req, res)) return;
   const nextCents = toCents(req.body?.balance);
   const currency = req.body?.currency ? String(req.body.currency).trim().toUpperCase() : null;
 
@@ -1522,11 +1992,9 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, a
   }
 });
 
-router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const { account_type, currency, balance } = req.body || {};
-
-  if (balance !== undefined && !checkReauthHeader(req, res)) return;
 
   const existing = await queryOne<any>(
     'SELECT id, user_id, account_type, currency FROM connected_accounts WHERE id = $1',
@@ -1536,6 +2004,8 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, async (re
     res.status(404).json({ error: 'Connected account not found' });
     return;
   }
+  if (!(await assertAdminCanAccessClient(req, res, existing.user_id, 'update_connected_account'))) return;
+  if (balance !== undefined && !checkReauthHeader(req, res)) return;
 
   const cleanType =
     account_type !== undefined && String(account_type).trim()
@@ -1588,21 +2058,23 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, async (re
   res.json({ ok: true, account: updated });
 });
 
-router.patch('/admin/connected-accounts/:id/status', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/connected-accounts/:id/status', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const nextStatus = String(req.body?.status || '').toLowerCase();
   if (!['active', 'frozen', 'disconnected', 'revoked'].includes(nextStatus)) {
     res.status(400).json({ error: 'Invalid account status' });
     return;
   }
-  const prev = await queryOne<{ status: string; deriv_login_id: string }>(
-    'SELECT status, deriv_login_id FROM connected_accounts WHERE id = $1',
+  const prev = await queryOne<{ user_id: number; status: string; deriv_login_id: string }>(
+    'SELECT user_id, status, deriv_login_id FROM connected_accounts WHERE id = $1',
     [id]
   );
   if (!prev) {
     res.status(404).json({ error: 'Connected account not found' });
     return;
   }
+  if (!(await assertAdminCanAccessClient(req, res, prev.user_id, 'update_connected_account_status'))) return;
+
   await execute('UPDATE connected_accounts SET status = $1, updated_at = NOW() WHERE id = $2', [nextStatus, id]);
   await logAdminAction(
     req.user!.id,
@@ -1620,20 +2092,21 @@ router.patch('/admin/connected-accounts/:id/status', requireDb, requireAdmin, as
   res.json({ ok: true, status: nextStatus });
 });
 
-router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
 
-  // Explicit Admin "Sync Live" unlocks the DB balance override and fetches fresh live balance from Deriv
-  await execute('UPDATE connected_accounts SET balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $1', [id]);
-
   const currentAcc = await queryOne<any>(
-    'SELECT id, deriv_login_id FROM connected_accounts WHERE id = $1',
+    'SELECT id, user_id, deriv_login_id FROM connected_accounts WHERE id = $1',
     [id]
   );
   if (!currentAcc) {
     res.status(404).json({ error: 'Connected account not found' });
     return;
   }
+  if (!(await assertAdminCanAccessClient(req, res, currentAcc.user_id, 'sync_connected_account'))) return;
+
+  // Explicit Admin "Sync Live" unlocks the DB balance override and fetches fresh live balance from Deriv
+  await execute('UPDATE connected_accounts SET balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $1', [id]);
 
   const auth = await queryOne<any>(
     'SELECT encrypted_token, token_iv, token_auth_tag FROM account_authorizations WHERE connected_account_id = $1 AND revoked_at IS NULL ORDER BY id DESC LIMIT 1',
@@ -1683,30 +2156,48 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, async
   res.json({ ok: true, account });
 });
 
-router.post('/admin/connected-accounts/:id/disconnect', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/connected-accounts/:id/disconnect', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  const acc = await queryOne<{ user_id: number }>('SELECT user_id FROM connected_accounts WHERE id = $1', [id]);
+  if (!acc) {
+    res.status(404).json({ error: 'Connected account not found' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, acc.user_id, 'disconnect_account'))) return;
   await execute("UPDATE connected_accounts SET status = 'disconnected', updated_at = NOW() WHERE id = $1", [id]);
   await logAdminAction(req.user!.id, 'disconnect_account', 'connected_accounts', String(id));
   res.json({ ok: true });
 });
 
-router.post('/admin/connected-accounts/:id/revoke', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/connected-accounts/:id/revoke', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  const acc = await queryOne<{ user_id: number }>('SELECT user_id FROM connected_accounts WHERE id = $1', [id]);
+  if (!acc) {
+    res.status(404).json({ error: 'Connected account not found' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, acc.user_id, 'revoke_account'))) return;
   await execute("UPDATE connected_accounts SET status = 'revoked', updated_at = NOW() WHERE id = $1", [id]);
   await execute('UPDATE account_authorizations SET revoked_at = NOW() WHERE connected_account_id = $1', [id]);
   await logAdminAction(req.user!.id, 'revoke_account', 'connected_accounts', String(id));
   res.json({ ok: true });
 });
 
-router.delete('/admin/connected-accounts/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.delete('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
+  const acc = await queryOne<{ user_id: number }>('SELECT user_id FROM connected_accounts WHERE id = $1', [id]);
+  if (!acc) {
+    res.status(404).json({ error: 'Connected account not found' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, acc.user_id, 'delete_connected_account'))) return;
   await execute('DELETE FROM connected_accounts WHERE id = $1', [id]);
   await logAdminAction(req.user!.id, 'delete_connected_account', 'connected_accounts', String(id));
   res.json({ ok: true });
 });
 
 // Bot Strategies CRUD
-router.post('/admin/strategies', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/strategies', requireDb, requireAdmin, requirePermission('strategies.manage'), async (req: AuthRequest, res) => {
   const b = req.body || {};
   if (!b.name) {
     res.status(400).json({ error: 'Strategy name required' });
@@ -1737,7 +2228,7 @@ router.post('/admin/strategies', requireDb, requireAdmin, async (req: AuthReques
   res.status(201).json({ strategy });
 });
 
-router.patch('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/strategies/:id', requireDb, requireAdmin, requirePermission('strategies.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const b = req.body || {};
   const strategy = await queryOne<any>(
@@ -1774,7 +2265,7 @@ router.patch('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthR
   res.json({ strategy });
 });
 
-router.delete('/admin/strategies/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.delete('/admin/strategies/:id', requireDb, requireAdmin, requirePermission('strategies.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   await execute('DELETE FROM bot_strategies WHERE id = $1', [id]);
   invalidateBotStrategiesCache();
@@ -1783,7 +2274,7 @@ router.delete('/admin/strategies/:id', requireDb, requireAdmin, async (req: Auth
 });
 
 // Instruments Management
-router.get('/admin/instruments', requireDb, requireAdmin, async (_req, res) => {
+router.get('/admin/instruments', requireDb, requireAdmin, requirePermission('markets.manage'), async (_req, res) => {
   const rows = await query(
     `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
             m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
@@ -1802,7 +2293,7 @@ router.get('/admin/instruments', requireDb, requireAdmin, async (_req, res) => {
   });
 });
 
-router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, requirePermission('markets.manage'), async (req: AuthRequest, res) => {
   const symbol = String(req.params.symbol || '').trim();
   const { display_name, price, spread, min_stake, max_stake, is_active } = req.body || {};
   const inst = await queryOne<any>(
@@ -1841,17 +2332,23 @@ router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, async (req: 
   res.json({ instrument: { ...inst, price: derivWs.getLatestTick(symbol)?.quote ?? Number(price || 0) } });
 });
 
-// Orders Oversight & Immutable Trade History
-router.get('/admin/trades', requireDb, requireAdmin, async (req, res) => {
+// Orders Oversight & Immutable Trade History (Scoped by device & client ownership)
+router.get('/admin/trades', requireDb, requireAdmin, requirePermission('reports.view'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
   const userId = req.query.userId ? Number(req.query.userId) : null;
+  if (userId) {
+    if (!(await assertAdminCanAccessClient(req, res, userId, 'query_trades'))) return;
+  }
+
   const symbol = typeof req.query.symbol === 'string' ? req.query.symbol.trim() : '';
   const status = typeof req.query.status === 'string' ? req.query.status.trim().toUpperCase() : '';
   const accountMode = typeof req.query.accountMode === 'string' ? req.query.accountMode.trim().toLowerCase() : '';
   const limit = Math.min(250, Math.max(1, Number(req.query.limit || 80)));
   const offset = Math.max(0, Number(req.query.offset || 0));
 
-  const where: string[] = ["u.role NOT IN ('owner', 'admin')"];
   const params: unknown[] = [];
+  const where: string[] = [buildScopedClientCondition(ctx, 'u', params)];
+
   if (userId) {
     params.push(userId);
     where.push(`vo.user_id = $${params.length}`);
@@ -1881,14 +2378,60 @@ router.get('/admin/trades', requireDb, requireAdmin, async (req, res) => {
   res.json({ orders });
 });
 
-router.patch('/admin/orders/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.get('/admin/trades/export', requireDb, requireAdmin, requirePermission('reports.export'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
+  const params: unknown[] = [];
+  const scopeWhere = buildScopedClientCondition(ctx, 'u', params);
+  const orders = await query<any>(
+    `SELECT vo.id, vo.user_id, u.email as user_email, vo.symbol, vo.side, vo.account_mode,
+            vo.stake, vo.entry_price, vo.exit_price, vo.pnl, vo.status, vo.opened_at, vo.closed_at
+     FROM virtual_orders vo
+     JOIN users u ON vo.user_id = u.id
+     WHERE ${scopeWhere}
+     ORDER BY vo.id DESC LIMIT 500`,
+    params
+  );
+
+  await logAdminAction(ctx.userId, 'export_scoped_trades', 'virtual_orders', String(orders.length), { count: orders.length }, {
+    ipAddress: reqIp(req),
+    actionResult: 'success',
+    deviceId: ctx.deviceId,
+    actorRole: ctx.adminRoleSlug,
+  });
+
+  const esc = (v: unknown) => `"${String(v ?? '').replace(/"/g, '""')}"`;
+  const lines = [
+    ['Order ID', 'Trader Email', 'Symbol', 'Side', 'Mode', 'Stake', 'Entry Price', 'Exit Price', 'P/L', 'Status', 'Opened At'].join(','),
+    ...orders.map((o: any) =>
+      [
+        o.id,
+        esc(o.user_email),
+        esc(o.symbol),
+        esc(o.side),
+        esc(o.account_mode || 'demo'),
+        Number(o.stake || 0).toFixed(2),
+        Number(o.entry_price || 0).toFixed(4),
+        o.exit_price ?? '',
+        Number(o.pnl || 0).toFixed(2),
+        esc(o.status),
+        esc(o.opened_at),
+      ].join(',')
+    ),
+  ];
+  res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+  res.setHeader('Content-Disposition', 'attachment; filename="scoped-trades-export.csv"');
+  res.send(lines.join('\n'));
+});
+
+router.patch('/admin/orders/:id', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const { notes, status, exit_price, pnl, stake } = req.body || {};
-  const existing = await queryOne<any>('SELECT id, status, notes FROM virtual_orders WHERE id = $1', [id]);
+  const existing = await queryOne<any>('SELECT id, user_id, status, notes FROM virtual_orders WHERE id = $1', [id]);
   if (!existing) {
     res.status(404).json({ error: 'Order not found' });
     return;
   }
+  if (!(await assertAdminCanAccessClient(req, res, existing.user_id, 'update_order'))) return;
 
   const attemptsOutcomeMutation =
     pnl !== undefined ||
@@ -1934,10 +2477,18 @@ router.patch('/admin/orders/:id', requireDb, requireAdmin, async (req: AuthReque
   res.json({ order: updated });
 });
 
-router.post('/admin/orders/:id/close', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/orders/:id/close', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
+  const orderId = Number(req.params.id);
+  const existing = await queryOne<{ id: number; user_id: number }>('SELECT id, user_id FROM virtual_orders WHERE id = $1', [orderId]);
+  if (!existing) {
+    res.status(404).json({ error: 'Order not found' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, existing.user_id, 'force_close_order'))) return;
+
   try {
-    const order = await closeOrderById(Number(req.params.id), undefined, true);
-    await logAdminAction(req.user!.id, 'force_close_order', 'virtual_orders', String(req.params.id), {
+    const order = await closeOrderById(orderId, undefined, true);
+    await logAdminAction(req.user!.id, 'force_close_order', 'virtual_orders', String(orderId), {
       pnl: order?.pnl,
       exitPrice: order?.exit_price,
     }, {
@@ -1952,48 +2503,62 @@ router.post('/admin/orders/:id/close', requireDb, requireAdmin, async (req: Auth
   }
 });
 
-router.get('/admin/audit-logs', requireDb, requireAdmin, async (req, res) => {
+router.get('/admin/audit-logs', requireDb, requireAdmin, requirePermission('audit_logs.view'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
   const limit = Math.min(200, Math.max(1, Number(req.query.limit || 60)));
   const offset = Math.max(0, Number(req.query.offset || 0));
-  const logs = await query(
-    `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
-            l.ip_address, l.action_result, l.details_json, l.created_at,
-            a.email as admin_email, a.full_name as admin_name
-     FROM administrator_audit_logs l
-     LEFT JOIN users a ON l.admin_user_id = a.id
-     ORDER BY l.id DESC LIMIT $1 OFFSET $2`,
-    [limit, offset]
-  );
+  const logs = ctx.isSuperAdmin
+    ? await query(
+        `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
+                l.ip_address, l.action_result, l.details_json, l.device_id, l.session_jti, l.actor_role, l.created_at,
+                a.email as admin_email, a.full_name as admin_name
+         FROM administrator_audit_logs l
+         LEFT JOIN users a ON l.admin_user_id = a.id
+         ORDER BY l.id DESC LIMIT $1 OFFSET $2`,
+        [limit, offset]
+      )
+    : await query(
+        `SELECT l.id, l.admin_user_id, l.action, l.target_type, l.target_id, l.previous_value, l.new_value,
+                l.ip_address, l.action_result, l.details_json, l.device_id, l.session_jti, l.actor_role, l.created_at,
+                a.email as admin_email, a.full_name as admin_name
+         FROM administrator_audit_logs l
+         LEFT JOIN users a ON l.admin_user_id = a.id
+         WHERE l.admin_user_id = $1
+         ORDER BY l.id DESC LIMIT $2 OFFSET $3`,
+        [ctx.userId, limit, offset]
+      );
   res.json({ auditLogs: logs });
 });
 
-// Cashier & Balance Adjustment Logs
-router.get('/admin/cashier-logs', requireDb, requireAdmin, async (req, res) => {
+// Cashier & Balance Adjustment Logs (Scoped by device & client ownership)
+router.get('/admin/cashier-logs', requireDb, requireAdmin, requirePermission('transactions.view'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
   const txType = typeof req.query.tx_type === 'string' ? req.query.tx_type : '';
   const limit = Math.min(200, Math.max(1, Number(req.query.limit || 60)));
   const offset = Math.max(0, Number(req.query.offset || 0));
   const cols =
     'ct.id, ct.user_id, ct.tx_type, ct.method, ct.provider, ct.account_from, ct.account_to, ct.amount, ct.currency, ct.reference_id, ct.status, ct.account_mode, ct.created_at, u.email as user_email';
-  const rows = txType
-    ? await query(
-        `SELECT ${cols} FROM cashier_transactions ct
-         JOIN users u ON ct.user_id = u.id
-         WHERE ct.tx_type = $1 AND u.role NOT IN ('owner', 'admin')
-         ORDER BY ct.id DESC LIMIT $2 OFFSET $3`,
-        [txType, limit, offset]
-      )
-    : await query(
-        `SELECT ${cols} FROM cashier_transactions ct
-         JOIN users u ON ct.user_id = u.id
-         WHERE u.role NOT IN ('owner', 'admin')
-         ORDER BY ct.id DESC LIMIT $1 OFFSET $2`,
-        [limit, offset]
-      );
+
+  const params: unknown[] = [];
+  const where: string[] = [buildScopedClientCondition(ctx, 'u', params)];
+  if (txType) {
+    params.push(txType);
+    where.push(`ct.tx_type = $${params.length}`);
+  }
+  params.push(limit, offset);
+
+  const rows = await query(
+    `SELECT ${cols} FROM cashier_transactions ct
+     JOIN users u ON ct.user_id = u.id
+     WHERE ${where.join(' AND ')}
+     ORDER BY ct.id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    params
+  );
   res.json({ transactions: rows });
 });
 
 // Announcements CRUD
-router.post('/admin/announcements', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.post('/admin/announcements', requireDb, requireAdmin, requirePermission('settings.manage'), async (req: AuthRequest, res) => {
   const { title, message, severity = 'info' } = req.body || {};
   if (!title || !message) {
     res.status(400).json({ error: 'Title and message are required' });
@@ -2007,7 +2572,7 @@ router.post('/admin/announcements', requireDb, requireAdmin, async (req: AuthReq
   res.status(201).json({ announcement: item, announcements: updated.items });
 });
 
-router.delete('/admin/announcements/:id', requireDb, requireAdmin, async (req: AuthRequest, res) => {
+router.delete('/admin/announcements/:id', requireDb, requireAdmin, requirePermission('settings.manage'), async (req: AuthRequest, res) => {
   const current = await getSetting<{ items: any[] }>('announcements', { items: [] });
   const updated = { items: (current.items || []).filter((a) => a.id !== req.params.id) };
   await setSetting('announcements', updated);

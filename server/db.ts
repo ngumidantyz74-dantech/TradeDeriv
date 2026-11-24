@@ -418,6 +418,135 @@ async function runSchemaAndSeed(): Promise<void> {
         chart_indicators_json TEXT NOT NULL DEFAULT '{}',
         updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS admin_roles (
+        id SERIAL PRIMARY KEY,
+        name TEXT NOT NULL UNIQUE,
+        slug TEXT NOT NULL UNIQUE,
+        description TEXT NOT NULL DEFAULT '',
+        is_system BOOLEAN NOT NULL DEFAULT FALSE,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS permissions (
+        id SERIAL PRIMARY KEY,
+        key TEXT NOT NULL UNIQUE,
+        module TEXT NOT NULL,
+        label TEXT NOT NULL DEFAULT '',
+        description TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS role_permissions (
+        id SERIAL PRIMARY KEY,
+        role_id INTEGER NOT NULL REFERENCES admin_roles(id) ON DELETE CASCADE,
+        permission_key TEXT NOT NULL REFERENCES permissions(key) ON DELETE CASCADE,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        UNIQUE(role_id, permission_key)
+      );
+
+      CREATE TABLE IF NOT EXISTS registered_devices (
+        id SERIAL PRIMARY KEY,
+        device_uid TEXT NOT NULL UNIQUE,
+        device_name TEXT NOT NULL,
+        device_type TEXT NOT NULL DEFAULT 'browser',
+        platform TEXT NOT NULL DEFAULT 'web',
+        credential_hash TEXT,
+        enrollment_token_hash TEXT,
+        enrollment_expires_at TIMESTAMPTZ,
+        verification_status TEXT NOT NULL DEFAULT 'pending_enrollment',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        owner_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        registered_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        enrolled_at TIMESTAMPTZ,
+        last_seen_at TIMESTAMPTZ,
+        last_ip TEXT NOT NULL DEFAULT '',
+        user_agent_hint TEXT NOT NULL DEFAULT '',
+        metadata_json TEXT NOT NULL DEFAULT '{}',
+        revoked_at TIMESTAMPTZ,
+        revoked_reason TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS administrators (
+        user_id INTEGER PRIMARY KEY REFERENCES users(id) ON DELETE CASCADE,
+        admin_role_id INTEGER REFERENCES admin_roles(id) ON DELETE SET NULL,
+        username TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        client_scope_mode TEXT NOT NULL DEFAULT 'device_and_direct',
+        notes TEXT NOT NULL DEFAULT '',
+        created_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_devices (
+        id SERIAL PRIMARY KEY,
+        admin_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id INTEGER NOT NULL REFERENCES registered_devices(id) ON DELETE CASCADE,
+        assigned_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        revoked_at TIMESTAMPTZ,
+        UNIQUE(admin_user_id, device_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS client_device_assignments (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id INTEGER NOT NULL REFERENCES registered_devices(id) ON DELETE CASCADE,
+        assigned_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        assignment_source TEXT NOT NULL DEFAULT 'super_admin',
+        verification_status TEXT NOT NULL DEFAULT 'verified',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        revoked_at TIMESTAMPTZ,
+        UNIQUE(user_id, device_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS client_admin_assignments (
+        id SERIAL PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        admin_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL,
+        assigned_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        verification_status TEXT NOT NULL DEFAULT 'verified',
+        is_active BOOLEAN NOT NULL DEFAULT TRUE,
+        assigned_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        revoked_at TIMESTAMPTZ,
+        UNIQUE(user_id, admin_user_id)
+      );
+
+      CREATE TABLE IF NOT EXISTS admin_sessions (
+        id SERIAL PRIMARY KEY,
+        session_jti TEXT NOT NULL UNIQUE,
+        admin_user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL,
+        ip_address TEXT NOT NULL DEFAULT 'unknown',
+        user_agent TEXT NOT NULL DEFAULT '',
+        status TEXT NOT NULL DEFAULT 'active',
+        expires_at TIMESTAMPTZ NOT NULL,
+        revoked_at TIMESTAMPTZ,
+        revoked_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        revoke_reason TEXT NOT NULL DEFAULT '',
+        last_seen_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE TABLE IF NOT EXISTS device_activity_logs (
+        id SERIAL PRIMARY KEY,
+        device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL,
+        admin_user_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        actor_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL,
+        event_type TEXT NOT NULL,
+        ip_address TEXT NOT NULL DEFAULT 'unknown',
+        user_agent TEXT NOT NULL DEFAULT '',
+        details_json TEXT NOT NULL DEFAULT '{}',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
     `);
 
     // Idempotent column migrations for pre-existing tables
@@ -448,6 +577,15 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS new_value TEXT DEFAULT '';
       ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS ip_address TEXT DEFAULT 'unknown';
       ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS action_result TEXT NOT NULL DEFAULT 'success';
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL;
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS session_jti TEXT DEFAULT '';
+      ALTER TABLE administrator_audit_logs ADD COLUMN IF NOT EXISTS actor_role TEXT DEFAULT '';
+
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS admin_role_id INTEGER REFERENCES admin_roles(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS originating_device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS ownership_verification_status TEXT NOT NULL DEFAULT 'pending_verification';
     `);
 
     // Auto-heal misclassified DOT.../VR... demo Deriv accounts from earlier OAuth saves
@@ -484,6 +622,14 @@ async function runSchemaAndSeed(): Promise<void> {
       CREATE INDEX IF NOT EXISTS idx_journal_user_time ON trading_journal_entries (user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_cashier_tx_user_time ON cashier_transactions (user_id, created_at DESC);
       CREATE INDEX IF NOT EXISTS idx_audit_logs_time ON administrator_audit_logs (created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_users_ownership_scope ON users (assigned_admin_id, originating_device_id) WHERE role NOT IN ('owner', 'admin');
+      CREATE INDEX IF NOT EXISTS idx_admin_devices_active ON admin_devices (admin_user_id, device_id) WHERE is_active = TRUE AND revoked_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_client_device_active ON client_device_assignments (device_id, user_id) WHERE is_active = TRUE AND revoked_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_client_admin_active ON client_admin_assignments (admin_user_id, user_id) WHERE is_active = TRUE AND revoked_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_admin_sessions_jti ON admin_sessions (session_jti) WHERE revoked_at IS NULL;
+      CREATE INDEX IF NOT EXISTS idx_admin_sessions_admin ON admin_sessions (admin_user_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_device_activity_device ON device_activity_logs (device_id, created_at DESC);
+      CREATE INDEX IF NOT EXISTS idx_registered_devices_uid ON registered_devices (device_uid) WHERE is_active = TRUE;
 
       ALTER TABLE risk_settings ALTER COLUMN risk_per_trade_pct SET DEFAULT 2.0;
       ALTER TABLE risk_settings ALTER COLUMN daily_loss_limit_usd SET DEFAULT 10.0;
@@ -510,6 +656,146 @@ async function runSchemaAndSeed(): Promise<void> {
         ('owner', 'Platform owner with MIS & commission access')
        ON CONFLICT (name) DO NOTHING`
     );
+
+    // Seed granular RBAC permissions catalog & default admin roles
+    const permissionCatalog: Array<[string, string, string, string]> = [
+      ['dashboard.view', 'Dashboard', 'View MIS Dashboard', 'Access scoped KPIs and cluster overview'],
+      ['users.view', 'Users', 'View Users', 'View trader records within authorized scope'],
+      ['users.create', 'Users', 'Create Users', 'Create new trader accounts bound to verified scope'],
+      ['users.edit', 'Users', 'Edit Users & Balances', 'Edit scoped trader profiles, statuses, and balances'],
+      ['users.delete', 'Users', 'Delete Users', 'Delete trader accounts within authorized scope'],
+      ['users.search', 'Users', 'Search & Filter Users', 'Search and filter scoped trader listings'],
+      ['users.export', 'Users', 'Export Users', 'Export scoped trader records to CSV/JSON'],
+      ['clients.view', 'Clients', 'View Connected Clients', 'View connected Deriv accounts and client ownership info'],
+      ['clients.manage', 'Clients', 'Manage Connected Clients', 'Manage client Deriv connections, freezes, and balances within scope'],
+      ['devices.view', 'Devices', 'View Assigned Devices', 'View assigned devices and access history'],
+      ['devices.manage', 'Devices', 'Manage Devices', 'Register, verify, assign, reassign, and revoke devices'],
+      ['transactions.view', 'Cashier', 'View Cashier Logs', 'View cashier and adjustment ledger within scope'],
+      ['reports.view', 'Reports', 'View Orders & Commissions', 'View scoped orders oversight and performance analytics'],
+      ['reports.export', 'Reports', 'Export Trade Reports', 'Export scoped order and transaction reports'],
+      ['strategies.manage', 'Trading', 'Manage Bot Strategies', 'Create, update, and remove automated bot strategies'],
+      ['markets.manage', 'Trading', 'Manage Instruments & Pricing', 'Update market instrument spreads, stake limits, and spot overrides'],
+      ['engine.manage', 'Trading', 'Manage Trading Engine', 'Configure execution engine win-rate and settlement policies'],
+      ['settings.manage', 'Settings', 'Manage Branding & Announcements', 'Edit branding, ticker, announcements, and platform parameters'],
+      ['audit_logs.view', 'Security', 'View Audit Logs', 'View administrator and security audit logs'],
+      ['admins.manage', 'Administration', 'Manage Administrators', 'Create, edit, suspend, and delete delegated administrators'],
+      ['roles.manage', 'Administration', 'Manage RBAC Roles', 'Create custom RBAC roles and assign granular permissions'],
+    ];
+
+    for (const [key, mod, label, desc] of permissionCatalog) {
+      await client.query(
+        `INSERT INTO permissions (key, module, label, description)
+         VALUES ($1, $2, $3, $4)
+         ON CONFLICT (key) DO UPDATE SET module = EXCLUDED.module, label = EXCLUDED.label, description = EXCLUDED.description`,
+        [key, mod, label, desc]
+      );
+    }
+
+    const defaultAdminRoles: Array<{
+      name: string;
+      slug: string;
+      description: string;
+      isSystem: boolean;
+      perms: string[];
+    }> = [
+      {
+        name: 'Super Admin',
+        slug: 'super_admin',
+        description: 'Unrestricted platform owner with full system, RBAC, device, and ownership authority',
+        isSystem: true,
+        perms: permissionCatalog.map((p) => p[0]),
+      },
+      {
+        name: 'Delegated Operations Admin',
+        slug: 'delegated_operator',
+        description: 'Standard delegated administrator scoped strictly to assigned devices and clients',
+        isSystem: false,
+        perms: [
+          'dashboard.view',
+          'users.view',
+          'users.create',
+          'users.edit',
+          'users.search',
+          'users.export',
+          'clients.view',
+          'clients.manage',
+          'devices.view',
+          'transactions.view',
+          'reports.view',
+          'reports.export',
+        ],
+      },
+      {
+        name: 'Client Onboarding Specialist',
+        slug: 'onboarding_specialist',
+        description: 'Onboards and inspects assigned clients without deletion or financial mutation privileges',
+        isSystem: false,
+        perms: ['dashboard.view', 'users.view', 'users.create', 'users.search', 'clients.view', 'devices.view'],
+      },
+      {
+        name: 'Scoped Read-Only Auditor',
+        slug: 'scoped_auditor',
+        description: 'Read-only access to scoped clients, orders, and cashier logs',
+        isSystem: false,
+        perms: ['dashboard.view', 'users.view', 'users.search', 'clients.view', 'transactions.view', 'reports.view'],
+      },
+    ];
+
+    for (const r of defaultAdminRoles) {
+      const roleRow = await client.query<{ id: number }>(
+        `INSERT INTO admin_roles (name, slug, description, is_system, is_active)
+         VALUES ($1, $2, $3, $4, TRUE)
+         ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name, description = EXCLUDED.description
+         RETURNING id`,
+        [r.name, r.slug, r.description, r.isSystem]
+      );
+      const roleId = roleRow.rows[0]?.id;
+      if (roleId && r.isSystem) {
+        // Super Admin system role always retains all permissions
+        for (const pKey of r.perms) {
+          await client.query(
+            `INSERT INTO role_permissions (role_id, permission_key) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+            [roleId, pKey]
+          );
+        }
+      } else if (roleId) {
+        // Seed default permissions only when newly created role has zero permissions
+        const existingPerms = await client.query<{ c: number }>(
+          'SELECT COUNT(*)::int as c FROM role_permissions WHERE role_id = $1',
+          [roleId]
+        );
+        if ((existingPerms.rows[0]?.c || 0) === 0) {
+          for (const pKey of r.perms) {
+            await client.query(
+              `INSERT INTO role_permissions (role_id, permission_key) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
+              [roleId, pKey]
+            );
+          }
+        }
+      }
+    }
+
+    // Backward-compatible admin synchronization (never auto-assign historical trader clients to arbitrary delegated admins)
+    await client.query(`
+      UPDATE users
+      SET admin_role_id = (SELECT id FROM admin_roles WHERE slug = 'super_admin' LIMIT 1)
+      WHERE role = 'owner' AND admin_role_id IS NULL;
+
+      UPDATE users
+      SET admin_role_id = (SELECT id FROM admin_roles WHERE slug = 'delegated_operator' LIMIT 1)
+      WHERE role = 'admin' AND admin_role_id IS NULL;
+
+      INSERT INTO administrators (user_id, admin_role_id, username, status)
+      SELECT u.id,
+             u.admin_role_id,
+             COALESCE(NULLIF(u.deriv_nickname, ''), SPLIT_PART(u.email, '@', 1)),
+             u.status
+      FROM users u
+      WHERE u.role IN ('owner', 'admin')
+      ON CONFLICT (user_id) DO UPDATE SET
+        admin_role_id = COALESCE(administrators.admin_role_id, EXCLUDED.admin_role_id),
+        status = EXCLUDED.status;
+    `);
 
     // Seed curated Deriv instruments only when table is empty
     const instCountRes = await client.query<{ c: number }>('SELECT COUNT(*)::int as c FROM market_instruments');
@@ -738,17 +1024,33 @@ async function runSchemaAndSeed(): Promise<void> {
       const existingOwner = await client.query("SELECT id FROM users WHERE role IN ('admin', 'owner') LIMIT 1");
       if (existingOwner.rows.length === 0) {
         const hash = await hashPasswordArgon2id(config.adminBootstrapPassword);
+        const superRoleRes = await client.query<{ id: number }>(
+          "SELECT id FROM admin_roles WHERE slug = 'super_admin' LIMIT 1"
+        );
+        const superRoleId = superRoleRes.rows[0]?.id ?? null;
         const inserted = await client.query<{ id: number }>(
-          `INSERT INTO users (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, deriv_client_id)
-           VALUES ($1, $2, $3, 'owner', 'active', TRUE, 100000.00, $4)
+          `INSERT INTO users (email, password_hash, full_name, role, admin_role_id, status, email_verified, virtual_workspace_balance, deriv_client_id)
+           VALUES ($1, $2, $3, 'owner', $4, 'active', TRUE, 100000.00, $5)
            ON CONFLICT (email) DO NOTHING
            RETURNING id`,
-          [config.adminBootstrapEmail, hash, config.adminBootstrapFullName || 'Platform Owner', `OWNER-${randomId(3).toUpperCase()}`]
+          [
+            config.adminBootstrapEmail,
+            hash,
+            config.adminBootstrapFullName || 'Platform Owner',
+            superRoleId,
+            `OWNER-${randomId(3).toUpperCase()}`,
+          ]
         );
         if (inserted.rows[0]?.id) {
           await client.query(
-            `INSERT INTO administrator_audit_logs (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
-             VALUES ($1, 'owner_env_bootstrap', 'users', $2, '', $3, 'system', 'success', $4)`,
+            `INSERT INTO administrators (user_id, admin_role_id, username, status)
+             VALUES ($1, $2, $3, 'active')
+             ON CONFLICT (user_id) DO NOTHING`,
+            [inserted.rows[0].id, superRoleId, config.adminBootstrapEmail.split('@')[0]]
+          );
+          await client.query(
+            `INSERT INTO administrator_audit_logs (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, actor_role, details_json)
+             VALUES ($1, 'owner_env_bootstrap', 'users', $2, '', $3, 'system', 'success', 'owner', $4)`,
             [
               inserted.rows[0].id,
               String(inserted.rows[0].id),
@@ -890,6 +1192,9 @@ export async function logAdminAction(
     newValue?: string;
     ipAddress?: string;
     actionResult?: 'success' | 'denied' | 'error';
+    deviceId?: number | null;
+    sessionJti?: string;
+    actorRole?: string;
   }
 ): Promise<void> {
   if (!pool) return;
@@ -897,11 +1202,27 @@ export async function logAdminAction(
   const nextVal = meta?.newValue ?? (details.newValue !== undefined ? String(details.newValue) : '');
   const ip = meta?.ipAddress ?? (details.ipAddress !== undefined ? String(details.ipAddress) : 'unknown');
   const result = meta?.actionResult ?? 'success';
+  const deviceId = meta?.deviceId ?? (typeof details.deviceId === 'number' ? details.deviceId : null);
+  const sessionJti = meta?.sessionJti ?? (typeof details.sessionJti === 'string' ? details.sessionJti : '');
+  const actorRole = meta?.actorRole ?? (typeof details.actorRole === 'string' ? details.actorRole : '');
   await execute(
     `INSERT INTO administrator_audit_logs
-      (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
-     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-    [adminUserId, action, targetType, targetId, prevVal, nextVal, ip, result, JSON.stringify(details)]
+      (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, device_id, session_jti, actor_role, details_json)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)`,
+    [
+      adminUserId,
+      action,
+      targetType,
+      targetId,
+      prevVal,
+      nextVal,
+      ip,
+      result,
+      deviceId,
+      sessionJti,
+      actorRole,
+      JSON.stringify(details),
+    ]
   );
 }
 

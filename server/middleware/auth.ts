@@ -1,16 +1,26 @@
 import type { Request, Response, NextFunction } from 'express';
 import jwt from 'jsonwebtoken';
 import { config } from '../config.ts';
-import { queryOne } from '../db.ts';
+import { queryOne, logAdminAction } from '../db.ts';
+import {
+  type AdminContext,
+  loadAdminSecurityProfile,
+  resolveVerifiedDevice,
+  verifyActiveAdminSession,
+  invalidateAdminSecurityCaches,
+  logDeviceActivity,
+} from '../rbac-device.ts';
 
 export interface AuthUserPayload {
   id: number;
   email: string;
   role: string;
+  jti?: string;
 }
 
 export interface AuthRequest extends Request {
   user?: AuthUserPayload;
+  adminCtx?: AdminContext;
 }
 
 export const ADMIN_SESSION_COOKIE = 'td_admin_session';
@@ -60,6 +70,25 @@ export function signUserToken(user: { id: number; email: string; role: string },
   );
 }
 
+export function signAdminSessionToken(
+  user: { id: number; email: string; role: string; jti: string },
+  expiresIn: '12h' = '12h'
+): string {
+  return jwt.sign(
+    { id: user.id, email: user.email, role: user.role, jti: user.jti },
+    config.jwtSecret,
+    { expiresIn }
+  );
+}
+
+export function verifyJwtToken(token: string): AuthUserPayload | null {
+  try {
+    return jwt.verify(token, config.jwtSecret) as AuthUserPayload;
+  } catch {
+    return null;
+  }
+}
+
 export function signAdminReauthToken(adminId: number): string {
   return jwt.sign(
     { id: adminId, scope: 'admin_reauth' },
@@ -78,7 +107,7 @@ export function verifyAdminReauthToken(token: string | undefined, expectedAdminI
   }
 }
 
-function extractRawToken(req: Request, allowAdminCookie = false): { token: string; viaCookie: boolean } {
+export function extractRawToken(req: Request, allowAdminCookie = false): { token: string; viaCookie: boolean } {
   const header = req.headers.authorization || '';
   if (header.startsWith('Bearer ')) {
     const t = header.slice(7).trim();
@@ -135,8 +164,10 @@ const authUserCache = new Map<number, CachedAuthUser>();
 export function invalidateAuthUserCache(userId?: number): void {
   if (userId !== undefined) {
     authUserCache.delete(userId);
+    invalidateAdminSecurityCaches({ adminUserId: userId });
   } else {
     authUserCache.clear();
+    invalidateAdminSecurityCaches();
   }
 }
 
@@ -180,7 +211,7 @@ export async function requireAuth(req: AuthRequest, res: Response, next: NextFun
       res.status(401).json({ error: 'User account not found' });
       return;
     }
-    if (dbUser.status === 'suspended' || dbUser.status === 'closed') {
+    if (dbUser.status === 'suspended' || dbUser.status === 'closed' || dbUser.status === 'deactivated') {
       res.status(403).json({ error: `Account is ${dbUser.status}` });
       return;
     }
@@ -211,22 +242,123 @@ export async function requireAdmin(req: AuthRequest, res: Response, next: NextFu
 
   try {
     const decoded = jwt.verify(rawToken, config.jwtSecret) as AuthUserPayload;
-    const dbUser = await getAuthUserRecord(decoded.id);
+    const profile = await loadAdminSecurityProfile(decoded.id);
 
-    if (!dbUser || dbUser.status === 'suspended' || dbUser.status === 'closed') {
+    if (!profile) {
       res.status(401).json({ error: 'Admin account unavailable' });
       return;
     }
-    if (dbUser.locked_until && new Date(dbUser.locked_until).getTime() > Date.now()) {
+    if (profile.status !== 'active') {
+      res.status(403).json({
+        error: `Administrator account is ${profile.status}`,
+        code: 'ADMIN_INACTIVE',
+      });
+      return;
+    }
+    if (profile.lockedUntil && new Date(profile.lockedUntil).getTime() > Date.now()) {
       res.status(403).json({ error: 'Admin account is temporarily locked' });
       return;
     }
-    if (!['admin', 'owner'].includes(dbUser.role)) {
+    if (!['admin', 'owner'].includes(profile.role)) {
       res.status(403).json({ error: 'Owner or administrator privileges required' });
       return;
     }
 
-    req.user = { id: dbUser.id, email: dbUser.email, role: dbUser.role };
+    // Verify trackable session JTI (supports immediate session revocation)
+    const sessionCheck = await verifyActiveAdminSession(decoded.jti, profile.userId);
+    if (!sessionCheck.ok) {
+      res.status(401).json({
+        error: 'Administrator session revoked or expired. Please sign in again.',
+        code: 'SESSION_REVOKED',
+      });
+      return;
+    }
+
+    const devCheck = await resolveVerifiedDevice(req);
+    const reqIp = String(req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
+
+    if (!profile.isSuperAdmin) {
+      // Delegated administrators MUST present a valid, verified, active assigned device credential
+      if (!devCheck.ok || !devCheck.device) {
+        logDeviceActivity({
+          deviceId: devCheck.device?.id ?? null,
+          adminUserId: profile.userId,
+          eventType: 'blocked_unverified_device_request',
+          ipAddress: reqIp,
+          userAgent: String(req.headers['user-agent'] || ''),
+          details: { reason: devCheck.reason, path: req.originalUrl },
+        }).catch(() => {});
+        logAdminAction(
+          profile.userId,
+          'blocked_unverified_device_request',
+          'registered_devices',
+          devCheck.device ? String(devCheck.device.id) : 'none',
+          { reason: devCheck.reason, path: req.originalUrl },
+          { ipAddress: reqIp, actionResult: 'denied', sessionJti: decoded.jti || '', actorRole: profile.adminRoleSlug }
+        ).catch(() => {});
+        res.status(403).json({
+          error: 'Unauthorized or revoked device. Delegated administrators must access from a verified assigned device.',
+          code: 'DEVICE_UNAUTHORIZED',
+          reason: devCheck.reason,
+        });
+        return;
+      }
+
+      if (!profile.assignedDeviceIds.includes(devCheck.device.id)) {
+        logDeviceActivity({
+          deviceId: devCheck.device.id,
+          adminUserId: profile.userId,
+          eventType: 'blocked_unassigned_device_request',
+          ipAddress: reqIp,
+          userAgent: String(req.headers['user-agent'] || ''),
+          details: { path: req.originalUrl },
+        }).catch(() => {});
+        logAdminAction(
+          profile.userId,
+          'blocked_unassigned_device_request',
+          'registered_devices',
+          String(devCheck.device.id),
+          { deviceUid: devCheck.device.device_uid, path: req.originalUrl },
+          { ipAddress: reqIp, actionResult: 'denied', deviceId: devCheck.device.id, sessionJti: decoded.jti || '', actorRole: profile.adminRoleSlug }
+        ).catch(() => {});
+        res.status(403).json({
+          error: 'This device is not assigned to your administrator account.',
+          code: 'DEVICE_NOT_ASSIGNED',
+        });
+        return;
+      }
+
+      if (sessionCheck.deviceId !== null && sessionCheck.deviceId !== devCheck.device.id) {
+        res.status(403).json({
+          error: 'Session token does not match the verified device credential.',
+          code: 'DEVICE_SESSION_MISMATCH',
+        });
+        return;
+      }
+    }
+
+    req.user = {
+      id: profile.userId,
+      email: profile.email,
+      role: profile.role,
+      jti: decoded.jti,
+    };
+    req.adminCtx = {
+      userId: profile.userId,
+      email: profile.email,
+      fullName: profile.fullName,
+      role: profile.role,
+      isSuperAdmin: profile.isSuperAdmin,
+      adminRoleId: profile.adminRoleId,
+      adminRoleName: profile.adminRoleName,
+      adminRoleSlug: profile.adminRoleSlug,
+      permissions: profile.permissions,
+      deviceId: devCheck.ok && devCheck.device ? devCheck.device.id : null,
+      deviceUid: devCheck.ok && devCheck.device ? devCheck.device.device_uid : null,
+      deviceName: devCheck.ok && devCheck.device ? devCheck.device.device_name : null,
+      assignedDeviceIds: profile.assignedDeviceIds,
+      sessionJti: decoded.jti || '',
+    };
     next();
   } catch {
     res.status(401).json({ error: 'Invalid or expired admin session' });

@@ -6,6 +6,7 @@ import { hashPasswordArgon2id, verifyPasswordHash } from '../password-hash.ts';
 import { requireAuth, signUserToken, invalidateAuthUserCache, type AuthRequest } from '../middleware/auth.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
 import { derivWs } from '../deriv-client.ts';
+import { bindClientToVerifiedRequestDevice } from '../rbac-device.ts';
 
 const router = Router();
 
@@ -128,6 +129,7 @@ router.post('/auth/register', requireDb, async (req, res) => {
       'system'
     );
     await logSecurityEvent(newUser.id, 'register', req.ip, { email: cleanEmail });
+    await bindClientToVerifiedRequestDevice(req, newUser.id, 'email_register').catch(() => {});
 
     await sendTransactionalEmail({
       to: cleanEmail,
@@ -182,6 +184,7 @@ router.post('/auth/login', requireDb, async (req, res) => {
       )) || user;
     const token = signUserToken({ id: loggedUser.id, email: loggedUser.email, role: loggedUser.role });
     await logSecurityEvent(loggedUser.id, 'login_success', req.ip);
+    await bindClientToVerifiedRequestDevice(req, loggedUser.id, 'email_login').catch(() => {});
     res.json({ token, user: formatPublicUser(loggedUser) });
   } catch (err) {
     res.status(500).json({ error: err instanceof Error ? err.message : 'Login failed' });
