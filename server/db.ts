@@ -36,15 +36,22 @@ function sanitizeConnectionStringForPg(connectionString: string): string {
 export const databaseConfigured = Boolean(config.databaseUrl);
 const nonLocalDb = isNonLocalDatabase(config.databaseUrl);
 
-export const pool: Pool | null = databaseConfigured
-  ? new Pool({
+let initializedPool: Pool | null = null;
+if (databaseConfigured) {
+  try {
+    initializedPool = new Pool({
       connectionString: nonLocalDb ? sanitizeConnectionStringForPg(config.databaseUrl) : config.databaseUrl,
       ssl: nonLocalDb ? { rejectUnauthorized: false } : undefined,
       connectionTimeoutMillis: 10000,
       idleTimeoutMillis: 15000,
       max: 10,
-    })
-  : null;
+    });
+  } catch (err) {
+    console.warn('[AI Studio] PostgreSQL Pool init failed — running without DB:', err instanceof Error ? err.message : err);
+    initializedPool = null;
+  }
+}
+export const pool: Pool | null = initializedPool;
 
 if (pool) {
   pool.on('error', (err) => {

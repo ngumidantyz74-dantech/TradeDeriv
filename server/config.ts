@@ -48,13 +48,21 @@ export const config = {
   brevoSenderName: process.env.BREVO_SENDER_NAME || 'DERIV',
 };
 
-function isLocalUrl(url: string): boolean {
-  return !url || url.includes('localhost') || url.includes('127.0.0.1') || url.includes('MY_APP_URL');
+function isLocalOrPlaceholderUrl(url: string): boolean {
+  const lower = String(url || '').trim().toLowerCase();
+  return (
+    !lower ||
+    lower.includes('localhost') ||
+    lower.includes('127.0.0.1') ||
+    lower.includes('my_app_url') ||
+    lower.includes('your-service') ||
+    lower.includes('example.com')
+  );
 }
 
 export function resolvePublicOrigin(req?: Request): string {
-  const envOrigin = process.env.FRONTEND_URL || process.env.RENDER_EXTERNAL_URL || process.env.APP_URL || '';
-  if (envOrigin && !isLocalUrl(envOrigin)) {
+  const envOrigin = process.env.RENDER_EXTERNAL_URL || process.env.FRONTEND_URL || process.env.APP_URL || '';
+  if (envOrigin && !isLocalOrPlaceholderUrl(envOrigin)) {
     return envOrigin.replace(/\/+$/, '');
   }
   if (req) {
@@ -68,10 +76,10 @@ export function resolvePublicOrigin(req?: Request): string {
 }
 
 export function getDerivRedirectUri(req?: Request, explicitOrigin?: string): string {
-  if (config.derivOAuthRedirectUri && !isLocalUrl(config.derivOAuthRedirectUri)) {
+  if (config.derivOAuthRedirectUri && !isLocalOrPlaceholderUrl(config.derivOAuthRedirectUri)) {
     return config.derivOAuthRedirectUri.replace(/\/+$/, '');
   }
-  if (explicitOrigin && !isLocalUrl(explicitOrigin)) {
+  if (explicitOrigin && !isLocalOrPlaceholderUrl(explicitOrigin)) {
     return `${explicitOrigin.replace(/\/+$/, '')}/api/deriv/oauth/callback`;
   }
   return `${resolvePublicOrigin(req).replace(/\/+$/, '')}/api/deriv/oauth/callback`;

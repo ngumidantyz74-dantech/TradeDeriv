@@ -14,7 +14,7 @@ import {
 } from '../db.ts';
 import { encryptToken, decryptToken, generateCodeVerifier, sha256Base64Url, randomId, maskClientId } from '../crypto.ts';
 import { hashPasswordArgon2id } from '../password-hash.ts';
-import { requireAuth, signUserToken, type AuthRequest } from '../middleware/auth.ts';
+import { requireAuth, signUserToken, invalidateAuthUserCache, type AuthRequest } from '../middleware/auth.ts';
 import { derivWs, derivRestRequest, getActiveDerivAppId, OtpDerivClient } from '../deriv-client.ts';
 import { getDecryptedAccountToken } from '../trade-execution.ts';
 import { sendTransactionalEmail } from '../email-service.ts';
@@ -25,6 +25,15 @@ const usedStateJtis = new Map<string, number>();
 
 const USER_PROFILE_COLS =
   'id, email, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id, last_login_at, updated_at, created_at';
+
+function escapeHtml(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 export function isVirtualDerivAccount(
   loginId: string,
@@ -152,12 +161,62 @@ async function upsertDerivAccountForUser(params: {
   const enc = encryptToken(params.token);
 
   await execute(
+    'UPDATE account_authorizations SET revoked_at = NOW() WHERE connected_account_id = $1 AND revoked_at IS NULL',
+    [accountId]
+  );
+  await execute(
     `INSERT INTO account_authorizations (connected_account_id, user_id, auth_type, encrypted_token, token_iv, token_auth_tag, scopes)
      VALUES ($1, $2, $3, $4, $5, $6, $7)`,
     [accountId, params.userId, params.authType, enc.encryptedToken, enc.iv, enc.authTag, params.scopes]
   );
 
   return accountId;
+}
+
+async function syncRealDerivWalletForUser(userId: number): Promise<void> {
+  const realRows = await query<{
+    id: number;
+    last_known_balance: number;
+    balance_locked_by_admin: boolean;
+  }>(
+    `SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+     FROM connected_accounts
+     WHERE user_id = $1
+       AND is_virtual = FALSE
+       AND status = 'active'
+       AND (platform = 'deriv' OR platform IS NULL)
+     ORDER BY id ASC`,
+    [userId]
+  );
+  if (realRows.length === 0 || realRows.some((r) => Boolean(r.balance_locked_by_admin))) {
+    return;
+  }
+
+  const primaryBalance = Number(Number(realRows[0].last_known_balance || 0).toFixed(2));
+  const userRow = await queryOne<{ real_wallets_json: string | null }>(
+    'SELECT real_wallets_json FROM users WHERE id = $1',
+    [userId]
+  );
+  if (!userRow) return;
+
+  let currentRw: Record<string, number> = {
+    options: 0,
+    mt5_standard: 0,
+    mt5_gold: 0,
+    exchange_usdt: 0,
+  };
+  try {
+    currentRw = { ...currentRw, ...(JSON.parse(userRow.real_wallets_json || '{}') || {}) };
+  } catch {
+    // keep default shape
+  }
+
+  if (Number(currentRw.options ?? 0) === primaryBalance) return;
+  currentRw.options = primaryBalance;
+  await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+    JSON.stringify(currentRw),
+    userId,
+  ]);
 }
 
 function cleanDerivFullName(raw?: string): string {
@@ -381,10 +440,9 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
     const { code, state, error, error_description } = req.query;
 
     if (error) {
+      const safeErr = escapeHtml(error_description || error);
       res.status(400).send(
-        `<html><body style="font-family:sans-serif;padding:24px;"><h3>Deriv Authorization Cancelled</h3><p>${String(
-          error_description || error
-        )}</p><script>if(window.opener){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:${JSON.stringify(
+        `<html><body style="font-family:sans-serif;padding:24px;"><h3>Deriv Authorization Cancelled</h3><p>${safeErr}</p><script>if(window.opener){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:${JSON.stringify(
           String(error_description || error)
         )}},'*');setTimeout(()=>window.close(),1200);}</script></body></html>`
       );
@@ -433,10 +491,17 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
         loginIds: entries.map((e) => e.acct),
       });
 
+      const existingAccRows = await query<{ deriv_login_id: string }>(
+        'SELECT deriv_login_id FROM connected_accounts WHERE user_id = $1',
+        [session.user.id]
+      );
+      const existingLoginIds = new Set(existingAccRows.map((r) => String(r.deriv_login_id)));
+
       for (const e of entries) {
         const isVirtual = isVirtualDerivAccount(e.acct);
+        const alreadyKnown = existingLoginIds.has(e.acct);
         let bal = isVirtual ? 10000 : 0;
-        if (!session.preserveExistingBalances) {
+        if (!session.preserveExistingBalances || !alreadyKnown) {
           try {
             const balResp = await derivWs.requestWithToken(e.token, { balance: 1 }, 4000);
             if (balResp?.balance?.balance !== undefined) bal = Number(balResp.balance.balance);
@@ -455,10 +520,12 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
           token: e.token,
           authType: 'legacy_oauth',
           scopes: config.derivOAuthScopes,
-          preserveExistingBalances: session.preserveExistingBalances,
+          preserveExistingBalances: session.preserveExistingBalances && alreadyKnown,
         });
       }
 
+      await syncRealDerivWalletForUser(session.user.id);
+      invalidateAuthUserCache(session.user.id);
       const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
       await bindClientToVerifiedRequestDevice(req, session.user.id, 'deriv_oauth_legacy').catch(() => {});
       await logSecurityEvent(session.user.id, 'deriv_oauth_legacy_login', req.ip, {
@@ -718,6 +785,8 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       });
     }
 
+    await syncRealDerivWalletForUser(session.user.id);
+    invalidateAuthUserCache(session.user.id);
     const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
     await bindClientToVerifiedRequestDevice(req, session.user.id, 'deriv_oauth2_pkce').catch(() => {});
     await logSecurityEvent(session.user.id, 'deriv_oauth2_pkce_login', req.ip, {
@@ -745,7 +814,9 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Deriv OAuth callback error';
     res.status(500).send(
-      `<html><body style="font-family:sans-serif;padding:24px;"><h3>Connection Error</h3><p>${msg}</p><script>if(window.opener){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:${JSON.stringify(
+      `<html><body style="font-family:sans-serif;padding:24px;"><h3>Connection Error</h3><p>${escapeHtml(
+        msg
+      )}</p><script>if(window.opener){window.opener.postMessage({type:'DERIV_OAUTH_ERROR',error:${JSON.stringify(
         msg
       )}},'*');}</script></body></html>`
     );
@@ -762,17 +833,20 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
       return;
     }
 
-    const existingCount = await queryOne<{ c: string }>(
-      'SELECT COUNT(*)::text as c FROM connected_accounts WHERE user_id = $1',
+    const existingAccRows = await query<{ deriv_login_id: string }>(
+      'SELECT deriv_login_id FROM connected_accounts WHERE user_id = $1',
       [req.user!.id]
     );
-    const preserveExistingBalances = Number(existingCount?.c || 0) > 0;
+    const existingLoginIds = new Set(existingAccRows.map((r) => String(r.deriv_login_id)));
+    const preserveExistingBalances = existingLoginIds.size > 0;
 
     for (const a of accounts) {
       if (!a.acct || !a.token) continue;
-      const isVirtual = isVirtualDerivAccount(String(a.acct));
+      const loginId = String(a.acct);
+      const alreadyKnown = existingLoginIds.has(loginId);
+      const isVirtual = isVirtualDerivAccount(loginId);
       let bal = isVirtual ? 10000 : 0;
-      if (!preserveExistingBalances) {
+      if (!preserveExistingBalances || !alreadyKnown) {
         try {
           const resp = await derivWs.requestWithToken(String(a.token), { balance: 1 }, 4000);
           if (resp?.balance?.balance !== undefined) bal = Number(resp.balance.balance);
@@ -782,7 +856,7 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
       }
       await upsertDerivAccountForUser({
         userId: req.user!.id,
-        derivLoginId: String(a.acct),
+        derivLoginId: loginId,
         accountType: isVirtual ? 'Demo Options' : 'Real Options',
         platform: 'deriv',
         currency: String(a.cur || 'USD'),
@@ -791,9 +865,11 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
         token: String(a.token),
         authType: 'legacy_oauth',
         scopes: config.derivOAuthScopes,
-        preserveExistingBalances,
+        preserveExistingBalances: preserveExistingBalances && alreadyKnown,
       });
     }
+
+    await syncRealDerivWalletForUser(req.user!.id);
 
     // Best-effort profile hydration from first valid token
     if (accounts[0]?.token) {
@@ -816,6 +892,7 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
       await execute('UPDATE users SET last_login_at = NOW(), updated_at = NOW() WHERE id = $1', [req.user!.id]);
     }
     await bindClientToVerifiedRequestDevice(req, req.user!.id, 'deriv_oauth_exchange').catch(() => {});
+    invalidateAuthUserCache(req.user!.id);
 
     const updated = await query(
       `SELECT id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
@@ -886,7 +963,9 @@ router.post('/deriv/connect', requireDb, requireAuth, async (req: AuthRequest, r
     } catch {
       // ignore if token lacks read scope or timed out
     }
+    await syncRealDerivWalletForUser(req.user!.id);
     await bindClientToVerifiedRequestDevice(req, req.user!.id, 'deriv_pat_connect').catch(() => {});
+    invalidateAuthUserCache(req.user!.id);
 
     const user = await queryOne<{ email: string; full_name: string }>('SELECT email, full_name FROM users WHERE id = $1', [
       req.user!.id,
@@ -929,6 +1008,7 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
   );
 
   if (sync) {
+    let anyUpdated = false;
     for (const acc of rows) {
       // Never overwrite admin-locked balances during user-triggered ?sync=1
       if (acc.status !== 'active' || acc.balance_locked_by_admin) continue;
@@ -948,6 +1028,7 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
             const liveBal = Number(found.balance);
             acc.balance = liveBal;
             acc.last_known_balance = liveBal;
+            anyUpdated = true;
             await execute(
               'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE',
               [liveBal, acc.id]
@@ -959,6 +1040,7 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
             const liveBal = Number(balResp.balance.balance);
             acc.balance = liveBal;
             acc.last_known_balance = liveBal;
+            anyUpdated = true;
             await execute(
               'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE',
               [liveBal, acc.id]
@@ -968,6 +1050,10 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
       } catch {
         // keep cached balance
       }
+    }
+    if (anyUpdated) {
+      await syncRealDerivWalletForUser(req.user!.id);
+      invalidateAuthUserCache(req.user!.id);
     }
   }
 
@@ -1001,6 +1087,8 @@ router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: Auth
             'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2 AND COALESCE(balance_locked_by_admin, FALSE) = FALSE',
             [b, acc.id]
           );
+          await syncRealDerivWalletForUser(req.user!.id);
+          invalidateAuthUserCache(req.user!.id);
         }
       } catch {
         // keep existing

@@ -565,7 +565,7 @@ router.get('/admin/overview', requireDb, requireAdmin, requirePermission('dashbo
   const canViewMarkets = hasPermission(ctx, 'markets.manage');
   const rawInstruments = canViewMarkets
     ? await query(
-        `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
+        `SELECT m.symbol as id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
                 m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
          FROM market_instruments m
          LEFT JOIN market_data_cache c ON m.symbol = c.symbol
@@ -605,7 +605,7 @@ router.get('/admin/overview', requireDb, requireAdmin, requirePermission('dashbo
 
   const emailLogs = ctx.isSuperAdmin
     ? await query(
-        'SELECT id, recipient_email, subject, template, status, error_message, created_at FROM email_logs ORDER BY id DESC LIMIT 40'
+        "SELECT id, recipient_email, subject, template, status, COALESCE(provider_response, '') as error_message, provider_response, created_at FROM email_logs ORDER BY id DESC LIMIT 40"
       )
     : [];
 
@@ -1332,6 +1332,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
         realWallets: result.rw,
       });
     }
+    invalidateAuthUserCache(targetUserId);
 
     res.json({ ok: true, adjustment: result });
   } catch (err) {
@@ -1406,6 +1407,24 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
 
   if (touchesSensitive && !checkReauthHeader(req, res)) return;
 
+  const parseWalletPayload = (raw: unknown): Record<string, any> | null => {
+    if (raw === undefined || raw === null) return null;
+    if (typeof raw === 'string') {
+      try {
+        const parsed = JSON.parse(raw);
+        return parsed && typeof parsed === 'object' ? parsed : null;
+      } catch {
+        return null;
+      }
+    }
+    return typeof raw === 'object' ? (raw as Record<string, any>) : null;
+  };
+
+  const parsedDemoWallets = parseWalletPayload(demo_wallets);
+  const parsedRealWallets = parseWalletPayload(real_wallets);
+  const parsedExchangeBalances = parseWalletPayload(exchange_balances);
+  const parsedRealExchangeBalances = parseWalletPayload(real_exchange_balances);
+
   let passwordHash: string | null = null;
   if (password && String(password).trim().length >= 6) {
     passwordHash = await hashPasswordArgon2id(String(password).trim());
@@ -1450,6 +1469,8 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
          RETURNING id, email, full_name, deriv_nickname, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended,
                    locked_until, email_verified, preferred_currency, virtual_workspace_balance, demo_wallets_json,
                    real_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_client_id,
+                   originating_device_id, assigned_admin_id,
+                   COALESCE(ownership_verification_status, 'pending_verification') as ownership_verification_status,
                    COALESCE(last_login_at, updated_at, created_at) as last_login_at, created_at`,
         [
           nextEmail,
@@ -1464,10 +1485,10 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
           trading_suspended !== undefined ? Boolean(trading_suspended) : null,
           passwordHash,
           nextDemoBal,
-          demo_wallets ? JSON.stringify(demo_wallets) : null,
-          real_wallets ? JSON.stringify(real_wallets) : null,
-          exchange_balances ? JSON.stringify(exchange_balances) : null,
-          real_exchange_balances ? JSON.stringify(real_exchange_balances) : null,
+          parsedDemoWallets ? JSON.stringify(parsedDemoWallets) : null,
+          parsedRealWallets ? JSON.stringify(parsedRealWallets) : null,
+          parsedExchangeBalances ? JSON.stringify(parsedExchangeBalances) : null,
+          parsedRealExchangeBalances ? JSON.stringify(parsedRealExchangeBalances) : null,
           id,
         ]
       );
@@ -1499,7 +1520,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
         }
       }
 
-      if (real_wallets && typeof real_wallets === 'object') {
+      if (parsedRealWallets) {
         const prevRw = (() => {
           try {
             return { options: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
@@ -1507,7 +1528,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
             return { options: 0 };
           }
         })();
-        const rwOptions = fromCents(Math.max(0, toCents((real_wallets as any).options ?? 0)));
+        const rwOptions = fromCents(Math.max(0, toCents(parsedRealWallets.options ?? 0)));
         const realDeltaCents = toCents(rwOptions) - toCents(prevRw.options ?? 0);
         await client.query(
           `UPDATE connected_accounts
@@ -1535,8 +1556,8 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
 
       await client.query(
         `INSERT INTO administrator_audit_logs
-          (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json)
-         VALUES ($1, 'update_user', 'users', $2, $3, $4, $5, 'success', $6)`,
+          (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json, device_id, session_jti, actor_role)
+         VALUES ($1, 'update_user', 'users', $2, $3, $4, $5, 'success', $6, $7, $8, $9)`,
         [
           req.user!.id,
           String(id),
@@ -1544,6 +1565,9 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
           `status:${updated.status}, demo:$${Number(updated.virtual_workspace_balance || 0).toFixed(2)}`,
           reqIp(req),
           JSON.stringify({ email: updated.email }),
+          ctx.deviceId,
+          ctx.sessionJti,
+          ctx.adminRoleSlug,
         ]
       );
 
@@ -1553,8 +1577,8 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
     if (nextDemoBal !== null) {
       derivWs.emitUserEvent(id, 'balance_updated', { virtual_workspace_balance: nextDemoBal });
     }
-    if (real_wallets && typeof real_wallets === 'object') {
-      derivWs.emitUserEvent(id, 'balance_updated', { real_wallets, realWallets: real_wallets });
+    if (parsedRealWallets) {
+      derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: parsedRealWallets, realWallets: parsedRealWallets });
     }
     derivWs.emitUserEvent(id, 'account_updated', { userId: id });
     invalidateAuthUserCache(id);
@@ -1700,6 +1724,7 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, requir
     });
 
     derivWs.emitUserEvent(id, 'balance_updated', { virtual_workspace_balance: balance });
+    invalidateAuthUserCache(id);
     res.json({ ok: true, user: out });
   } catch (err) {
     res.status(err instanceof Error && err.message === 'User not found' ? 404 : 400).json({
@@ -1780,6 +1805,7 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
       derivWs.emitUserEvent(id, 'account_updated', { accountId: acc.id, balance: rw.options });
     }
     derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: rw, realWallets: rw });
+    invalidateAuthUserCache(id);
     res.json({ ok: true, real_wallets: rw });
   } catch (err) {
     res.status(err instanceof Error && err.message === 'User not found' ? 404 : 400).json({
@@ -1842,7 +1868,7 @@ router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, requir
         END,
         status = 'active',
         updated_at = NOW()
-      RETURNING ${ACCOUNT_COLS.replace('last_known_balance as balance, ', '')}`,
+      RETURNING ${ACCOUNT_COLS}`,
       [Number(userId), loginid, accountType, currency, isVirtual, balance]
     );
 
@@ -1856,6 +1882,7 @@ router.post('/admin/connected-accounts/connect', requireDb, requireAdmin, requir
       [account.id, Number(userId), enc.encryptedToken, enc.iv, enc.authTag]
     );
 
+    invalidateAuthUserCache(Number(userId));
     await logAdminAction(req.user!.id, 'admin_connect_deriv', 'connected_accounts', String(account.id));
     res.status(201).json({ account });
   } catch (err) {
@@ -1984,6 +2011,7 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
       }
     }
     derivWs.emitUserEvent(account.user_id, 'account_updated', { accountId: account.id, balance });
+    invalidateAuthUserCache(account.user_id);
     res.json({ ok: true, account });
   } catch (err) {
     res.status(err instanceof Error && err.message === 'Connected account not found' ? 404 : 400).json({
@@ -1993,11 +2021,12 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
 });
 
 router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
+  const ctx = getAdminRequestContext(req)!;
   const id = Number(req.params.id);
   const { account_type, currency, balance } = req.body || {};
 
   const existing = await queryOne<any>(
-    'SELECT id, user_id, account_type, currency FROM connected_accounts WHERE id = $1',
+    'SELECT id, user_id, deriv_login_id, account_type, currency, is_virtual, balance, last_known_balance FROM connected_accounts WHERE id = $1',
     [id]
   );
   if (!existing) {
@@ -2020,40 +2049,116 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePe
       ? fromCents(toCents(balance))
       : null;
 
-  const updated = await queryOne<any>(
-    `UPDATE connected_accounts
-     SET account_type = $1,
-         currency = $2,
-         balance = COALESCE($3, balance),
-         last_known_balance = COALESCE($3, last_known_balance),
-         balance_locked_by_admin = CASE WHEN $3 IS NOT NULL THEN TRUE ELSE balance_locked_by_admin END,
-         updated_at = NOW()
-     WHERE id = $4
-     RETURNING id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
-               last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
-               status, scopes, updated_at`,
-    [cleanType, cleanCurrency, nextBal, id]
-  );
+  const updated = await withTransaction(async (client) => {
+    const prevBal = fromCents(toCents(existing.last_known_balance ?? existing.balance));
+    const accRes = await client.query<any>(
+      `UPDATE connected_accounts
+       SET account_type = $1,
+           currency = $2,
+           balance = COALESCE($3, balance),
+           last_known_balance = COALESCE($3, last_known_balance),
+           balance_locked_by_admin = CASE WHEN $3 IS NOT NULL THEN TRUE ELSE balance_locked_by_admin END,
+           updated_at = NOW()
+       WHERE id = $4
+       RETURNING id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+                 last_known_balance as balance, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin,
+                 status, scopes, updated_at`,
+      [cleanType, cleanCurrency, nextBal, id]
+    );
+    const acc = accRes.rows[0];
 
-  await logAdminAction(
-    req.user!.id,
-    'update_connected_account',
-    'connected_accounts',
-    String(id),
-    { account_type: cleanType, currency: cleanCurrency, balance: nextBal },
-    {
-      previousValue: `${existing.account_type} (${existing.currency})`,
-      newValue: `${cleanType} (${cleanCurrency})`,
-      ipAddress: reqIp(req),
-      actionResult: 'success',
+    if (nextBal !== null) {
+      const deltaCents = toCents(nextBal) - toCents(prevBal);
+      if (acc.is_virtual) {
+        await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+          nextBal,
+          acc.user_id,
+        ]);
+      } else {
+        const uRes = await client.query<{ real_wallets_json: string }>(
+          'SELECT real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+          [acc.user_id]
+        );
+        const rw = (() => {
+          try {
+            return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(uRes.rows[0]?.real_wallets_json || '{}') };
+          } catch {
+            return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+          }
+        })();
+        const accTypeLow = `${acc.account_type || ''} ${acc.platform || ''}`.toLowerCase();
+        if (accTypeLow.includes('gold')) rw.mt5_gold = nextBal;
+        else if (accTypeLow.includes('mt5') || accTypeLow.includes('cfd') || accTypeLow.includes('standard')) rw.mt5_standard = nextBal;
+        else rw.options = nextBal;
+
+        await client.query('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+          JSON.stringify(rw),
+          acc.user_id,
+        ]);
+      }
+
+      await client.query(
+        `INSERT INTO cashier_transactions
+          (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+         VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, $6, $7, 'completed', $8, $9)`,
+        [
+          acc.user_id,
+          deltaCents > 0 ? 'credit' : deltaCents < 0 ? 'debit' : 'adjustment',
+          deltaCents >= 0 ? 'Admin Treasury' : acc.deriv_login_id,
+          deltaCents >= 0 ? acc.deriv_login_id : 'Admin Treasury',
+          fromCents(Math.abs(deltaCents)),
+          acc.currency || 'USD',
+          `ADM-${randomId(4).toUpperCase()}`,
+          acc.is_virtual ? 'demo' : 'real',
+          JSON.stringify({ adminUserId: req.user!.id, accountId: id, previousBalance: prevBal, newBalance: nextBal }),
+        ]
+      );
     }
-  );
+
+    await client.query(
+      `INSERT INTO administrator_audit_logs
+        (admin_user_id, action, target_type, target_id, previous_value, new_value, ip_address, action_result, details_json, device_id, session_jti, actor_role)
+       VALUES ($1, 'update_connected_account', 'connected_accounts', $2, $3, $4, $5, 'success', $6, $7, $8, $9)`,
+      [
+        req.user!.id,
+        String(id),
+        `${existing.account_type} (${existing.currency}) $${prevBal.toFixed(2)}`,
+        `${cleanType} (${cleanCurrency}) $${Number(acc?.balance ?? prevBal).toFixed(2)}`,
+        reqIp(req),
+        JSON.stringify({ account_type: cleanType, currency: cleanCurrency, balance: nextBal }),
+        ctx.deviceId,
+        ctx.sessionJti,
+        ctx.adminRoleSlug,
+      ]
+    );
+
+    return acc;
+  });
+
+  if (nextBal !== null && updated) {
+    if (updated.is_virtual) {
+      derivWs.emitUserEvent(updated.user_id, 'balance_updated', { virtual_workspace_balance: nextBal });
+    } else {
+      const uRow = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
+        updated.user_id,
+      ]);
+      if (uRow) {
+        try {
+          const rw = JSON.parse(uRow.real_wallets_json || '{}');
+          derivWs.emitUserEvent(updated.user_id, 'balance_updated', { real_wallets: rw, realWallets: rw });
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
 
   derivWs.emitUserEvent(existing.user_id, 'account_updated', {
     accountId: id,
     account_type: cleanType,
     balance: updated?.balance,
   });
+  invalidateAuthUserCache(existing.user_id);
 
   res.json({ ok: true, account: updated });
 });
@@ -2276,7 +2381,7 @@ router.delete('/admin/strategies/:id', requireDb, requireAdmin, requirePermissio
 // Instruments Management
 router.get('/admin/instruments', requireDb, requireAdmin, requirePermission('markets.manage'), async (_req, res) => {
   const rows = await query(
-    `SELECT m.id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
+    `SELECT m.symbol as id, m.symbol, m.display_name, m.category, m.market, m.submarket, m.pip_size, m.spread,
             m.min_stake, m.max_stake, m.is_active, c.price, c.change_pct
      FROM market_instruments m
      LEFT JOIN market_data_cache c ON m.symbol = c.symbol
@@ -2305,7 +2410,7 @@ router.patch('/admin/instruments/:symbol', requireDb, requireAdmin, requirePermi
       is_active = COALESCE($5, is_active),
       updated_at = NOW()
      WHERE symbol = $6
-     RETURNING id, symbol, display_name, category, market, submarket, pip_size, spread, min_stake, max_stake, is_active`,
+     RETURNING symbol as id, symbol, display_name, category, market, submarket, pip_size, spread, min_stake, max_stake, is_active`,
     [
       display_name ?? null,
       spread !== undefined ? Number(spread) : null,

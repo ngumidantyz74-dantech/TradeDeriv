@@ -1,3 +1,4 @@
+import './server/middleware/async-errors.ts';
 import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
@@ -16,6 +17,7 @@ import {
   requireDb,
   getSetting,
   getCachedSetting,
+  logSystemError,
 } from './server/db.ts';
 import { derivWs } from './server/deriv-client.ts';
 import { startMtmPositionMonitor } from './server/trade-execution.ts';
@@ -49,6 +51,7 @@ async function bootstrapServer() {
     helmet({
       contentSecurityPolicy: false,
       crossOriginEmbedderPolicy: false,
+      crossOriginOpenerPolicy: false,
     })
   );
   app.use(cors({ origin: true, credentials: true }));
@@ -133,8 +136,20 @@ async function bootstrapServer() {
   app.use('/api', adminRoutes);
   app.use('/api', intelligenceRoutes);
 
-  // Root /callback alias for Deriv OAuth redirect URIs
+  // Root /callback and / OAuth redirect fallback for Deriv OAuth redirect URIs
   app.get(['/callback', '/callback/'], requireDb, handleDerivOAuthCallback);
+  app.get('/', (req, res, next) => {
+    const hasPkceParams = Boolean(req.query.code && req.query.state);
+    const hasLegacyParams = Boolean(req.query.acct1 && req.query.token1);
+    const hasOAuthError = Boolean(req.query.error && (req.query.state || req.query.error_description));
+    if (hasPkceParams || hasLegacyParams || hasOAuthError) {
+      requireDb(req, res, () => {
+        Promise.resolve(handleDerivOAuthCallback(req, res)).catch(next);
+      });
+      return;
+    }
+    next();
+  });
 
   // Realtime WebSocket /ws
   const wss = new WebSocketServer({ server, path: '/ws' });
@@ -267,10 +282,49 @@ async function bootstrapServer() {
     app.use(vite.middlewares);
   }
 
+  // Global Express error handler so unhandled route/middleware errors never crash the process
+  app.use((err: any, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    const statusCode = Number(err?.statusCode || err?.status || 500);
+    const message = statusCode < 500 && err?.message ? String(err.message) : 'Internal server error';
+    console.error(`[Express Error] ${req.method} ${req.originalUrl}:`, err);
+    if (pool) {
+      logSystemError('express', err instanceof Error ? err.message : String(err), 'error', {
+        method: req.method,
+        path: req.originalUrl,
+        code: err?.code,
+      }).catch(() => {});
+    }
+    if (res.headersSent) return;
+    if (req.originalUrl.startsWith('/api')) {
+      res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 500).json({ error: message });
+    } else {
+      res.status(statusCode >= 400 && statusCode < 600 ? statusCode : 500).send(message);
+    }
+  });
+
   server.listen(config.port, '0.0.0.0', () => {
     console.log(`TradeDeriv server running on http://0.0.0.0:${config.port} (${config.nodeEnv})`);
   });
 }
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled Promise Rejection:', reason);
+  if (pool) {
+    logSystemError(
+      'process_unhandled_rejection',
+      reason instanceof Error ? reason.message : String(reason),
+      'error',
+      {}
+    ).catch(() => {});
+  }
+});
+
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught Exception:', err);
+  if (pool) {
+    logSystemError('process_uncaught_exception', err.message, 'error', { name: err.name }).catch(() => {});
+  }
+});
 
 bootstrapServer().catch((err) => {
   console.error('Failed to start TradeDeriv server:', err);
