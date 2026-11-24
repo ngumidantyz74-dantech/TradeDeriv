@@ -228,7 +228,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   if (session.recentPrices.length > 20) session.recentPrices.shift();
 
   const openBotOrders = await query<any>(
-    `SELECT id, user_id, symbol, contract_type, stake, multiplier, entry_price, barrier, sl_usd, tp_usd, opened_at
+    `SELECT id, user_id, symbol, contract_type, execution_mode, deriv_contract_id, stake, multiplier, entry_price, barrier, sl_usd, tp_usd, opened_at
      FROM virtual_orders
      WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' AND source = 'bot'
      LIMIT 20`,
@@ -237,6 +237,8 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 
   for (const order of openBotOrders) {
     if (closingOrderLocks.has(order.id)) continue;
+    // Live Deriv contracts are settled authoritatively by monitorDerivOpenContract
+    if (order.execution_mode === 'deriv') continue;
     const oct = String(order.contract_type || '').toUpperCase();
     const nowMs = Date.now();
     const shouldPersist = nowMs - (botLastPersistAt.get(order.id) || 0) >= 3000;
@@ -244,6 +246,36 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     if (oct === 'ACCU') {
       const growthRate = Math.min(0.05, Math.max(0.01, Number(order.barrier || session.growthRate || 0.02)));
       const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / 1500));
+      // Realistic mock barrier knockout chance per tick calibrated to growth rate (1%..5%)
+      const knockoutChance = Math.min(0.14, growthRate * 1.6);
+      if (elapsedTicks >= 2 && Math.random() < knockoutChance) {
+        closingOrderLocks.add(order.id);
+        botLastPersistAt.delete(order.id);
+        await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+          tick.quote,
+          -Number(order.stake),
+          order.id,
+        ]).catch(() => {});
+        closeOrderById(order.id, session.userId)
+          .then((closed) => {
+            if (closed) {
+              const p = Number(closed.pnl || 0);
+              session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
+              session.runState = p >= 0 ? 'won' : 'lost';
+              appendJournal(
+                session,
+                p >= 0 ? 'profit' : 'loss',
+                p >= 0 ? `Profit amount: +${p.toFixed(2)} USD` : `Loss amount: ${p.toFixed(2)} USD`
+              );
+              applyProgressionStake(session, p >= 0);
+              derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+            }
+          })
+          .finally(() => closingOrderLocks.delete(order.id))
+          .catch(() => {});
+        continue;
+      }
+
       const accruedPnl = Number((order.stake * (Math.pow(1 + growthRate, elapsedTicks) - 1)).toFixed(2));
       if (shouldPersist) {
         botLastPersistAt.set(order.id, nowMs);
@@ -409,7 +441,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       telemetry: serializeTelemetry(session),
     });
 
-    if (!['MULTUP', 'MULTDOWN', 'ACCU'].includes(decision.contractType)) {
+    if (order.execution_mode === 'deriv' || !['MULTUP', 'MULTDOWN', 'ACCU'].includes(decision.contractType)) {
       const checkInterval = setInterval(async () => {
         try {
           const row = await queryOne<{ status: string; pnl: number }>(
@@ -434,16 +466,19 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         } catch {
           clearInterval(checkInterval);
         }
-      }, 1000);
+      }, 900);
     }
   } catch (err) {
     const rawMsg = err instanceof Error ? err.message : 'Execution paused';
-    const isInsuff = rawMsg.toLowerCase().includes('insufficient');
+    const low = rawMsg.toLowerCase();
+    const isInsuff = low.includes('insufficient');
+    const isFatalAuth = low.includes('token') || low.includes('reconnect') || low.includes('suspended');
     session.lastSignal = isInsuff
       ? 'Your account balance is insufficient to buy this contract.'
       : rawMsg;
     appendJournal(session, 'error', session.lastSignal);
-    if (isInsuff) {
+    derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+    if (isInsuff || isFatalAuth) {
       await stopBotSession(session.userId, session.lastSignal);
     }
   } finally {
@@ -512,6 +547,39 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     pipSize: 0.01,
   };
 
+  const targetMode: 'real' | 'demo' = cfg.accountMode === 'real' ? 'real' : 'demo';
+  let resolvedConnectedAccountId: number | null = cfg.connectedAccountId || null;
+  let resolvedExecutionMode: 'virtual' | 'deriv' =
+    cfg.executionMode || (targetMode === 'real' ? 'deriv' : 'virtual');
+  let resolvedRealLoginId: string | null = null;
+  let resolvedRealIsDbLocked = false;
+
+  if (targetMode === 'real') {
+    const realAcc = resolvedConnectedAccountId
+      ? await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
+          `SELECT id, deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+           FROM connected_accounts
+           WHERE id = $1 AND user_id = $2 AND is_virtual = FALSE AND status = 'active'`,
+          [resolvedConnectedAccountId, cfg.userId]
+        )
+      : await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
+          `SELECT id, deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+           FROM connected_accounts
+           WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active'
+           ORDER BY COALESCE(balance_locked_by_admin, FALSE) ASC, id ASC
+           LIMIT 1`,
+          [cfg.userId]
+        );
+    if (realAcc) {
+      resolvedConnectedAccountId = realAcc.id;
+      resolvedRealLoginId = realAcc.deriv_login_id;
+      resolvedRealIsDbLocked = Boolean(realAcc.balance_locked_by_admin);
+      if (!resolvedRealIsDbLocked) {
+        resolvedExecutionMode = 'deriv';
+      }
+    }
+  }
+
   const session: InternalBotSession = {
     userId: cfg.userId,
     running: true,
@@ -541,9 +609,9 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     durationUnit: cfg.durationUnit || 't',
     multiplier: Number(cfg.multiplier || 100),
     growthRate: Number(cfg.growthRate || 0.02),
-    executionMode: cfg.executionMode || (cfg.accountMode === 'real' ? 'deriv' : 'virtual'),
-    connectedAccountId: cfg.connectedAccountId || null,
-    accountMode: cfg.accountMode === 'real' ? 'real' : 'demo',
+    executionMode: resolvedExecutionMode,
+    connectedAccountId: resolvedConnectedAccountId,
+    accountMode: targetMode,
     executionSpeed: cfg.executionSpeed === 'normal' ? 'normal' : 'fast',
     analyserSync: Boolean(cfg.analyserSync),
     unsubscribeTick: null,
@@ -554,7 +622,13 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     journal: [],
   };
 
-  appendJournal(session, 'info', 'You are using your USD account.');
+  appendJournal(
+    session,
+    'info',
+    targetMode === 'real' && resolvedRealLoginId && !resolvedRealIsDbLocked
+      ? `You are using your live Real Deriv account (${resolvedRealLoginId}).`
+      : 'You are using your USD account.'
+  );
 
   session.unsubscribeTick = derivWs.onTick((tick) => {
     if (tick.symbol === session.symbol && session.running) {

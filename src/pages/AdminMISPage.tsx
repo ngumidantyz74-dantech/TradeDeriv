@@ -3156,11 +3156,15 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                       >
                         {a.is_virtual ? 'DEMO' : 'REAL'}
                       </span>
-                      {a.balance_locked_by_admin && (
+                      {a.balance_locked_by_admin ? (
                         <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500/20 text-amber-300">
                           DB Locked
                         </span>
-                      )}
+                      ) : !a.is_virtual ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-[#00A878]/20 text-[#00A878]">
+                          Live Real Deriv
+                        </span>
+                      ) : null}
                     </div>
                     <span className="text-[11px] text-slate-400 shrink-0">{a.status}</span>
                   </div>
@@ -3261,9 +3265,17 @@ export const AdminMISPage: React.FC<{ onReturnToSite: () => void }> = ({ onRetur
                             setBusyAction(null);
                           }
                         }}
-                        className="px-2.5 py-1.5 rounded-lg bg-white/5 hover:bg-white/10 cursor-pointer"
+                        className={`px-2.5 py-1.5 rounded-lg cursor-pointer font-semibold ${
+                          !a.is_virtual && a.balance_locked_by_admin
+                            ? 'bg-[#00A878]/20 hover:bg-[#00A878]/30 text-[#00A878]'
+                            : 'bg-white/5 hover:bg-white/10'
+                        }`}
                       >
-                        {busyAction === `sync-${a.id}` ? 'Syncing...' : 'Sync Live'}
+                        {busyAction === `sync-${a.id}`
+                          ? 'Syncing...'
+                          : !a.is_virtual && a.balance_locked_by_admin
+                            ? 'Unlock -> Real Deriv'
+                            : 'Sync Live'}
                       </button>
                       <button
                         type="button"

@@ -2596,6 +2596,35 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requi
   res.json({ ok: true, account });
 });
 
+router.patch('/admin/connected-accounts/:id/real-trading', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
+  const id = Number(req.params.id);
+  const currentAcc = await queryOne<any>(
+    'SELECT id, user_id, deriv_login_id, is_virtual, balance_locked_by_admin FROM connected_accounts WHERE id = $1',
+    [id]
+  );
+  if (!currentAcc) {
+    res.status(404).json({ error: 'Connected account not found' });
+    return;
+  }
+  if (!(await assertAdminCanAccessClient(req, res, currentAcc.user_id, 'toggle_real_trading'))) return;
+  const enableLiveReal = req.body?.enabled !== undefined ? Boolean(req.body.enabled) : Boolean(currentAcc.balance_locked_by_admin);
+  const nextLocked = !enableLiveReal;
+  await execute('UPDATE connected_accounts SET balance_locked_by_admin = $1, updated_at = NOW() WHERE id = $2', [
+    nextLocked,
+    id,
+  ]);
+  invalidateAuthUserCache(currentAcc.user_id);
+  derivWs.emitUserEvent(currentAcc.user_id, 'account_updated', { accountId: id });
+  await logAdminAction(
+    req.user!.id,
+    enableLiveReal ? 'enable_live_real_trading' : 'lock_db_balance',
+    'connected_accounts',
+    String(id),
+    { balance_locked_by_admin: nextLocked }
+  );
+  res.json({ ok: true, balance_locked_by_admin: nextLocked });
+});
+
 router.post('/admin/connected-accounts/:id/disconnect', requireDb, requireAdmin, requirePermission('clients.manage'), async (req: AuthRequest, res) => {
   const id = Number(req.params.id);
   const acc = await queryOne<{ user_id: number }>('SELECT user_id FROM connected_accounts WHERE id = $1', [id]);

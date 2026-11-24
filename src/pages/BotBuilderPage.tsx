@@ -402,9 +402,35 @@ export const BotBuilderPage: React.FC = () => {
   const [qsSelected, setQsSelected] = useState<QuickStrategyDef>(QUICK_STRATEGIES[0]);
 
   const [telemetry, setTelemetry] = useState<BotTelemetry | null>(null);
-  const [sessionResetAt, setSessionResetAt] = useState<number>(0);
+  const sessionAnchorKey = useMemo(
+    () => (user?.id ? `td_bot_session_${user.id}_${accountMode}` : null),
+    [user?.id, accountMode]
+  );
+  const [sessionResetAt, setSessionResetAt] = useState<number>(() => Date.now());
   const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
+
+  // Restore active/last session anchor per user + accountMode (never mix Demo/Real or stale historical runs)
+  useEffect(() => {
+    if (!sessionAnchorKey) return;
+    try {
+      const saved = sessionStorage.getItem(sessionAnchorKey);
+      const parsed = saved ? Number(saved) : 0;
+      if (parsed > 0 && Number.isFinite(parsed)) {
+        setSessionResetAt(parsed);
+        return;
+      }
+    } catch {
+      // ignore
+    }
+    const now = Date.now();
+    setSessionResetAt(now);
+    try {
+      sessionStorage.setItem(sessionAnchorKey, String(now));
+    } catch {
+      // ignore
+    }
+  }, [sessionAnchorKey]);
 
   // Embedded Lightweight Chart refs (for Deriv Bot Chart tab)
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
@@ -497,17 +523,44 @@ export const BotBuilderPage: React.FC = () => {
   const pollStatus = useCallback(async () => {
     try {
       const res = await apiFetch<{ telemetry: BotTelemetry | null }>('/api/bots/status');
-      setTelemetry(res.telemetry);
+      const tel = res.telemetry;
+      setTelemetry(tel);
+      if (tel?.running && tel.startedAt && tel.accountMode === accountMode) {
+        const startedMs = new Date(tel.startedAt).getTime() - 2000;
+        if (Number.isFinite(startedMs) && startedMs > 0) {
+          setSessionResetAt((prev) => {
+            if (prev === 0 || prev > startedMs) {
+              if (sessionAnchorKey) {
+                try {
+                  sessionStorage.setItem(sessionAnchorKey, String(startedMs));
+                } catch {
+                  // ignore
+                }
+              }
+              return startedMs;
+            }
+            return prev;
+          });
+        }
+      }
     } catch {
       // ignore
     }
-  }, []);
+  }, [accountMode, sessionAnchorKey]);
 
   useEffect(() => {
     pollStatus();
-    const timer = setInterval(pollStatus, 1800);
+    const timer = setInterval(pollStatus, 1400);
     return () => clearInterval(timer);
   }, [pollStatus]);
+
+  // Keep header balance & session transactions synced immediately after every bot trade / settlement
+  useEffect(() => {
+    if (!telemetry) return;
+    if ((telemetry.tradesPlaced || 0) === 0 && !telemetry.running) return;
+    refreshOrders();
+    refreshAll();
+  }, [telemetry?.tradesPlaced, telemetry?.wins, telemetry?.losses, telemetry?.running, refreshOrders, refreshAll]);
 
   // Embedded Lightweight Chart when botView === 'chart' (Screenshot 152825)
   useEffect(() => {
@@ -667,6 +720,17 @@ export const BotBuilderPage: React.FC = () => {
         method: 'POST',
         body: JSON.stringify(payload),
       });
+      const anchorMs = res.telemetry?.startedAt
+        ? new Date(res.telemetry.startedAt).getTime() - 2000
+        : Date.now() - 2000;
+      setSessionResetAt(anchorMs);
+      if (sessionAnchorKey) {
+        try {
+          sessionStorage.setItem(sessionAnchorKey, String(anchorMs));
+        } catch {
+          // ignore
+        }
+      }
       setTelemetry(res.telemetry);
       setTelemetryOpen(true);
       await Promise.all([refreshOrders(), refreshAll()]);
@@ -852,13 +916,21 @@ export const BotBuilderPage: React.FC = () => {
     () =>
       orders.filter((o) => {
         if (o.source !== 'bot') return false;
-        if (sessionResetAt > 0 && new Date(o.opened_at).getTime() < sessionResetAt) return false;
+        const mode = o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo');
+        if (mode !== accountMode) return false;
+        const openedMs = new Date(o.opened_at).getTime();
+        if (sessionResetAt > 0 && Number.isFinite(openedMs) && openedMs < sessionResetAt) return false;
         return true;
       }),
-    [orders, sessionResetAt]
+    [orders, accountMode, sessionResetAt]
   );
 
-  // Totals for the 2x3 Drawer Footer (Screenshots 152613 & 152655)
+  const closedBotOrders = useMemo(
+    () => botOrders.filter((o) => o.status === 'CLOSED'),
+    [botOrders]
+  );
+
+  // Totals for the 2x3 Drawer Footer — derived cleanly from session orders so profit/loss matches the header balance to the cent
   const totalStake = useMemo(
     () => Number(botOrders.reduce((s, o) => s + Number(o.stake || 0), 0).toFixed(2)),
     [botOrders]
@@ -866,23 +938,29 @@ export const BotBuilderPage: React.FC = () => {
   const totalPayout = useMemo(
     () =>
       Number(
-        botOrders
+        closedBotOrders
           .reduce((s, o) => {
             const p = Number(o.pnl || 0);
             if (p > 0) return s + Number(o.payout || Number(o.stake || 0) + p);
-            return s;
+            return s + Math.max(0, Number(o.payout || 0));
           }, 0)
           .toFixed(2)
       ),
-    [botOrders]
+    [closedBotOrders]
   );
-  const totalRuns = telemetry?.tradesPlaced ?? botOrders.length;
-  const contractsWon = telemetry?.wins ?? botOrders.filter((o) => Number(o.pnl || 0) > 0).length;
-  const contractsLost = telemetry?.losses ?? botOrders.filter((o) => Number(o.pnl || 0) <= 0 && o.status === 'CLOSED').length;
-  const totalProfitLoss =
-    telemetry && (telemetry.tradesPlaced > 0 || telemetry.running)
-      ? Number(telemetry.realizedPnl || 0)
-      : Number(botOrders.reduce((s, o) => s + Number(o.pnl || 0), 0).toFixed(2));
+  const totalRuns = botOrders.length;
+  const contractsWon = useMemo(
+    () => closedBotOrders.filter((o) => Number(o.pnl || 0) > 0).length,
+    [closedBotOrders]
+  );
+  const contractsLost = useMemo(
+    () => closedBotOrders.filter((o) => Number(o.pnl || 0) <= 0).length,
+    [closedBotOrders]
+  );
+  const totalProfitLoss = useMemo(
+    () => Number(closedBotOrders.reduce((s, o) => s + Number(o.pnl || 0), 0).toFixed(2)),
+    [closedBotOrders]
+  );
 
   const latestBotOrder = botOrders[0];
   const latestMetrics = latestBotOrder ? computeLiveOrderMetrics(latestBotOrder, ticks) : null;
@@ -946,7 +1024,15 @@ export const BotBuilderPage: React.FC = () => {
 
   const handleResetSummaryStats = () => {
     if (telemetry?.running) return;
-    setSessionResetAt(Date.now());
+    const now = Date.now();
+    setSessionResetAt(now);
+    if (sessionAnchorKey) {
+      try {
+        sessionStorage.setItem(sessionAnchorKey, String(now));
+      } catch {
+        // ignore
+      }
+    }
     setTelemetry(null);
   };
 

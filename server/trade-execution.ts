@@ -1,6 +1,7 @@
 import { query, queryOne, execute, addNotification, logSystemError, getCachedSetting } from './db.ts';
 import { decryptToken } from './crypto.ts';
 import { derivWs, derivRestRequest, OtpDerivClient, getActiveDerivAppId } from './deriv-client.ts';
+import { invalidateAuthUserCache } from './middleware/auth.ts';
 
 function extractDerivOtpWsUrl(otpResp: any): string {
   const raw = String(
@@ -391,7 +392,9 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const requestedAcc = input.connectedAccountId
     ? modeAccounts.find((a) => Number(a.id) === Number(input.connectedAccountId)) || null
     : requestedBucket === 'options'
-      ? modeAccounts.find((a) => a.platform === 'deriv' || !a.platform) || null
+      ? modeAccounts
+          .filter((a) => a.platform === 'deriv' || !a.platform)
+          .sort((a, b) => Number(Boolean(a.balance_locked_by_admin)) - Number(Boolean(b.balance_locked_by_admin)))[0] || null
       : modeAccounts
           .filter((a) => classifyConnectedAccountBucket(a) === requestedBucket)
           .sort((a, b) => Number(b.last_known_balance ?? b.balance ?? 0) - Number(a.last_known_balance ?? a.balance ?? 0))[0] ||
@@ -404,20 +407,25 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const accDerivedBucket = matchingAcc ? classifyConnectedAccountBucket(matchingAcc) : 'options';
   const effectiveBucket: WalletBucket = accDerivedBucket !== 'options' ? accDerivedBucket : requestedBucket;
 
+  const isRealMode = accountMode === 'real';
+  const isDbLocked = Boolean(matchingAcc?.balance_locked_by_admin);
+  // If Super Admin has unlocked the Real account (not DB-locked), ALL real trades MUST run via live Deriv API
+  const hasUnlockedRealDerivAcc = isRealMode && Boolean(matchingAcc) && !isDbLocked;
+
   const shouldAttemptDerivApi =
     effectiveBucket === 'options' &&
     Boolean(targetAccId) &&
-    (explicitDeriv || accountMode === 'real');
+    (explicitDeriv || isRealMode);
 
   if (shouldAttemptDerivApi && targetAccId) {
     const shownRealBal =
-      accountMode === 'real'
-        ? matchingAcc?.balance_locked_by_admin
-          ? Math.max(Number(matchingAcc.last_known_balance || 0), Number(userRealWallets.options || 0))
+      isRealMode
+        ? isDbLocked
+          ? Math.max(Number(matchingAcc?.last_known_balance || 0), Number(userRealWallets.options || 0))
           : Number(matchingAcc?.last_known_balance ?? userRealWallets.options ?? 0)
         : Number(user.virtual_workspace_balance || 0);
 
-    if (accountMode === 'real' && Boolean(matchingAcc?.balance_locked_by_admin) && shownRealBal < stake) {
+    if (isRealMode && isDbLocked && shownRealBal < stake) {
       throw new Error(
         `Insufficient Real USD Wallet balance ($${shownRealBal.toFixed(2)} available, $${stake.toFixed(2)} required). Deposit funds to continue.`
       );
@@ -425,7 +433,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
     const creds = await getDecryptedAccountToken(targetAccId, input.userId);
     if (!creds) {
-      if (explicitDeriv && !(accountMode === 'real' && shownRealBal >= stake)) {
+      if (hasUnlockedRealDerivAcc || (explicitDeriv && !(isRealMode && isDbLocked && shownRealBal >= stake))) {
         throw new Error('Deriv account authorization token is missing or revoked. Reconnect your Deriv account.');
       }
     } else {
@@ -602,6 +610,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
               JSON.stringify(rwNext),
               input.userId,
             ]);
+            invalidateAuthUserCache(input.userId);
             derivWs.emitUserEvent(input.userId, 'account_updated', {
               accountId: creds.account.id,
               balance: liveBal,
@@ -611,7 +620,10 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
               realWallets: rwNext,
             });
           }
-        } else if (explicitDeriv) {
+          if (creds.account.balance_locked_by_admin) {
+            invalidateAuthUserCache(input.userId);
+          }
+        } else if (explicitDeriv || hasUnlockedRealDerivAcc) {
           throw new Error('Deriv did not confirm a contract ID for this order.');
         }
       } catch (err) {
@@ -621,12 +633,15 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
           symbol: input.symbol,
           contractType,
           explicitDeriv,
+          isDbLocked,
         });
+        // Only fall back to DB site-settlement when Admin has explicitly DB-locked this Real account
         const canFallbackToDbReal =
-          accountMode === 'real' &&
+          isRealMode &&
+          isDbLocked &&
           engineCfg.siteSettlementForLockedReal !== false &&
           shownRealBal >= stake;
-        if (explicitDeriv && !canFallbackToDbReal) {
+        if ((explicitDeriv || hasUnlockedRealDerivAcc) && !canFallbackToDbReal) {
           throw new Error(`Deriv rejected order: ${errMsg}`);
         }
         actualMode = 'virtual';
@@ -750,6 +765,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         });
       }
       derivWs.emitUserEvent(input.userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
+      invalidateAuthUserCache(input.userId);
     } else {
       accountMode = 'demo';
       if (user.virtual_workspace_balance < stake) {
@@ -767,6 +783,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         [newBal, input.userId]
       ).catch(() => {});
       derivWs.emitUserEvent(input.userId, 'balance_updated', { virtual_workspace_balance: newBal });
+      invalidateAuthUserCache(input.userId);
     }
   }
 
@@ -845,8 +862,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   } else if (
     actualMode === 'deriv' &&
     derivContractId &&
-    resolvedConnectedAccountId &&
-    !['MULTUP', 'MULTDOWN'].includes(contractType)
+    resolvedConnectedAccountId
   ) {
     monitorDerivOpenContract(
       Number(created.id),
@@ -981,6 +997,7 @@ async function monitorDerivOpenContract(
             JSON.stringify(rw),
             userId,
           ]);
+          invalidateAuthUserCache(userId);
           derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
           derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
         } else if (payout > 0) {
@@ -1201,6 +1218,7 @@ export async function creditSettledPayoutToUser(
       );
       derivWs.emitUserEvent(userId, 'account_updated', { accountId: realAcc.id, balance: rw.options });
     }
+    invalidateAuthUserCache(userId);
     derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
   } else {
     await execute(
@@ -1216,11 +1234,49 @@ export async function creditSettledPayoutToUser(
         "UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)",
         [updatedUser.virtual_workspace_balance, userId]
       ).catch(() => {});
+      invalidateAuthUserCache(userId);
       derivWs.emitUserEvent(userId, 'balance_updated', {
         virtual_workspace_balance: updatedUser.virtual_workspace_balance,
       });
     }
   }
+}
+
+function computeCalibratedMockWinProbability(
+  contractType: string,
+  barrier: number,
+  configuredWinPct: number,
+  isAnalyserSynced: boolean
+): number {
+  const ct = String(contractType || '').toUpperCase();
+  const safeCfg = Math.min(96, Math.max(5, Number.isFinite(configuredWinPct) ? configuredWinPct : 65));
+  // Bias around 50%: e.g. 76% setting -> +0.26 gentle tilt; never breaks high-payout contract math
+  const bias = (safeCfg - 50) / 100;
+  const analyserBoost = isAnalyserSynced ? 0.04 : 0;
+
+  if (ct === 'DIGITMATCH') {
+    // 9.09x payout (~10% fair probability): allow ~11%–24% win chance so losses occur naturally and streaks feel authentic
+    return Math.min(0.24, Math.max(0.09, 0.11 + Math.max(0, bias) * 0.35 + analyserBoost));
+  }
+  if (ct === 'DIGITDIFF') {
+    // 1.11x payout (~90% fair probability): keep genuine occasional digit match losses (~12–18% loss rate)
+    return Math.min(0.89, Math.max(0.74, 0.84 + bias * 0.14 + analyserBoost * 0.4));
+  }
+  if (ct === 'DIGITOVER') {
+    const cleanB = Math.min(8, Math.max(0, Number.isFinite(barrier) ? barrier : 2));
+    const fairOdds = (9 - cleanB) / 10;
+    return Math.min(0.78, Math.max(0.12, fairOdds + bias * 0.22 + analyserBoost));
+  }
+  if (ct === 'DIGITUNDER') {
+    const cleanB = Math.min(9, Math.max(1, Number.isFinite(barrier) ? barrier : 7));
+    const fairOdds = cleanB / 10;
+    return Math.min(0.78, Math.max(0.12, fairOdds + bias * 0.22 + analyserBoost));
+  }
+  if (ct === 'ONETOUCH') {
+    return Math.min(0.58, Math.max(0.25, 0.42 + bias * 0.25 + analyserBoost));
+  }
+  // CALL, PUT, DIGITEVEN, DIGITODD (~50% fair): calibrated around ~52%–65% so natural random losses & Martingale recovery happen
+  return Math.min(0.66, Math.max(0.36, 0.50 + bias * 0.42 + analyserBoost));
 }
 
 export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
@@ -1252,7 +1308,13 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
       ? Number(engineCfg.botWinRatePct ?? 76)
       : Number(engineCfg.manualOptionsWinRatePct ?? 68);
 
-  const shouldWin = Math.random() * 100 < Math.min(96, Math.max(5, targetWinPct));
+  const calibratedProb = computeCalibratedMockWinProbability(
+    order.contract_type,
+    barrier,
+    targetWinPct,
+    isAnalyserSynced
+  );
+  const shouldWin = Math.random() < calibratedProb;
   const baseForExit =
     order.contract_type === 'CALL' || order.contract_type === 'PUT' ? Number(order.entry_price || exitPrice) : exitPrice;
   exitPrice = adjustDigitForDesiredOutcome(baseForExit, pipSize, order.contract_type, barrier, shouldWin);
@@ -1400,12 +1462,13 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
     );
   }
 
+  const settledPayout = Math.max(0, Number((Number(order.stake || 0) + pnl).toFixed(2)));
   const closedOrder = await queryOne<any>(
     `UPDATE virtual_orders
-     SET status = 'CLOSED', current_price = $1, exit_price = $1, pnl = $2, closed_at = NOW()
-     WHERE id = $3
+     SET status = 'CLOSED', current_price = $1, exit_price = $1, payout = $2, pnl = $3, closed_at = NOW()
+     WHERE id = $4
      RETURNING ${ORDER_SELECT_COLS}`,
-    [exitPrice, pnl, order.id]
+    [exitPrice, settledPayout, Number(pnl.toFixed(2)), order.id]
   );
 
   untrackOpenMtmOrder(order.id);
@@ -1605,6 +1668,7 @@ async function ensureOpenMtmCacheHydrated(force = false): Promise<void> {
 
 async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
   if (mtmClosingLocks.has(order.id)) return;
+  if (order.execution_mode === 'deriv') return;
   const ct = String(order.contract_type || '').toUpperCase();
   if (!MTM_CONTRACT_TYPES.has(ct)) return;
   const entry = Number(order.entry_price || 0);

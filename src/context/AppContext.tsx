@@ -563,6 +563,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
             refreshAccounts(false);
           } else if (msg.type === 'order_opened' && msg.data) {
             setOrders((prev) => [msg.data, ...prev.filter((o) => o.id !== msg.data.id)]);
+          } else if (msg.type === 'bot_order_opened' && msg.data?.order) {
+            const ord = msg.data.order;
+            setOrders((prev) => [ord, ...prev.filter((o) => o.id !== ord.id)]);
           } else if (msg.type === 'order_updated' && msg.data) {
             setOrders((prev) =>
               prev.map((o) =>
