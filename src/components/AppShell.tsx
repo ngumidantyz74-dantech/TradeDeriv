@@ -26,7 +26,7 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { TradeDerivLogo } from './TradeDerivLogo';
-import { AskAmyPill } from './DerivBadges';
+import { AskAmyPill, TabExchangeIcon } from './DerivBadges';
 import { getCanonicalBalances } from '../lib/balances';
 import type { NavTab } from '../types';
 
@@ -183,7 +183,12 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
     )
     .slice(0, 14);
 
-  const isCoreMobileHub = activeTab === 'home' || activeTab === 'cfds' || activeTab === 'options' || activeTab === 'portfolio';
+  const isCoreMobileHub =
+    activeTab === 'home' ||
+    activeTab === 'cfds' ||
+    activeTab === 'exchange' ||
+    activeTab === 'options' ||
+    activeTab === 'portfolio';
 
   return (
     <div className="min-h-screen bg-white dark:bg-[#0E0F13] text-[#111319] dark:text-white flex flex-col lg:flex-row">
@@ -414,12 +419,21 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
                 >
                   <UserCircle2 className="w-[19px] h-[19px]" />
                 </button>
+              ) : activeTab === 'exchange' ? (
+                <button
+                  type="button"
+                  onClick={() => setSearchOpen(true)}
+                  aria-label="Search markets"
+                  className="w-9 h-9 rounded-full bg-[#242833] hover:bg-[#2E3342] text-slate-200 flex items-center justify-center cursor-pointer"
+                >
+                  <Search className="w-[17px] h-[17px]" />
+                </button>
               ) : null}
             </div>
 
             {/* Center Slot */}
             <div className="flex items-center justify-center">
-              {activeTab === 'home' || activeTab === 'portfolio' ? (
+              {activeTab === 'home' || activeTab === 'portfolio' || activeTab === 'exchange' ? (
                 <AskAmyPill onClick={() => setActiveTab('market-analyser')} />
               ) : (
                 <div className="inline-flex items-center bg-[#232732] p-[3px] rounded-full">
@@ -536,9 +550,9 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         <main className="flex-1 pb-[76px] lg:pb-8">{children}</main>
       </div>
 
-      {/* Fixed 4-Tab Mobile Lower Tabbar matching Screenshots (Home, CFDs, Options, Portfolio) */}
+      {/* Fixed 5-Tab Mobile Lower Tabbar (Home, CFDs, Exchange, Options, Portfolio) */}
       <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white dark:bg-[#16181F] border-t border-slate-200 dark:border-white/[0.08] pb-safe">
-        <div className="grid grid-cols-4 h-[60px]">
+        <div className="grid grid-cols-5 h-[60px]">
           <button
             type="button"
             onClick={() => {
@@ -564,6 +578,17 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           >
             <TabCfdsIcon />
             <span>CFDs</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('exchange')}
+            className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium transition-colors cursor-pointer select-none ${
+              activeTab === 'exchange' ? 'text-[#FF444F]' : 'text-[#525866] dark:text-[#8E95A2]'
+            }`}
+          >
+            <TabExchangeIcon active={activeTab === 'exchange'} />
+            <span>Exchange</span>
           </button>
 
           <button

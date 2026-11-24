@@ -233,10 +233,14 @@ router.get('/market/digit-analysis', async (req, res) => {
 // Crypto Exchange pairs & orders
 router.get('/exchange/pairs', (req, res) => {
   const filter = String(req.query.filter || 'trending').toLowerCase();
+  const quote = String(req.query.quote || 'all').toUpperCase();
   const q = String(req.query.q || '').trim().toLowerCase();
 
   let items = derivWs.getAllExchangeTickRates();
 
+  if (quote && quote !== 'ALL') {
+    items = items.filter((i) => i.quote.toUpperCase() === quote);
+  }
   if (q) {
     items = items.filter((i) => i.pair.toLowerCase().includes(q) || i.base.toLowerCase().includes(q));
   }
@@ -244,6 +248,8 @@ router.get('/exchange/pairs', (req, res) => {
     items = [...items].sort((a, b) => b.change24h - a.change24h);
   } else if (filter === 'losers') {
     items = [...items].sort((a, b) => a.change24h - b.change24h);
+  } else if (filter === 'all') {
+    // Preserve catalog order
   } else {
     items = [...items].sort((a, b) => b.volume24hM - a.volume24hM);
   }
@@ -251,107 +257,299 @@ router.get('/exchange/pairs', (req, res) => {
   res.json({ pairs: items });
 });
 
+router.get('/exchange/orders', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const mode = req.query.accountMode === 'real' ? 'real' : 'demo';
+  const rows = await query<any>(
+    `SELECT id, tx_type, method, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json, created_at
+     FROM cashier_transactions
+     WHERE user_id = $1 AND tx_type IN ('exchange', 'exchange_limit') AND COALESCE(account_mode, 'demo') = $2
+     ORDER BY id DESC LIMIT 40`,
+    [req.user!.id, mode]
+  );
+  res.json({
+    orders: rows.map((r) => {
+      let meta: any = {};
+      try {
+        meta = JSON.parse(r.metadata_json || '{}');
+      } catch {
+        meta = {};
+      }
+      return {
+        id: r.id,
+        tx_type: r.tx_type,
+        method: r.method,
+        pair: meta.pair || `${r.account_to}/${r.account_from}`,
+        side: meta.side || (String(r.method || '').includes('SELL') ? 'SELL' : 'BUY'),
+        orderType: meta.orderType || (r.tx_type === 'exchange_limit' ? 'limit' : 'market'),
+        price: Number(meta.price || 0),
+        amount: Number(r.amount || 0),
+        currency: r.currency,
+        reference_id: r.reference_id,
+        status: r.status,
+        created_at: r.created_at,
+      };
+    }),
+  });
+});
+
 router.post('/exchange/order', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  if (req.user!.role === 'owner' || req.user!.role === 'admin') {
+    res.status(403).json({ error: 'Owner / Admin MIS accounts are not trading wallets.' });
+    return;
+  }
   const { pair, side = 'BUY', amount, orderType = 'market', limitPrice, accountMode } = req.body || {};
   const isReal = accountMode === 'real';
   const amt = Number(amount);
-  if (!pair || Number.isNaN(amt) || amt <= 0) {
-    res.status(400).json({ error: 'Valid pair and amount are required' });
+  if (!pair || !Number.isFinite(amt) || amt <= 0) {
+    res.status(400).json({ error: 'Valid pair and positive amount are required' });
     return;
   }
 
+  const normalizedSide = String(side).toUpperCase() === 'SELL' ? 'SELL' : 'BUY';
+  const normalizedOrderType = String(orderType).toLowerCase() === 'limit' ? 'limit' : 'market';
+
+  const livePair = derivWs.getAllExchangeTickRates().find((p) => p.pair === pair);
   const pairMeta = EXCHANGE_PAIRS_CATALOG.find((p) => p.pair === pair);
-  const price = Number(limitPrice || pairMeta?.price || 1);
+  if (!livePair && !pairMeta) {
+    res.status(400).json({ error: 'Unsupported trading pair' });
+    return;
+  }
+
+  const marketPrice = Number(livePair?.price || pairMeta?.price || 1);
+  const parsedLimit = Number(limitPrice);
+  if (normalizedOrderType === 'limit' && (!Number.isFinite(parsedLimit) || parsedLimit <= 0)) {
+    res.status(400).json({ error: 'Valid limit price is required' });
+    return;
+  }
+  const execPrice = normalizedOrderType === 'limit' ? parsedLimit : marketPrice;
+  const shouldRestAsLimit =
+    normalizedOrderType === 'limit' &&
+    ((normalizedSide === 'BUY' && parsedLimit < marketPrice * 0.9999) ||
+      (normalizedSide === 'SELL' && parsedLimit > marketPrice * 1.0001));
+
   const [baseCoin, quoteCoin] = String(pair).split('/');
 
-  const user = await queryOne<any>(
-    'SELECT status, COALESCE(trading_suspended, FALSE) as trading_suspended, exchange_balances_json, real_exchange_balances_json, virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
-    [req.user!.id]
-  );
-  if (!user) {
-    res.status(404).json({ error: 'User not found' });
-    return;
-  }
-  if (user.status !== 'active' || user.trading_suspended) {
-    res.status(403).json({ error: 'Trading is currently suspended on this account.' });
+  if (!pool) {
+    res.status(503).json({ error: 'Database unavailable' });
     return;
   }
 
-  const parseObj = (raw: string | null | undefined, fallback: Record<string, number>) => {
-    try {
-      return { ...fallback, ...(JSON.parse(raw || '{}') || {}) };
-    } catch {
-      return { ...fallback };
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const userRes = await client.query<any>(
+      `SELECT status, COALESCE(trading_suspended, FALSE) as trading_suspended,
+              exchange_balances_json, real_exchange_balances_json,
+              virtual_workspace_balance, real_wallets_json, demo_wallets_json
+       FROM users WHERE id = $1 FOR UPDATE`,
+      [req.user!.id]
+    );
+    const user = userRes.rows[0];
+    if (!user) {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'User not found' });
+      return;
     }
-  };
+    if (user.status !== 'active' || user.trading_suspended) {
+      await client.query('ROLLBACK');
+      res.status(403).json({ error: 'Trading is currently suspended on this account.' });
+      return;
+    }
 
-  const ex = isReal
-    ? parseObj(user.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 })
-    : parseObj(user.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
-  const realWallets = parseObj(user.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
-  const demoWallets = parseObj(user.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+    const parseObj = (raw: string | null | undefined, fallback: Record<string, number>) => {
+      try {
+        return { ...fallback, ...(JSON.parse(raw || '{}') || {}) };
+      } catch {
+        return { ...fallback };
+      }
+    };
 
-  const quoteAvail = Number(ex[quoteCoin] ?? 0);
-  const baseAvail = Number(ex[baseCoin] ?? 0);
+    const ex = isReal
+      ? parseObj(user.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 })
+      : parseObj(user.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
+    const realWallets = parseObj(user.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+    const demoWallets = parseObj(user.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
 
-  if (String(side).toUpperCase() === 'BUY') {
-    if (quoteAvail >= amt) {
-      ex[quoteCoin] = Number((quoteAvail - amt).toFixed(8));
-    } else if (!isReal && (quoteCoin === 'USDT' || quoteCoin === 'USDC') && Number(user.virtual_workspace_balance) >= amt) {
-      await execute(
-        'UPDATE users SET virtual_workspace_balance = ROUND((virtual_workspace_balance - $1)::numeric, 2)::double precision, updated_at = NOW() WHERE id = $2',
-        [amt, req.user!.id]
-      );
-    } else if (isReal && (quoteCoin === 'USDT' || quoteCoin === 'USDC') && Number(realWallets.options || 0) >= amt) {
-      realWallets.options = Number((Number(realWallets.options || 0) - amt).toFixed(2));
+    const quoteAvail = Number(ex[quoteCoin] ?? 0);
+    const baseAvail = Number(ex[baseCoin] ?? 0);
+
+    if (normalizedSide === 'BUY') {
+      if (quoteAvail + 1e-12 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Insufficient ${isReal ? 'Real' : 'Demo'} ${quoteCoin} Spot balance (${quoteAvail.toFixed(
+            quoteCoin === 'USDT' || quoteCoin === 'USDC' ? 2 : 8
+          )} available). Add funds from your Deriv wallet first.`,
+        });
+        return;
+      }
+      ex[quoteCoin] = Number(Math.max(0, quoteAvail - amt).toFixed(8));
+      if (!shouldRestAsLimit) {
+        const received = amt / (execPrice || 1);
+        ex[baseCoin] = Number((baseAvail + received).toFixed(8));
+      }
     } else {
-      res.status(400).json({ error: `Insufficient ${isReal ? 'Real' : 'Demo'} ${quoteCoin} balance` });
-      return;
+      if (baseAvail + 1e-12 < amt) {
+        await client.query('ROLLBACK');
+        res.status(400).json({
+          error: `Insufficient ${isReal ? 'Real' : 'Demo'} ${baseCoin} Spot balance (${baseAvail.toFixed(8)} available)`,
+        });
+        return;
+      }
+      ex[baseCoin] = Number(Math.max(0, baseAvail - amt).toFixed(8));
+      if (!shouldRestAsLimit) {
+        ex[quoteCoin] = Number((quoteAvail + amt * execPrice).toFixed(8));
+      }
     }
-    const received = amt / (price || 1);
-    ex[baseCoin] = Number((baseAvail + received).toFixed(8));
-  } else {
-    if (baseAvail < amt) {
-      res.status(400).json({ error: `Insufficient ${isReal ? 'Real' : 'Demo'} ${baseCoin} balance` });
-      return;
+
+    if (isReal) {
+      realWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
+      await client.query(
+        'UPDATE users SET real_exchange_balances_json = $1, real_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+        [JSON.stringify(ex), JSON.stringify(realWallets), req.user!.id]
+      );
+    } else {
+      demoWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
+      await client.query(
+        'UPDATE users SET exchange_balances_json = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+        [JSON.stringify(ex), JSON.stringify(demoWallets), req.user!.id]
+      );
     }
-    ex[baseCoin] = Number((baseAvail - amt).toFixed(8));
-    ex[quoteCoin] = Number((quoteAvail + amt * price).toFixed(8));
-  }
 
-  if (isReal) {
-    realWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
-    await execute(
-      'UPDATE users SET real_exchange_balances_json = $1, real_wallets_json = $2, updated_at = NOW() WHERE id = $3',
-      [JSON.stringify(ex), JSON.stringify(realWallets), req.user!.id]
+    const ref = `${shouldRestAsLimit ? 'EXL' : 'EX'}-${randomId(4).toUpperCase()}`;
+    const orderRowRes = await client.query(
+      `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+       VALUES ($1, $2, $3, 'deriv_exchange', $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING id, reference_id, status, created_at`,
+      [
+        req.user!.id,
+        shouldRestAsLimit ? 'exchange_limit' : 'exchange',
+        `${normalizedOrderType.toUpperCase()} ${normalizedSide}`,
+        normalizedSide === 'BUY' ? quoteCoin : baseCoin,
+        normalizedSide === 'BUY' ? baseCoin : quoteCoin,
+        amt,
+        normalizedSide === 'BUY' ? quoteCoin : baseCoin,
+        ref,
+        shouldRestAsLimit ? 'open' : 'completed',
+        isReal ? 'real' : 'demo',
+        JSON.stringify({ pair, side: normalizedSide, orderType: normalizedOrderType, price: execPrice, accountMode: isReal ? 'real' : 'demo' }),
+      ]
     );
-  } else {
-    demoWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
-    await execute(
-      'UPDATE users SET exchange_balances_json = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3',
-      [JSON.stringify(ex), JSON.stringify(demoWallets), req.user!.id]
-    );
-  }
 
-  const ref = `EX-${randomId(4).toUpperCase()}`;
-  await execute(
-    `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-     VALUES ($1, 'exchange', $2, 'deriv_exchange', $3, $4, $5, $6, $7, 'completed', $8, $9)`,
-    [
+    await client.query('COMMIT');
+
+    derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
+      mode: isReal ? 'real' : 'demo',
+      real_wallets: realWallets,
+      realWallets,
+      demo_wallets: demoWallets,
+      demoWallets,
+      real_exchange_balances: isReal ? ex : undefined,
+      exchange_balances: !isReal ? ex : undefined,
+    });
+
+    await addNotification(
       req.user!.id,
-      `${String(orderType).toUpperCase()} ${String(side).toUpperCase()}`,
-      quoteCoin,
-      baseCoin,
-      amt,
-      quoteCoin,
-      ref,
-      isReal ? 'real' : 'demo',
-      JSON.stringify({ pair, price, accountMode: isReal ? 'real' : 'demo' }),
-    ]
-  );
+      shouldRestAsLimit ? 'Limit Order Placed' : 'Exchange Order Filled',
+      `[${isReal ? 'REAL' : 'DEMO'}] ${normalizedSide} ${amt} ${normalizedSide === 'BUY' ? quoteCoin : baseCoin} on ${pair} @ ${execPrice}`,
+      'exchange'
+    );
 
-  await addNotification(req.user!.id, 'Exchange Order Filled', `[${isReal ? 'REAL' : 'DEMO'}] ${String(side).toUpperCase()} ${amt} ${pair} @ ${price}`, 'exchange');
-  res.json({ ok: true, exchangeBalances: ex, reference: ref, accountMode: isReal ? 'real' : 'demo' });
+    res.json({
+      ok: true,
+      order: orderRowRes.rows[0],
+      exchangeBalances: ex,
+      reference: ref,
+      status: shouldRestAsLimit ? 'open' : 'completed',
+      accountMode: isReal ? 'real' : 'demo',
+    });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Exchange order failed' });
+  } finally {
+    client.release();
+  }
+});
+
+router.post('/exchange/orders/:id/cancel', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const orderId = Number(req.params.id);
+  if (!Number.isFinite(orderId) || orderId <= 0 || !pool) {
+    res.status(400).json({ error: 'Invalid order id' });
+    return;
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    const txRes = await client.query<any>(
+      `SELECT id, user_id, tx_type, account_from, amount, currency, status, account_mode, metadata_json
+       FROM cashier_transactions
+       WHERE id = $1 AND user_id = $2 FOR UPDATE`,
+      [orderId, req.user!.id]
+    );
+    const tx = txRes.rows[0];
+    if (!tx || tx.tx_type !== 'exchange_limit' || tx.status !== 'open') {
+      await client.query('ROLLBACK');
+      res.status(404).json({ error: 'Open limit order not found' });
+      return;
+    }
+
+    const isReal = tx.account_mode === 'real';
+    const userRes = await client.query<any>(
+      'SELECT exchange_balances_json, real_exchange_balances_json, real_wallets_json, demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+      [req.user!.id]
+    );
+    const user = userRes.rows[0];
+    const parseObj = (raw: string | null | undefined, fallback: Record<string, number>) => {
+      try {
+        return { ...fallback, ...(JSON.parse(raw || '{}') || {}) };
+      } catch {
+        return { ...fallback };
+      }
+    };
+    const ex = isReal
+      ? parseObj(user.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 })
+      : parseObj(user.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
+    const realWallets = parseObj(user.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+    const demoWallets = parseObj(user.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
+
+    const refundCoin = String(tx.currency || tx.account_from || 'USDT');
+    ex[refundCoin] = Number((Number(ex[refundCoin] || 0) + Number(tx.amount || 0)).toFixed(8));
+
+    if (isReal) {
+      realWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
+      await client.query(
+        'UPDATE users SET real_exchange_balances_json = $1, real_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+        [JSON.stringify(ex), JSON.stringify(realWallets), req.user!.id]
+      );
+    } else {
+      demoWallets.exchange_usdt = Number((ex.USDT || 0).toFixed(2));
+      await client.query(
+        'UPDATE users SET exchange_balances_json = $1, demo_wallets_json = $2, updated_at = NOW() WHERE id = $3',
+        [JSON.stringify(ex), JSON.stringify(demoWallets), req.user!.id]
+      );
+    }
+
+    await client.query(`UPDATE cashier_transactions SET status = 'cancelled' WHERE id = $1`, [orderId]);
+    await client.query('COMMIT');
+
+    derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
+      mode: isReal ? 'real' : 'demo',
+      real_wallets: realWallets,
+      realWallets,
+      demo_wallets: demoWallets,
+      demoWallets,
+      real_exchange_balances: isReal ? ex : undefined,
+      exchange_balances: !isReal ? ex : undefined,
+    });
+
+    res.json({ ok: true, exchangeBalances: ex });
+  } catch (err) {
+    await client.query('ROLLBACK').catch(() => {});
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Cancel failed' });
+  } finally {
+    client.release();
+  }
 });
 
 // Watchlists

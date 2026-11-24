@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   ArrowLeft,
   ArrowUpDown,
@@ -526,7 +526,15 @@ export const TransferScreen: React.FC<{
   onOpenDeposit?: () => void;
   initialFromId?: string;
   initialToId?: string;
-}> = ({ open, onClose, onOpenDeposit, initialFromId = 'wallet-usd', initialToId = 'cfds-std2' }) => {
+  accountMode?: 'real' | 'demo';
+}> = ({
+  open,
+  onClose,
+  onOpenDeposit,
+  initialFromId = 'wallet-usd',
+  initialToId = 'cfds-std2',
+  accountMode: accountModeProp = 'real',
+}) => {
   const { user, accounts, refreshAll, showToast } = useApp();
   const [fromId, setFromId] = useState(initialFromId);
   const [toId, setToId] = useState(initialToId);
@@ -535,16 +543,26 @@ export const TransferScreen: React.FC<{
   const [search, setSearch] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
-  const canonical = getCanonicalBalances(user, accounts, 'real', null);
-  const realCfdAccounts = accounts.filter(
-    (a) => !a.is_virtual && (a.platform?.includes('mt5') || a.platform === 'ctrader')
+  useEffect(() => {
+    if (open) {
+      setFromId(initialFromId);
+      setToId(initialToId);
+      setAmount('');
+      setSelectorMode(null);
+    }
+  }, [open, initialFromId, initialToId]);
+
+  const effectiveMode = accountModeProp === 'demo' ? 'demo' : 'real';
+  const canonical = getCanonicalBalances(user, accounts, effectiveMode, null);
+  const modeCfdAccounts = accounts.filter(
+    (a) => Boolean(a.is_virtual) === (effectiveMode === 'demo') && (a.platform?.includes('mt5') || a.platform === 'ctrader')
   );
 
   const items: TransferTargetItem[] = useMemo(() => {
-    const std2Acc = realCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 2'));
-    const std3Acc = realCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3'));
-    const swfAcc = realCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('swap'));
-    const ctrAcc = realCfdAccounts.find(
+    const std2Acc = modeCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 2'));
+    const std3Acc = modeCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3'));
+    const swfAcc = modeCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('swap'));
+    const ctrAcc = modeCfdAccounts.find(
       (a) => a.platform === 'ctrader' || String(a.account_type || '').toLowerCase().includes('ctrader')
     );
 
@@ -555,7 +573,7 @@ export const TransferScreen: React.FC<{
     const swfBal = Number(swfAcc?.balance ?? canonical.mt5GoldBal);
     const ctrBal = Number(ctrAcc?.balance ?? 0);
 
-    const spot = user?.real_exchange_balances || {};
+    const spot = effectiveMode === 'real' ? user?.real_exchange_balances || {} : user?.exchange_balances || {};
     const cryptoWallets: Array<{ code: string; label: string; dec: number }> = [
       { code: 'TRX', label: 'TRX', dec: 6 },
       { code: 'LTC', label: 'Litecoin', dec: 8 },
@@ -647,7 +665,15 @@ export const TransferScreen: React.FC<{
         icon: <CryptoCircleBadge code={cw.code} />,
       })),
     ];
-  }, [canonical.mt5GoldBal, canonical.mt5StdBal, canonical.optionsBal, realCfdAccounts, user?.real_exchange_balances]);
+  }, [
+    canonical.mt5GoldBal,
+    canonical.mt5StdBal,
+    canonical.optionsBal,
+    effectiveMode,
+    modeCfdAccounts,
+    user?.exchange_balances,
+    user?.real_exchange_balances,
+  ]);
 
   if (!open) return null;
 
@@ -685,7 +711,7 @@ export const TransferScreen: React.FC<{
           account_to_id: toItem.accountId ?? null,
           amount: numericAmount,
           currency: 'USD',
-          accountMode: 'real',
+          accountMode: effectiveMode,
         }),
       });
       await refreshAll();

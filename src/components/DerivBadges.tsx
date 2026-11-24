@@ -105,25 +105,43 @@ export const UsCircleFlagIcon: React.FC<{ size?: 'sm' | 'md' | 'lg' }> = ({ size
   );
 };
 
-export const CryptoCircleBadge: React.FC<{ code: string }> = ({ code }) => {
+export const CryptoCircleBadge: React.FC<{ code: string; size?: 'xs' | 'sm' | 'md' }> = ({ code, size = 'md' }) => {
   const styles: Record<string, { bg: string; label: string; text?: string }> = {
     TRX: { bg: '#EB0029', label: '▽' },
     LTC: { bg: '#B5B8BD', label: 'Ł', text: '#FFFFFF' },
     BTC: { bg: '#F7931A', label: '₿' },
-    BNB: { bg: '#F3BA2F', label: '❖', text: '#111319' },
+    WBTC: { bg: '#282138', label: '₿', text: '#F7931A' },
+    BNB: { bg: '#F3BA2F', label: '❖', text: '#FFFFFF' },
     ETH: { bg: '#E2E8F0', label: '♦', text: '#111319' },
     SOL: { bg: '#14171F', label: '≡', text: '#22D3EE' },
     DOGE: { bg: '#C2A633', label: 'Ð' },
     ADA: { bg: '#0033AD', label: '✳' },
     AVAX: { bg: '#E84142', label: 'A' },
     POL: { bg: '#7B3FE4', label: '∞' },
+    DOT: { bg: '#E6007A', label: '●' },
+    XRP: { bg: '#111319', label: '✕' },
+    SUI: { bg: '#4DA2FF', label: '💧' },
+    TON: { bg: '#0098EA', label: '▽' },
+    LINK: { bg: '#2A5ADA', label: '⬡' },
+    UNI: { bg: '#FF007A', label: 'U' },
+    AAVE: { bg: '#B6509E', label: 'A' },
+    NEAR: { bg: '#111319', label: 'N' },
+    ARB: { bg: '#28A0F0', label: 'A' },
+    OP: { bg: '#FF0420', label: 'OP' },
+    SHIB: { bg: '#FFA409', label: 'S' },
     USDT: { bg: '#26A17B', label: '₮' },
     USDC: { bg: '#2775CA', label: '$' },
   };
   const s = styles[code] || { bg: '#3B4254', label: code.slice(0, 1) };
+  const dims =
+    size === 'xs'
+      ? 'w-5 h-5 text-[11px]'
+      : size === 'sm'
+        ? 'w-7 h-7 text-[13px]'
+        : 'w-8 h-8 text-[15px]';
   return (
     <span
-      className="w-8 h-8 rounded-full flex items-center justify-center font-bold text-[15px] shrink-0 border border-white/10"
+      className={`${dims} rounded-full flex items-center justify-center font-bold shrink-0 border border-white/10 leading-none`}
       style={{ backgroundColor: s.bg, color: s.text || '#FFFFFF' }}
       aria-hidden="true"
     >
@@ -317,3 +335,34 @@ export const AccumulatorCoinGraphic: React.FC = () => (
     </div>
   </div>
 );
+
+export const TabExchangeIcon: React.FC<{ active: boolean }> = ({ active }) => (
+  <span
+    className={`w-[21px] h-[21px] rounded-[5px] flex items-center justify-center text-[7px] font-black tracking-tighter leading-none select-none ${
+      active
+        ? 'bg-[#FF444F] text-white'
+        : 'border-[1.6px] border-current text-current'
+    }`}
+    aria-hidden="true"
+  >
+    DXN
+  </span>
+);
+
+export const DxnCandlesGraphic: React.FC = () => (
+  <div className="relative w-20 h-14 shrink-0 select-none flex items-center justify-center" aria-hidden="true">
+    <svg viewBox="0 0 88 64" className="w-20 h-14">
+      <line x1="16" y1="22" x2="16" y2="54" stroke="#FF444F" strokeWidth="2" strokeLinecap="round" />
+      <rect x="11" y="28" width="10" height="18" rx="1.5" fill="#FF444F" />
+      <line x1="32" y1="12" x2="32" y2="48" stroke="#E2E8F0" strokeWidth="2" strokeLinecap="round" />
+      <rect x="27" y="18" width="10" height="19" rx="1.5" fill="#FFFFFF" />
+      <line x1="48" y1="18" x2="48" y2="50" stroke="#FF444F" strokeWidth="2" strokeLinecap="round" />
+      <rect x="43" y="22" width="10" height="16" rx="1.5" fill="#FF444F" />
+      <line x1="64" y1="6" x2="64" y2="40" stroke="#E2E8F0" strokeWidth="2" strokeLinecap="round" />
+      <rect x="59" y="11" width="10" height="17" rx="1.5" fill="#FFFFFF" />
+      <rect x="55" y="39" width="18" height="16" rx="3" fill="#1E2028" stroke="#FF444F" strokeWidth="1.5" />
+      <path d="M59 51L68 43M62 43H68V49" stroke="#FF444F" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  </div>
+);
+
