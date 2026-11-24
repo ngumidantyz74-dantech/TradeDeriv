@@ -2478,7 +2478,7 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requi
   const id = Number(req.params.id);
 
   const currentAcc = await queryOne<any>(
-    'SELECT id, user_id, deriv_login_id FROM connected_accounts WHERE id = $1',
+    'SELECT id, user_id, deriv_login_id, is_virtual, account_type, platform FROM connected_accounts WHERE id = $1',
     [id]
   );
   if (!currentAcc) {
@@ -2495,6 +2495,7 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requi
     [id]
   );
 
+  let syncedBalance: number | null = null;
   if (auth) {
     try {
       const raw = decryptToken(auth.encrypted_token, auth.token_iv, auth.token_auth_tag);
@@ -2503,21 +2504,19 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requi
         const list = listResp.data || listResp.accounts || [];
         const found = list.find((item: any) => String(item.account_id) === String(currentAcc.deriv_login_id));
         if (found && found.balance !== undefined) {
-          const b = Number(found.balance);
-          await execute(
-            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $2',
-            [b, id]
-          );
+          syncedBalance = Number(found.balance);
         }
       } else {
         const resp = await derivWs.requestWithToken(raw, { balance: 1 }, 4500);
         if (resp?.balance?.balance !== undefined) {
-          const b = Number(resp.balance.balance);
-          await execute(
-            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $2',
-            [b, id]
-          );
+          syncedBalance = Number(resp.balance.balance);
         }
+      }
+      if (syncedBalance !== null && Number.isFinite(syncedBalance)) {
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, balance_locked_by_admin = FALSE, updated_at = NOW() WHERE id = $2',
+          [syncedBalance, id]
+        );
       }
     } catch {
       // keep existing if live Deriv fetch fails
@@ -2531,6 +2530,65 @@ router.post('/admin/connected-accounts/:id/sync', requireDb, requireAdmin, requi
      FROM connected_accounts WHERE id = $1`,
     [id]
   );
+
+  if (account) {
+    const finalBal = Number(account.last_known_balance ?? account.balance ?? 0);
+    const s = `${account.account_type || ''} ${account.platform || ''}`.toLowerCase();
+    const bucket =
+      s.includes('gold') || s.includes('swap') || s.includes('ctrader')
+        ? 'mt5_gold'
+        : s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')
+          ? 'mt5_standard'
+          : 'options';
+
+    derivWs.emitUserEvent(currentAcc.user_id, 'account_updated', {
+      accountId: account.id,
+      balance: finalBal,
+    });
+
+    const userRow = await queryOne<{ real_wallets_json: string; demo_wallets_json: string }>(
+      'SELECT real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
+      [currentAcc.user_id]
+    );
+    if (!account.is_virtual && userRow) {
+      const rw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow.real_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+      rw[bucket] = finalBal;
+      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(rw),
+        currentAcc.user_id,
+      ]);
+      derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { real_wallets: rw, realWallets: rw });
+    } else if (account.is_virtual) {
+      if (bucket === 'options') {
+        await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+          finalBal,
+          currentAcc.user_id,
+        ]);
+        derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { virtual_workspace_balance: finalBal });
+      } else if (userRow) {
+        const dw = (() => {
+          try {
+            return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(userRow.demo_wallets_json || '{}') };
+          } catch {
+            return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+          }
+        })();
+        dw[bucket] = finalBal;
+        await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+          JSON.stringify(dw),
+          currentAcc.user_id,
+        ]);
+        derivWs.emitUserEvent(currentAcc.user_id, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
+      }
+    }
+    invalidateAuthUserCache(currentAcc.user_id);
+  }
 
   await logAdminAction(req.user!.id, 'sync_connected_account', 'connected_accounts', String(id), {
     liveBalance: account?.last_known_balance,

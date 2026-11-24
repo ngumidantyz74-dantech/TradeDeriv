@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Disallow: /api/admin/
+Disallow: /pf-ops-9482
+
+Sitemap: /sitemap.xml

@@ -23,6 +23,7 @@ import {
 import { useApp } from '../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
+import { DepositSheet } from '../components/CashierFlows';
 import type { CandleData } from '../types';
 
 type TradeGroupId = 'risefall' | 'highlow' | 'touchnotouch' | 'matchesdiffers' | 'evenodd' | 'overunder' | 'accumulators';
@@ -150,6 +151,7 @@ export const SmartTraderPage: React.FC = () => {
   const [placing, setPlacing] = useState<string | null>(null);
   const [closingId, setClosingId] = useState<number | null>(null);
   const [analyserSynced, setAnalyserSynced] = useState<boolean>(false);
+  const [depositOpen, setDepositOpen] = useState<boolean>(false);
 
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
   const chartRef = useRef<IChartApi | null>(null);
@@ -416,6 +418,7 @@ export const SmartTraderPage: React.FC = () => {
           growthRate: activeGroup.isAccu ? growthRate : undefined,
           tpUsd: activeGroup.isAccu ? tpUsd : undefined,
           accountMode,
+          executionMode: accountMode === 'real' ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || undefined,
           strategyKey: analyserSynced ? 'analyser_synced_smarttrader' : 'smart_trader',
           isAnalyserSynced: analyserSynced,
@@ -499,14 +502,13 @@ export const SmartTraderPage: React.FC = () => {
             {formatMoney(optionsBal, { hideable: true })}
           </div>
 
-          <a
-            href="https://app.deriv.com/cashier/deposit"
-            target="_blank"
-            rel="noopener noreferrer"
-            className="px-3.5 py-1.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1 whitespace-nowrap"
+          <button
+            type="button"
+            onClick={() => setDepositOpen(true)}
+            className="px-3.5 py-1.5 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold inline-flex items-center gap-1 whitespace-nowrap cursor-pointer"
           >
             Deposit <ArrowUpRight className="w-3.5 h-3.5" />
-          </a>
+          </button>
         </div>
       </div>
 
@@ -955,6 +957,8 @@ export const SmartTraderPage: React.FC = () => {
           </div>
         )}
       </section>
+
+      <DepositSheet open={depositOpen} onClose={() => setDepositOpen(false)} />
     </div>
   );
 };

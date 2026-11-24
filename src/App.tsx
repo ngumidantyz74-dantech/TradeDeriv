@@ -21,6 +21,7 @@ import {
   LearningHubPage,
 } from './pages/ToolsPages';
 import { AdminMISPage } from './pages/AdminMISPage';
+import { DerivCircleLoader } from './components/DerivLoadingModal';
 
 const MainRouter: React.FC = () => {
   const { user, loadingAuth, activeTab, publicSettings, toast, adminGateOpen, setAdminGateOpen } = useApp();
@@ -71,11 +72,22 @@ const MainRouter: React.FC = () => {
   }, [privateSlug, envSlug]);
 
   const [minSplashDone, setMinSplashDone] = useState<boolean>(false);
+  const [minisiteLoading, setMinisiteLoading] = useState<boolean>(false);
 
   useEffect(() => {
     const t = setTimeout(() => setMinSplashDone(true), 650);
     return () => clearTimeout(t);
   }, []);
+
+  useEffect(() => {
+    if (activeTab === 'smart-trader' || activeTab === 'mt5-tv') {
+      setMinisiteLoading(true);
+      const t = setTimeout(() => setMinisiteLoading(false), 450);
+      return () => clearTimeout(t);
+    }
+    setMinisiteLoading(false);
+    return undefined;
+  }, [activeTab]);
 
   if (isAdminRoute || adminGateOpen) {
     return (
@@ -156,6 +168,7 @@ const MainRouter: React.FC = () => {
 
   return (
     <>
+      {minisiteLoading && <DerivCircleLoader />}
       <AppShell>{renderTab()}</AppShell>
       {toast && (
         <div

@@ -1192,7 +1192,7 @@ export const MT5TradingView: React.FC = () => {
           executionMode:
             tradingScope === 'cfd'
               ? 'virtual'
-              : accountMode === 'real' && activeConnectedAccount
+              : accountMode === 'real'
                 ? 'deriv'
                 : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,

@@ -229,8 +229,16 @@ export interface BotStrategy {
   };
 }
 
+export interface BotJournalEntry {
+  id: string;
+  time: string;
+  type: 'info' | 'stake' | 'bought' | 'profit' | 'loss' | 'error';
+  text: string;
+}
+
 export interface BotTelemetry {
   running: boolean;
+  runState?: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
   strategyName: string;
   symbol: string;
   contractType: string;
@@ -254,6 +262,7 @@ export interface BotTelemetry {
   strategyType?: string;
   growthRate?: number;
   analyserSync?: boolean;
+  journal?: BotJournalEntry[];
 }
 
 export interface AnalyserSignalResult {

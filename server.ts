@@ -52,6 +52,8 @@ async function bootstrapServer() {
       contentSecurityPolicy: false,
       crossOriginEmbedderPolicy: false,
       crossOriginOpenerPolicy: false,
+      crossOriginResourcePolicy: false,
+      frameguard: false,
     })
   );
   app.use(cors({ origin: true, credentials: true }));

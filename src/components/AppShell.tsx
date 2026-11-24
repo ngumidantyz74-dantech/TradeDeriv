@@ -486,8 +486,8 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </header>
         )}
 
-        {/* Compact Mobile Top Bar for Chart / Bot / Sub-Tool Terminals */}
-        {activeTab !== 'profile' && activeTab !== 'notifications' && !isCoreMobileHub && (
+        {/* Compact Mobile Top Bar for Chart / SmartTrader / Sub-Tool Terminals */}
+        {activeTab !== 'profile' && activeTab !== 'notifications' && activeTab !== 'bot-builder' && !isCoreMobileHub && (
           <header className="lg:hidden bg-[#171A21] text-white px-3.5 py-2.5 flex items-center justify-between gap-2 sticky top-0 z-30 border-b border-white/[0.06]">
             <div className="flex items-center gap-2 min-w-0">
               <button
@@ -547,10 +547,11 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
         )}
 
         {/* Viewport Page Content */}
-        <main className="flex-1 pb-[76px] lg:pb-8">{children}</main>
+        <main className={`flex-1 ${activeTab === 'bot-builder' ? 'pb-0 lg:pb-8' : 'pb-[76px] lg:pb-8'}`}>{children}</main>
       </div>
 
       {/* Fixed 5-Tab Mobile Lower Tabbar (Home, CFDs, Exchange, Options, Portfolio) */}
+      {activeTab !== 'bot-builder' && (
       <nav className="lg:hidden fixed bottom-0 inset-x-0 z-40 bg-white dark:bg-[#16181F] border-t border-slate-200 dark:border-white/[0.08] pb-safe">
         <div className="grid grid-cols-5 h-[60px]">
           <button
@@ -614,6 +615,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </button>
         </div>
       </nav>
+      )}
 
       {/* Global Search Modal */}
       {searchOpen && (

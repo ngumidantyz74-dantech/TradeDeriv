@@ -26,8 +26,16 @@ export interface BotSessionConfig {
   analyserSync?: boolean;
 }
 
+export interface BotJournalEntry {
+  id: string;
+  time: string;
+  type: 'info' | 'stake' | 'bought' | 'profit' | 'loss' | 'error';
+  text: string;
+}
+
 export interface BotTelemetry {
   running: boolean;
+  runState?: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
   strategyName: string;
   strategyType: string;
   symbol: string;
@@ -51,6 +59,7 @@ export interface BotTelemetry {
   executionSpeed: 'fast' | 'normal';
   analyserSync: boolean;
   growthRate: number;
+  journal?: BotJournalEntry[];
 }
 
 interface InternalBotSession extends BotTelemetry {
@@ -65,6 +74,29 @@ interface InternalBotSession extends BotTelemetry {
   isExecutingTrade: boolean;
   lastTradeAt: number;
   winStreak: number;
+  runState: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
+  journal: BotJournalEntry[];
+}
+
+function appendJournal(
+  session: InternalBotSession,
+  type: BotJournalEntry['type'],
+  text: string
+): void {
+  const now = new Date();
+  const yyyy = now.getUTCFullYear();
+  const mm = String(now.getUTCMonth() + 1).padStart(2, '0');
+  const dd = String(now.getUTCDate()).padStart(2, '0');
+  const hh = String(now.getUTCHours()).padStart(2, '0');
+  const mi = String(now.getUTCMinutes()).padStart(2, '0');
+  const ss = String(now.getUTCSeconds()).padStart(2, '0');
+  session.journal.unshift({
+    id: `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+    time: `${yyyy}-${mm}-${dd} | ${hh}:${mi}:${ss} GMT`,
+    type,
+    text,
+  });
+  if (session.journal.length > 80) session.journal.length = 80;
 }
 
 const activeSessions = new Map<number, InternalBotSession>();
@@ -235,6 +267,12 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
             if (closed) {
               const p = Number(closed.pnl || 0);
               session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
+              session.runState = p >= 0 ? 'won' : 'lost';
+              appendJournal(
+                session,
+                p >= 0 ? 'profit' : 'loss',
+                p >= 0 ? `Profit amount: +${p.toFixed(2)} USD` : `Loss amount: ${p.toFixed(2)} USD`
+              );
               applyProgressionStake(session, p >= 0);
               derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
             }
@@ -305,6 +343,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   if (stillOpen) return;
 
   session.isExecutingTrade = true;
+  session.runState = 'buying';
   try {
     let targetSymbol = session.symbol;
     let decision = decideBotSide(session, tick.quote, tick.pipSize);
@@ -327,6 +366,8 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     }
 
     session.lastSignal = decision.reason;
+    appendJournal(session, 'stake', `${session.strategyName || 'Bot'} stake: ${session.currentStake.toFixed(2)}`);
+    derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
 
     const order = await placeUnifiedOrder({
       userId: session.userId,
@@ -357,6 +398,12 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 
     session.lastTradeAt = Date.now();
     session.tradesPlaced += 1;
+    session.runState = 'bought';
+    appendJournal(
+      session,
+      'bought',
+      `Bought: Contract purchased (ID: ${order.deriv_contract_id || order.id})`
+    );
     derivWs.emitUserEvent(session.userId, 'bot_order_opened', {
       order,
       telemetry: serializeTelemetry(session),
@@ -374,6 +421,12 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
             if (row) {
               const p = Number(row.pnl || 0);
               session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
+              session.runState = p >= 0 ? 'won' : 'lost';
+              appendJournal(
+                session,
+                p >= 0 ? 'profit' : 'loss',
+                p >= 0 ? `Profit amount: +${p.toFixed(2)} USD` : `Loss amount: ${p.toFixed(2)} USD`
+              );
               applyProgressionStake(session, p >= 0);
               derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
             }
@@ -381,11 +434,16 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         } catch {
           clearInterval(checkInterval);
         }
-      }, 1100);
+      }, 1000);
     }
   } catch (err) {
-    session.lastSignal = err instanceof Error ? err.message : 'Execution paused';
-    if (session.lastSignal.toLowerCase().includes('insufficient')) {
+    const rawMsg = err instanceof Error ? err.message : 'Execution paused';
+    const isInsuff = rawMsg.toLowerCase().includes('insufficient');
+    session.lastSignal = isInsuff
+      ? 'Your account balance is insufficient to buy this contract.'
+      : rawMsg;
+    appendJournal(session, 'error', session.lastSignal);
+    if (isInsuff) {
       await stopBotSession(session.userId, session.lastSignal);
     }
   } finally {
@@ -396,6 +454,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 function serializeTelemetry(s: InternalBotSession): BotTelemetry {
   return {
     running: s.running,
+    runState: s.runState,
     strategyName: s.strategyName,
     strategyType: s.strategyType,
     symbol: s.symbol,
@@ -419,6 +478,7 @@ function serializeTelemetry(s: InternalBotSession): BotTelemetry {
     executionSpeed: s.executionSpeed,
     analyserSync: s.analyserSync,
     growthRate: s.growthRate,
+    journal: s.journal,
   };
 }
 
@@ -481,7 +541,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     durationUnit: cfg.durationUnit || 't',
     multiplier: Number(cfg.multiplier || 100),
     growthRate: Number(cfg.growthRate || 0.02),
-    executionMode: cfg.executionMode || 'virtual',
+    executionMode: cfg.executionMode || (cfg.accountMode === 'real' ? 'deriv' : 'virtual'),
     connectedAccountId: cfg.connectedAccountId || null,
     accountMode: cfg.accountMode === 'real' ? 'real' : 'demo',
     executionSpeed: cfg.executionSpeed === 'normal' ? 'normal' : 'fast',
@@ -490,7 +550,11 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     isExecutingTrade: false,
     lastTradeAt: 0,
     winStreak: 0,
+    runState: 'buying',
+    journal: [],
   };
+
+  appendJournal(session, 'info', 'You are using your USD account.');
 
   session.unsubscribeTick = derivWs.onTick((tick) => {
     if (tick.symbol === session.symbol && session.running) {
@@ -515,6 +579,7 @@ export async function stopBotSession(userId: number, reason = 'Stopped by trader
   const session = activeSessions.get(userId);
   if (!session) return null;
   session.running = false;
+  session.runState = 'idle';
   session.lastSignal = reason;
   if (session.unsubscribeTick) {
     session.unsubscribeTick();
@@ -542,6 +607,7 @@ export function getBotStatus(userId: number): BotTelemetry {
   if (session) return serializeTelemetry(session);
   return {
     running: false,
+    runState: 'idle',
     strategyName: '',
     strategyType: 'Martingale',
     symbol: '1HZ100V',
@@ -565,5 +631,6 @@ export function getBotStatus(userId: number): BotTelemetry {
     executionSpeed: 'fast',
     analyserSync: false,
     growthRate: 0.02,
+    journal: [],
   };
 }

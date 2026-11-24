@@ -89,8 +89,10 @@ function normalizeContractType(side: string, explicitType?: string): string {
   if (['ODD', 'DIGITODD'].includes(s)) return 'DIGITODD';
   if (['MATCH', 'DIGITMATCH'].includes(s)) return 'DIGITMATCH';
   if (['DIFF', 'DIGITDIFF'].includes(s)) return 'DIGITDIFF';
-  if (['RISE', 'CALL'].includes(s)) return 'CALL';
-  if (['FALL', 'PUT'].includes(s)) return 'PUT';
+  if (['RISE', 'CALL', 'CALLE'].includes(s)) return 'CALL';
+  if (['FALL', 'PUT', 'PUTE'].includes(s)) return 'PUT';
+  if (['ONETOUCH', 'TOUCH'].includes(s)) return 'ONETOUCH';
+  if (['NOTOUCH'].includes(s)) return 'NOTOUCH';
   return s || 'MULTUP';
 }
 
@@ -402,200 +404,238 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const accDerivedBucket = matchingAcc ? classifyConnectedAccountBucket(matchingAcc) : 'options';
   const effectiveBucket: WalletBucket = accDerivedBucket !== 'options' ? accDerivedBucket : requestedBucket;
 
-  if (effectiveBucket === 'options' && (explicitDeriv || input.connectedAccountId)) {
-    // If Admin funded/locked this Real account OR DB Real wallet funds are used with siteSettlementForLockedReal enabled,
-    // settle atomically on the local Real balance ledger rather than blocking when upstream Deriv account has $0.
-    const adminFundedReal =
-      accountMode === 'real' &&
-      engineCfg.siteSettlementForLockedReal !== false &&
-      (Boolean(matchingAcc?.balance_locked_by_admin) || Number(userRealWallets.options || 0) >= stake);
+  const shouldAttemptDerivApi =
+    effectiveBucket === 'options' &&
+    Boolean(targetAccId) &&
+    (explicitDeriv || accountMode === 'real');
 
-    if (adminFundedReal) {
-      actualMode = 'virtual';
-    } else if (!targetAccId) {
-      if (explicitDeriv && !(accountMode === 'real' && Number(userRealWallets.options || 0) >= stake)) {
-        throw new Error(
-          `No active connected ${accountMode.toUpperCase()} Deriv account found. Link your Deriv account or fund your local wallet.`
-        );
+  if (shouldAttemptDerivApi && targetAccId) {
+    const shownRealBal =
+      accountMode === 'real'
+        ? matchingAcc?.balance_locked_by_admin
+          ? Math.max(Number(matchingAcc.last_known_balance || 0), Number(userRealWallets.options || 0))
+          : Number(matchingAcc?.last_known_balance ?? userRealWallets.options ?? 0)
+        : Number(user.virtual_workspace_balance || 0);
+
+    if (accountMode === 'real' && Boolean(matchingAcc?.balance_locked_by_admin) && shownRealBal < stake) {
+      throw new Error(
+        `Insufficient Real USD Wallet balance ($${shownRealBal.toFixed(2)} available, $${stake.toFixed(2)} required). Deposit funds to continue.`
+      );
+    }
+
+    const creds = await getDecryptedAccountToken(targetAccId, input.userId);
+    if (!creds) {
+      if (explicitDeriv && !(accountMode === 'real' && shownRealBal >= stake)) {
+        throw new Error('Deriv account authorization token is missing or revoked. Reconnect your Deriv account.');
       }
     } else {
-      const creds = await getDecryptedAccountToken(targetAccId, input.userId);
-      if (!creds) {
-        if (explicitDeriv && !(accountMode === 'real' && Number(userRealWallets.options || 0) >= stake)) {
-          throw new Error('Deriv account authorization token is missing or revoked. Reconnect your Deriv account.');
-        }
-      } else {
-        accountMode = creds.account.is_virtual ? 'demo' : 'real';
+      accountMode = creds.account.is_virtual ? 'demo' : 'real';
+      try {
+        const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
+        const symbolField = isOAuth2 ? { underlying_symbol: input.symbol } : { symbol: input.symbol };
+
+        let effectiveType = contractType;
+        let effectiveMult = multiplier;
+        let effectiveDuration = duration;
+        let effectiveDurationUnit = durationUnit;
+
         try {
-          const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
-          const symbolField = isOAuth2 ? { underlying_symbol: input.symbol } : { symbol: input.symbol };
+          const cfResp = await derivWs.request<{
+            contracts_for?: {
+              available?: Array<{
+                contract_type: string;
+                multiplier_range?: number[];
+                min_contract_duration?: string;
+                max_contract_duration?: string;
+              }>;
+            };
+          }>({ contracts_for: input.symbol, currency: creds.account.currency }, 4500);
 
-          let effectiveType = contractType;
-          let effectiveMult = multiplier;
-          let effectiveDuration = duration;
-          let effectiveDurationUnit = durationUnit;
+          const available = cfResp?.contracts_for?.available || [];
 
-          try {
-            const cfResp = await derivWs.request<{
-              contracts_for?: {
-                available?: Array<{
-                  contract_type: string;
-                  multiplier_range?: number[];
-                  min_contract_duration?: string;
-                  max_contract_duration?: string;
-                }>;
-              };
-            }>({ contracts_for: input.symbol, currency: creds.account.currency }, 4500);
-
-            const available = cfResp?.contracts_for?.available || [];
-
-            if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
-              const multContract = available.find((c) => c.contract_type === effectiveType);
-              if (!multContract) {
-                effectiveType = effectiveType === 'MULTUP' ? 'CALL' : 'PUT';
-              } else if (multContract.multiplier_range && multContract.multiplier_range.length > 0) {
-                if (!multContract.multiplier_range.includes(effectiveMult)) {
-                  effectiveMult = multContract.multiplier_range.reduce((prev, curr) =>
-                    Math.abs(curr - effectiveMult) < Math.abs(prev - effectiveMult) ? curr : prev
-                  );
-                }
+          if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
+            const multContract = available.find((c) => c.contract_type === effectiveType);
+            if (!multContract) {
+              effectiveType = effectiveType === 'MULTUP' ? 'CALL' : 'PUT';
+            } else if (multContract.multiplier_range && multContract.multiplier_range.length > 0) {
+              if (!multContract.multiplier_range.includes(effectiveMult)) {
+                effectiveMult = multContract.multiplier_range.reduce((prev, curr) =>
+                  Math.abs(curr - effectiveMult) < Math.abs(prev - effectiveMult) ? curr : prev
+                );
               }
             }
+          }
 
-            if (effectiveType !== 'MULTUP' && effectiveType !== 'MULTDOWN') {
-              const matchingContracts = available.filter((c) => c.contract_type === effectiveType);
-              const chosenContract =
-                matchingContracts.find((c) => {
-                  const minD = parseDerivDuration(c.min_contract_duration);
-                  return minD && minD.unit === effectiveDurationUnit;
-                }) || matchingContracts[0];
+          if (effectiveType !== 'MULTUP' && effectiveType !== 'MULTDOWN') {
+            const matchingContracts = available.filter((c) => c.contract_type === effectiveType);
+            const chosenContract =
+              matchingContracts.find((c) => {
+                const minD = parseDerivDuration(c.min_contract_duration);
+                return minD && minD.unit === effectiveDurationUnit;
+              }) || matchingContracts[0];
 
-              if (chosenContract?.min_contract_duration) {
-                const minD = parseDerivDuration(chosenContract.min_contract_duration);
-                if (minD) {
-                  const reqSecs = durationToSeconds(effectiveDuration, effectiveDurationUnit);
-                  const minSecs = durationToSeconds(minD.duration, minD.unit);
-                  if (reqSecs < minSecs || (effectiveDurationUnit === 't' && minD.unit !== 't')) {
-                    effectiveDuration = minD.duration;
-                    effectiveDurationUnit = minD.unit;
-                  }
+            if (chosenContract?.min_contract_duration) {
+              const minD = parseDerivDuration(chosenContract.min_contract_duration);
+              if (minD) {
+                const reqSecs = durationToSeconds(effectiveDuration, effectiveDurationUnit);
+                const minSecs = durationToSeconds(minD.duration, minD.unit);
+                if (reqSecs < minSecs || (effectiveDurationUnit === 't' && minD.unit !== 't')) {
+                  effectiveDuration = minD.duration;
+                  effectiveDurationUnit = minD.unit;
                 }
-              } else if (!input.symbol.startsWith('1HZ') && !input.symbol.startsWith('R_') && !input.symbol.startsWith('JD') && !input.symbol.startsWith('BOOM') && !input.symbol.startsWith('CRASH') && effectiveDurationUnit === 't') {
-                effectiveDuration = 15;
-                effectiveDurationUnit = 'm';
               }
-            }
-          } catch {
-            if (
-              effectiveType !== 'MULTUP' &&
-              effectiveType !== 'MULTDOWN' &&
+            } else if (
               !input.symbol.startsWith('1HZ') &&
               !input.symbol.startsWith('R_') &&
+              !input.symbol.startsWith('JD') &&
+              !input.symbol.startsWith('BOOM') &&
+              !input.symbol.startsWith('CRASH') &&
               effectiveDurationUnit === 't'
             ) {
               effectiveDuration = 15;
               effectiveDurationUnit = 'm';
             }
           }
-
-          const proposalPayload: Record<string, unknown> = {
-            proposal: 1,
-            amount: stake,
-            basis: 'stake',
-            contract_type: effectiveType,
-            currency: creds.account.currency,
-            ...symbolField,
-          };
-
-          if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
-            proposalPayload.multiplier = effectiveMult;
-            const limitOrder: Record<string, number> = {};
-            if (tpUsd && tpUsd >= 0.5) limitOrder.take_profit = Number(tpUsd.toFixed(2));
-            if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
-            if (Object.keys(limitOrder).length > 0) proposalPayload.limit_order = limitOrder;
-          } else {
-            proposalPayload.duration = effectiveDuration;
-            proposalPayload.duration_unit = effectiveDurationUnit;
-            if (input.barrier !== undefined && input.barrier !== null && input.barrier !== '') {
-              proposalPayload.barrier = String(input.barrier);
-            }
+        } catch {
+          if (
+            effectiveType !== 'MULTUP' &&
+            effectiveType !== 'MULTDOWN' &&
+            !input.symbol.startsWith('1HZ') &&
+            !input.symbol.startsWith('R_') &&
+            effectiveDurationUnit === 't'
+          ) {
+            effectiveDuration = 15;
+            effectiveDurationUnit = 'm';
           }
-
-          let buyResult: any;
-          if (isOAuth2) {
-            const otpResp = await derivRestRequest<any>(
-              `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
-              creds.token,
-              { method: 'POST' }
-            );
-            const otpUrl = extractDerivOtpWsUrl(otpResp);
-            if (!otpUrl) {
-              throw new Error(
-                `Failed to mint Deriv OTP trading socket (keys: ${Object.keys(otpResp || {}).join(', ') || 'empty'})`
-              );
-            }
-            const prop = await OtpDerivClient.requestOnOtpUrl(otpUrl, proposalPayload);
-            buyResult = await OtpDerivClient.requestOnOtpUrl(otpUrl, {
-              buy: prop.proposal.id,
-              price: stake,
-            });
-          } else {
-            const prop = await derivWs.requestWithToken(creds.token, proposalPayload);
-            buyResult = await derivWs.requestWithToken(creds.token, {
-              buy: prop.proposal.id,
-              price: stake,
-            });
-          }
-
-          if (buyResult?.buy?.contract_id) {
-            derivContractId = String(buyResult.buy.contract_id);
-            actualPayout = Number(buyResult.buy.payout || 0);
-            actualMode = 'deriv';
-
-            // Preserve admin-locked balance rather than overwriting with live Deriv balance
-            if (creds.account.balance_locked_by_admin) {
-              const updatedBal = Math.max(0, Number((creds.account.last_known_balance - stake).toFixed(2)));
-              await execute(
-                'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-                [updatedBal, creds.account.id]
-              );
-              derivWs.emitUserEvent(input.userId, 'account_updated', {
-                accountId: creds.account.id,
-                balance: updatedBal,
-              });
-            } else if (buyResult.buy.balance_after !== undefined) {
-              const liveBal = Number(buyResult.buy.balance_after);
-              await execute(
-                'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-                [liveBal, creds.account.id]
-              );
-              derivWs.emitUserEvent(input.userId, 'account_updated', {
-                accountId: creds.account.id,
-                balance: liveBal,
-              });
-            }
-          } else if (explicitDeriv) {
-            throw new Error('Deriv did not confirm a contract ID for this order.');
-          }
-          } catch (err) {
-          const errMsg = err instanceof Error ? err.message : 'Deriv execution failed';
-          await logSystemError('trade-execution', errMsg, 'error', {
-            userId: input.userId,
-            symbol: input.symbol,
-            contractType,
-            explicitDeriv,
-          });
-          const canFallbackToDbReal =
-            accountMode === 'real' &&
-            engineCfg.siteSettlementForLockedReal !== false &&
-            Number(userRealWallets.options || 0) >= stake;
-          if (explicitDeriv && !canFallbackToDbReal) {
-            throw new Error(`Deriv rejected order: ${errMsg}`);
-          }
-          actualMode = 'virtual';
         }
+
+        const proposalPayload: Record<string, unknown> = {
+          proposal: 1,
+          amount: stake,
+          basis: 'stake',
+          contract_type: effectiveType,
+          currency: creds.account.currency,
+          ...symbolField,
+        };
+
+        if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
+          proposalPayload.multiplier = effectiveMult;
+          const limitOrder: Record<string, number> = {};
+          if (tpUsd && tpUsd >= 0.5) limitOrder.take_profit = Number(tpUsd.toFixed(2));
+          if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
+          if (Object.keys(limitOrder).length > 0) proposalPayload.limit_order = limitOrder;
+        } else if (effectiveType === 'ACCU') {
+          proposalPayload.growth_rate = growthRate || 0.02;
+          if (tpUsd && tpUsd >= 0.5) {
+            proposalPayload.limit_order = { take_profit: Number(tpUsd.toFixed(2)) };
+          }
+        } else {
+          proposalPayload.duration = effectiveDuration;
+          proposalPayload.duration_unit = effectiveDurationUnit;
+          if (input.barrier !== undefined && input.barrier !== null && input.barrier !== '') {
+            proposalPayload.barrier = String(input.barrier);
+          }
+        }
+
+        let buyResult: any;
+        if (isOAuth2) {
+          const otpResp = await derivRestRequest<any>(
+            `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+            creds.token,
+            { method: 'POST' }
+          );
+          const otpUrl = extractDerivOtpWsUrl(otpResp);
+          if (!otpUrl) {
+            throw new Error(
+              `Failed to mint Deriv OTP trading socket (keys: ${Object.keys(otpResp || {}).join(', ') || 'empty'})`
+            );
+          }
+          const prop = await OtpDerivClient.requestOnOtpUrl(otpUrl, proposalPayload);
+          buyResult = await OtpDerivClient.requestOnOtpUrl(otpUrl, {
+            buy: prop.proposal.id,
+            price: stake,
+          });
+        } else {
+          const prop = await derivWs.requestWithToken(creds.token, proposalPayload);
+          buyResult = await derivWs.requestWithToken(creds.token, {
+            buy: prop.proposal.id,
+            price: stake,
+          });
+        }
+
+        if (buyResult?.buy?.contract_id) {
+          derivContractId = String(buyResult.buy.contract_id);
+          actualPayout = Number(buyResult.buy.payout || 0);
+          actualMode = 'deriv';
+
+          // Respect admin-locked DB balance override (add/minus P&L only) vs synced live balance
+          if (creds.account.balance_locked_by_admin) {
+            const updatedBal = Math.max(0, Number((shownRealBal - stake).toFixed(2)));
+            await execute(
+              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+              [updatedBal, creds.account.id]
+            );
+            const rwNext = { ...userRealWallets, options: updatedBal };
+            await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+              JSON.stringify(rwNext),
+              input.userId,
+            ]);
+            derivWs.emitUserEvent(input.userId, 'account_updated', {
+              accountId: creds.account.id,
+              balance: updatedBal,
+            });
+            derivWs.emitUserEvent(input.userId, 'balance_updated', {
+              real_wallets: rwNext,
+              realWallets: rwNext,
+            });
+          } else {
+            const liveBal =
+              buyResult.buy.balance_after !== undefined
+                ? Number(buyResult.buy.balance_after)
+                : Math.max(0, Number((Number(creds.account.last_known_balance || 0) - stake).toFixed(2)));
+            await execute(
+              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+              [liveBal, creds.account.id]
+            );
+            const rwNext = { ...userRealWallets, options: liveBal };
+            await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+              JSON.stringify(rwNext),
+              input.userId,
+            ]);
+            derivWs.emitUserEvent(input.userId, 'account_updated', {
+              accountId: creds.account.id,
+              balance: liveBal,
+            });
+            derivWs.emitUserEvent(input.userId, 'balance_updated', {
+              real_wallets: rwNext,
+              realWallets: rwNext,
+            });
+          }
+        } else if (explicitDeriv) {
+          throw new Error('Deriv did not confirm a contract ID for this order.');
+        }
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : 'Deriv execution failed';
+        await logSystemError('trade-execution', errMsg, 'error', {
+          userId: input.userId,
+          symbol: input.symbol,
+          contractType,
+          explicitDeriv,
+        });
+        const canFallbackToDbReal =
+          accountMode === 'real' &&
+          engineCfg.siteSettlementForLockedReal !== false &&
+          shownRealBal >= stake;
+        if (explicitDeriv && !canFallbackToDbReal) {
+          throw new Error(`Deriv rejected order: ${errMsg}`);
+        }
+        actualMode = 'virtual';
       }
     }
+  } else if (effectiveBucket === 'options' && explicitDeriv && accountMode === 'real' && !(Number(userRealWallets.options || 0) >= stake)) {
+    throw new Error(
+      'No active connected REAL Deriv account found and Real USD Wallet balance is insufficient. Connect your Deriv account or deposit funds.'
+    );
   }
 
   if (actualMode === 'virtual') {
@@ -722,6 +762,10 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         newBal,
         input.userId,
       ]);
+      await execute(
+        "UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)",
+        [newBal, input.userId]
+      ).catch(() => {});
       derivWs.emitUserEvent(input.userId, 'balance_updated', { virtual_workspace_balance: newBal });
     }
   }
@@ -776,7 +820,20 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
 
   if (
     actualMode === 'virtual' &&
-    ['DIGITOVER', 'DIGITUNDER', 'DIGITEVEN', 'DIGITODD', 'DIGITMATCH', 'DIGITDIFF', 'CALL', 'PUT'].includes(contractType)
+    [
+      'DIGITOVER',
+      'DIGITUNDER',
+      'DIGITEVEN',
+      'DIGITODD',
+      'DIGITMATCH',
+      'DIGITDIFF',
+      'CALL',
+      'PUT',
+      'CALLE',
+      'PUTE',
+      'ONETOUCH',
+      'NOTOUCH',
+    ].includes(contractType)
   ) {
     const settleDelay =
       durationUnit.toLowerCase() === 't'
@@ -785,9 +842,161 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     setTimeout(() => {
       settleVirtualDigitalOrder(Number(created.id)).catch(() => {});
     }, settleDelay);
+  } else if (
+    actualMode === 'deriv' &&
+    derivContractId &&
+    resolvedConnectedAccountId &&
+    !['MULTUP', 'MULTDOWN'].includes(contractType)
+  ) {
+    monitorDerivOpenContract(
+      Number(created.id),
+      derivContractId,
+      input.userId,
+      resolvedConnectedAccountId
+    ).catch(() => {});
   }
 
   return created;
+}
+
+async function monitorDerivOpenContract(
+  orderId: number,
+  derivContractId: string,
+  userId: number,
+  connectedAccountId: number
+): Promise<void> {
+  const maxAttempts = 120;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 1100 : 1400));
+    try {
+      const order = await queryOne<any>(
+        `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1`,
+        [orderId]
+      );
+      if (!order || order.status !== 'OPEN') return;
+
+      const creds = await getDecryptedAccountToken(connectedAccountId, userId);
+      if (!creds) return;
+
+      const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
+      const pocResp = isOAuth2
+        ? await (async () => {
+            const otpResp = await derivRestRequest<any>(
+              `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+              creds.token,
+              { method: 'POST' }
+            );
+            const otpUrl = extractDerivOtpWsUrl(otpResp);
+            if (!otpUrl) return null;
+            return OtpDerivClient.requestOnOtpUrl(otpUrl, {
+              proposal_open_contract: 1,
+              contract_id: Number(derivContractId),
+            });
+          })()
+        : await derivWs.requestWithToken(creds.token, {
+            proposal_open_contract: 1,
+            contract_id: Number(derivContractId),
+          });
+
+      const poc = pocResp?.proposal_open_contract;
+      if (!poc) continue;
+
+      const currentSpot = Number(poc.current_spot ?? poc.exit_tick ?? order.current_price ?? order.entry_price);
+      const livePnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(order.stake) : 0)).toFixed(2));
+      const settled = Boolean(poc.is_sold) || poc.status === 'won' || poc.status === 'lost' || poc.status === 'sold';
+
+      if (!settled) {
+        await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
+          currentSpot,
+          livePnl,
+          orderId,
+        ]).catch(() => {});
+        derivWs.emitUserEvent(userId, 'order_updated', {
+          id: orderId,
+          current_price: currentSpot,
+          pnl: livePnl,
+        });
+        continue;
+      }
+
+      const exitPrice = Number(poc.exit_tick ?? poc.current_spot ?? currentSpot ?? order.entry_price);
+      const payout = Number(
+        poc.sell_price !== undefined
+          ? poc.sell_price
+          : poc.status === 'won' || livePnl >= 0
+            ? Number(order.stake) + Math.max(0, livePnl)
+            : 0
+      );
+      const finalPnl = Number(poc.profit !== undefined ? poc.profit : (payout - Number(order.stake)).toFixed(2));
+
+      const closedOrder = await queryOne<any>(
+        `UPDATE virtual_orders
+         SET status = 'CLOSED', exit_price = $1, current_price = $1, payout = $2, pnl = $3, closed_at = NOW()
+         WHERE id = $4
+         RETURNING ${ORDER_SELECT_COLS}`,
+        [exitPrice, Number(payout.toFixed(2)), Number(finalPnl.toFixed(2)), orderId]
+      );
+
+      if (creds.account.balance_locked_by_admin) {
+        if (payout > 0) {
+          await creditSettledPayoutToUser(userId, 'real', Number(payout.toFixed(2)), creds.account.id, 'options');
+        }
+      } else {
+        let liveBal: number | null =
+          poc.balance_after !== undefined ? Number(poc.balance_after) : null;
+        if (liveBal === null) {
+          try {
+            const balResp = isOAuth2
+              ? await derivRestRequest<any>('/trading/v1/options/accounts', creds.token)
+              : await derivWs.requestWithToken(creds.token, { balance: 1 }, 4500);
+            if (isOAuth2) {
+              const list = balResp?.data || balResp?.accounts || [];
+              const found = list.find((item: any) => String(item.account_id) === String(creds.account.deriv_login_id));
+              if (found && found.balance !== undefined) liveBal = Number(found.balance);
+            } else if (balResp?.balance?.balance !== undefined) {
+              liveBal = Number(balResp.balance.balance);
+            }
+          } catch {
+            // fallback to credit if live fetch unavailable
+          }
+        }
+        if (liveBal !== null && Number.isFinite(liveBal)) {
+          await execute(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+            [liveBal, creds.account.id]
+          );
+          const u = await queryOne<{ real_wallets_json: string }>(
+            'SELECT real_wallets_json FROM users WHERE id = $1',
+            [userId]
+          );
+          const rw = (() => {
+            try {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+            } catch {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          rw.options = liveBal;
+          await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(rw),
+            userId,
+          ]);
+          derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
+          derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
+        } else if (payout > 0) {
+          await creditSettledPayoutToUser(userId, 'real', Number(payout.toFixed(2)), creds.account.id, 'options');
+        }
+      }
+
+      untrackOpenMtmOrder(orderId);
+      if (closedOrder) {
+        derivWs.emitUserEvent(userId, 'order_closed', closedOrder);
+      }
+      return;
+    } catch {
+      // retry next cycle
+    }
+  }
 }
 
 function computeDigitalPayoutMult(contractType: string, barrier: number): number {
@@ -820,10 +1029,10 @@ function adjustDigitForDesiredOutcome(
   const dec = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
   const step = Math.pow(10, -dec);
 
-  if (contractType === 'CALL') {
+  if (contractType === 'CALL' || contractType === 'CALLE' || contractType === 'ONETOUCH') {
     return Number((price + (shouldWin ? Math.abs(step * 12) : -Math.abs(step * 12))).toFixed(dec));
   }
-  if (contractType === 'PUT') {
+  if (contractType === 'PUT' || contractType === 'PUTE' || contractType === 'NOTOUCH') {
     return Number((price + (shouldWin ? -Math.abs(step * 12) : Math.abs(step * 12))).toFixed(dec));
   }
 
@@ -1003,6 +1212,10 @@ export async function creditSettledPayoutToUser(
       [userId]
     );
     if (updatedUser) {
+      await execute(
+        "UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)",
+        [updatedUser.virtual_workspace_balance, userId]
+      ).catch(() => {});
       derivWs.emitUserEvent(userId, 'balance_updated', {
         virtual_workspace_balance: updatedUser.virtual_workspace_balance,
       });
@@ -1113,21 +1326,37 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
 
         if (creds.account.balance_locked_by_admin) {
           const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
-          const updatedBal = Number((creds.account.last_known_balance + credit).toFixed(2));
-          await execute(
-            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-            [updatedBal, creds.account.id]
-          );
-          derivWs.emitUserEvent(order.user_id, 'account_updated', {
-            accountId: creds.account.id,
-            balance: updatedBal,
-          });
+          await creditSettledPayoutToUser(order.user_id, 'real', credit, creds.account.id, 'options');
         } else if (sellResp?.sell?.balance_after !== undefined) {
           const liveBal = Number(sellResp.sell.balance_after);
           await execute(
             'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
             [liveBal, creds.account.id]
           );
+          const u = await queryOne<{ real_wallets_json: string }>(
+            'SELECT real_wallets_json FROM users WHERE id = $1',
+            [order.user_id]
+          );
+          const rw = (() => {
+            try {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+            } catch {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          rw.options = liveBal;
+          await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(rw),
+            order.user_id,
+          ]);
+          derivWs.emitUserEvent(order.user_id, 'account_updated', {
+            accountId: creds.account.id,
+            balance: liveBal,
+          });
+          derivWs.emitUserEvent(order.user_id, 'balance_updated', {
+            real_wallets: rw,
+            realWallets: rw,
+          });
         }
       } catch (err) {
         await logSystemError(

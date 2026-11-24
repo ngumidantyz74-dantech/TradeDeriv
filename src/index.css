@@ -52,3 +52,28 @@
 .pb-safe {
   padding-bottom: env(safe-area-inset-bottom, 0px);
 }
+
+@keyframes deriv-ring-spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
+}
+
+@keyframes deriv-bar-pulse {
+  0%, 40%, 100% {
+    transform: scaleY(0.55);
+    opacity: 0.65;
+  }
+  20% {
+    transform: scaleY(1.25);
+    opacity: 1;
+  }
+}
+
+.animate-deriv-ring {
+  animation: deriv-ring-spin 0.9s linear infinite;
+}
+
+.deriv-bar {
+  animation: deriv-bar-pulse 1.1s ease-in-out infinite;
+}
+

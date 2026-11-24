@@ -7,11 +7,12 @@ import { randomId } from './crypto.ts';
 
 function isNonLocalDatabase(connectionString: string): boolean {
   if (!connectionString) return false;
+  if (connectionString.includes('/cloudsql/')) return false;
   try {
     const normalized = connectionString.replace(/^postgres(ql)?:\/\//i, 'http://');
     const url = new URL(normalized);
     const host = url.hostname.toLowerCase();
-    return host !== 'localhost' && host !== '127.0.0.1';
+    return Boolean(host) && host !== 'localhost' && host !== '127.0.0.1';
   } catch {
     return !connectionString.includes('localhost') && !connectionString.includes('127.0.0.1');
   }

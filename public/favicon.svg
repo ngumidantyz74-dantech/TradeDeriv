@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <rect width="64" height="64" rx="14" fill="#FF444F" />
+  <text
+    x="31"
+    y="47"
+    text-anchor="middle"
+    fill="#FFFFFF"
+    font-family="'IBM Plex Sans', 'Ubuntu', 'Helvetica Neue', Arial, sans-serif"
+    font-size="44"
+    font-weight="700"
+    font-style="italic"
+  >d</text>
+</svg>
