@@ -129,27 +129,100 @@ router.get('/cashier/wallets', requireDb, requireAuth, async (req: AuthRequest, 
 const CASHIER_TX_COLS =
   'id, user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, created_at';
 
+function sanitizeCashierTransactionForClient(row: any) {
+  const { metadata_json, ...base } = row;
+  const rawType = String(base.tx_type || '').toLowerCase();
+  const rawMethod = String(base.method || '');
+  const rawProvider = String(base.provider || '');
+  const rawFrom = String(base.account_from || '');
+  const rawTo = String(base.account_to || '');
+
+  const isAdminOrigin =
+    rawProvider.toLowerCase() === 'admin_console' ||
+    rawMethod.toLowerCase().includes('admin') ||
+    rawFrom.toLowerCase().includes('admin treasury') ||
+    rawTo.toLowerCase().includes('admin treasury') ||
+    rawType === 'credit' ||
+    rawType === 'debit' ||
+    rawType === 'adjustment';
+
+  if (!isAdminOrigin) {
+    return base;
+  }
+
+  let meta: any = null;
+  if (metadata_json) {
+    try {
+      meta = typeof metadata_json === 'string' ? JSON.parse(metadata_json) : metadata_json;
+    } catch {
+      meta = null;
+    }
+  }
+
+  let signedCents: number | null = null;
+  if (
+    meta &&
+    meta.previousBalance !== undefined &&
+    meta.previousBalance !== null &&
+    meta.newBalance !== undefined &&
+    meta.newBalance !== null &&
+    Number.isFinite(Number(meta.previousBalance)) &&
+    Number.isFinite(Number(meta.newBalance))
+  ) {
+    signedCents = Math.round(Number(meta.newBalance) * 100) - Math.round(Number(meta.previousBalance) * 100);
+  } else {
+    const absCents = Math.round(Math.abs(Number(base.amount || 0)) * 100);
+    if (absCents === 0) {
+      signedCents = 0;
+    } else if (rawType === 'credit' || rawType === 'deposit' || rawFrom.toLowerCase().includes('treasury')) {
+      signedCents = absCents;
+    } else if (rawType === 'debit' || rawType === 'withdrawal' || rawType === 'withdraw' || rawTo.toLowerCase().includes('treasury')) {
+      signedCents = -absCents;
+    }
+  }
+
+  if (signedCents === null || signedCents === 0) {
+    return null;
+  }
+
+  const isDeposit = signedCents > 0;
+  const cleanFrom = rawFrom.toLowerCase().includes('admin') ? 'External Wallet' : base.account_from;
+  const cleanTo = rawTo.toLowerCase().includes('admin') ? 'External Wallet' : base.account_to;
+
+  return {
+    ...base,
+    tx_type: isDeposit ? 'deposit' : 'withdrawal',
+    method: isDeposit ? 'Deposit' : 'Withdraw',
+    provider: 'deriv',
+    account_from: cleanFrom,
+    account_to: cleanTo,
+    amount: Number((Math.abs(signedCents) / 100).toFixed(2)),
+  };
+}
+
 router.get('/cashier/transactions', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const txType = typeof req.query.tx_type === 'string' ? req.query.tx_type : '';
+  const txType = typeof req.query.tx_type === 'string' ? req.query.tx_type.toLowerCase() : '';
   const mode = req.query.accountMode === 'real' ? 'real' : req.query.accountMode === 'demo' ? 'demo' : '';
   const limit = Math.min(150, Math.max(1, Number(req.query.limit || 40)));
   const offset = Math.max(0, Number(req.query.offset || 0));
   const clauses = ['user_id = $1'];
   const params: any[] = [req.user!.id];
-  if (txType) {
-    params.push(txType);
-    clauses.push(`tx_type = $${params.length}`);
-  }
   if (mode) {
     params.push(mode);
     clauses.push(`COALESCE(account_mode, 'demo') = $${params.length}`);
   }
-  params.push(limit, offset);
+  const fetchLimit = Math.min(300, limit + offset + 60);
+  params.push(fetchLimit);
   const rows = await query(
-    `SELECT ${CASHIER_TX_COLS} FROM cashier_transactions WHERE ${clauses.join(' AND ')} ORDER BY id DESC LIMIT $${params.length - 1} OFFSET $${params.length}`,
+    `SELECT ${CASHIER_TX_COLS}, metadata_json FROM cashier_transactions WHERE ${clauses.join(' AND ')} ORDER BY id DESC LIMIT $${params.length}`,
     params
   );
-  res.json({ transactions: rows });
+  const cleaned = rows
+    .map(sanitizeCashierTransactionForClient)
+    .filter((tx): tx is NonNullable<typeof tx> => Boolean(tx))
+    .filter((tx) => !txType || String(tx.tx_type || '').toLowerCase() === txType);
+
+  res.json({ transactions: cleaned.slice(offset, offset + limit) });
 });
 
 router.post('/cashier/deposit', requireDb, requireAuth, async (req: AuthRequest, res) => {

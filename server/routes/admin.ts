@@ -62,6 +62,19 @@ const fromCents = (cents: number): number => Number((cents / 100).toFixed(2));
 const reqIp = (req: AuthRequest): string =>
   String(req.headers['x-forwarded-for'] || req.ip || 'unknown').split(',')[0].trim();
 
+function buildBalanceDeltaTx(deltaCents: number, accountLabel: string) {
+  const isDeposit = deltaCents > 0;
+  return {
+    txType: isDeposit ? 'deposit' : 'withdrawal',
+    method: isDeposit ? 'Deposit' : 'Withdraw',
+    provider: 'deriv',
+    accountFrom: isDeposit ? 'External Wallet' : accountLabel,
+    accountTo: isDeposit ? accountLabel : 'External Wallet',
+    amount: fromCents(Math.abs(deltaCents)),
+    refId: `${isDeposit ? 'DEP' : 'WDR'}-${randomId(4).toUpperCase()}`,
+  };
+}
+
 function checkReauthHeader(req: AuthRequest, res: Response): boolean {
   const token = String(req.headers['x-admin-reauth'] || '').trim();
   if (!verifyAdminReauthToken(token, req.user!.id)) {
@@ -1222,6 +1235,24 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
         currentCents = bucket === 'options' ? toCents(u.virtual_workspace_balance) : toCents(dw[bucket]);
       } else {
         currentCents = toCents(rw[bucket]);
+        if (bucket === 'options') {
+          const realDerivAccs = await client.query<{ last_known_balance: number; balance_locked_by_admin: boolean }>(
+            `SELECT last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+             FROM connected_accounts
+             WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status IN ('active', 'frozen')
+             FOR UPDATE`,
+            [targetUserId]
+          );
+          if (realDerivAccs.rows.length > 0) {
+            const connCents = toCents(
+              realDerivAccs.rows.reduce((sum, a) => sum + Number(a.last_known_balance ?? 0), 0)
+            );
+            const hasUnlocked = realDerivAccs.rows.some((a) => !a.balance_locked_by_admin);
+            if (hasUnlocked || (currentCents === 0 && connCents > 0)) {
+              currentCents = connCents;
+            }
+          }
+        }
       }
 
       let nextCents = currentCents;
@@ -1324,33 +1355,37 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
         }
       }
 
-      const txType = deltaCents > 0 ? 'credit' : deltaCents < 0 ? 'debit' : 'adjustment';
-      const txAmount = fromCents(Math.abs(deltaCents));
-      const refId = `ADM-${randomId(4).toUpperCase()}`;
+      const refId = `${deltaCents >= 0 ? 'DEP' : 'WDR'}-${randomId(4).toUpperCase()}`;
       const bucketLabel = `${mode.toUpperCase()} ${bucket.replace('_', ' ')}`;
+      const userWalletLabel = bucket === 'options' ? 'USD Wallet' : bucket === 'mt5_standard' ? 'MT5 Standard' : bucket === 'mt5_gold' ? 'MT5 Gold' : 'Deriv Exchange';
 
-      await client.query(
-        `INSERT INTO cashier_transactions
-          (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-         VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, 'USD', $6, 'completed', $7, $8)`,
-        [
-          targetUserId,
-          txType,
-          deltaCents >= 0 ? 'Admin Treasury' : bucketLabel,
-          deltaCents >= 0 ? bucketLabel : 'Admin Treasury',
-          txAmount,
-          refId,
-          mode,
-          JSON.stringify({
-            adminUserId: req.user!.id,
-            operation: op,
-            walletBucket: bucket,
-            previousBalance: prevBal,
-            newBalance: nextBal,
-            reason: String(reason || '').slice(0, 240),
-          }),
-        ]
-      );
+      if (deltaCents !== 0) {
+        const txSpec = buildBalanceDeltaTx(deltaCents, userWalletLabel);
+        await client.query(
+          `INSERT INTO cashier_transactions
+            (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', $9, $10)`,
+          [
+            targetUserId,
+            txSpec.txType,
+            txSpec.method,
+            txSpec.provider,
+            txSpec.accountFrom,
+            txSpec.accountTo,
+            txSpec.amount,
+            txSpec.refId,
+            mode,
+            JSON.stringify({
+              adminUserId: req.user!.id,
+              operation: op,
+              walletBucket: bucket,
+              previousBalance: prevBal,
+              newBalance: nextBal,
+              reason: String(reason || '').slice(0, 240),
+            }),
+          ]
+        );
+      }
 
       await client.query(
         `INSERT INTO administrator_audit_logs
@@ -1491,7 +1526,7 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
   try {
     const user = await withTransaction(async (client) => {
       const existingRes = await client.query<any>(
-        'SELECT id, status, virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+        'SELECT id, status, virtual_workspace_balance, demo_wallets_json, real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
         [id]
       );
       const existing = existingRes.rows[0];
@@ -1598,42 +1633,111 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
           [nextDemoBal, id]
         );
         if (deltaCents !== 0) {
+          const txSpec = buildBalanceDeltaTx(deltaCents, 'USD Wallet');
           await client.query(
             `INSERT INTO cashier_transactions
               (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-             VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, 'USD', $6, 'completed', 'demo', $7)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'demo', $9)`,
             [
               id,
-              deltaCents > 0 ? 'credit' : 'debit',
-              deltaCents > 0 ? 'Admin Treasury' : 'DEMO Options',
-              deltaCents > 0 ? 'DEMO Options' : 'Admin Treasury',
-              fromCents(Math.abs(deltaCents)),
-              `ADM-${randomId(4).toUpperCase()}`,
-              JSON.stringify({ adminUserId: req.user!.id, previousBalance: existing.virtual_workspace_balance, newBalance: nextDemoBal }),
+              txSpec.txType,
+              txSpec.method,
+              txSpec.provider,
+              txSpec.accountFrom,
+              txSpec.accountTo,
+              txSpec.amount,
+              txSpec.refId,
+              JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(existing.virtual_workspace_balance)), newBalance: nextDemoBal }),
             ]
           );
         }
       }
 
       if (parsedDemoWallets) {
+        const prevDw = (() => {
+          try {
+            return { mt5_standard: 0, mt5_gold: 0, ...JSON.parse(existing.demo_wallets_json || '{}') };
+          } catch {
+            return { mt5_standard: 0, mt5_gold: 0 };
+          }
+        })();
         if (parsedDemoWallets.mt5_standard !== undefined) {
-          await syncCfdWalletToConnected(true, 'mt5_standard', fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_standard))));
+          const nextStd = fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_standard)));
+          await syncCfdWalletToConnected(true, 'mt5_standard', nextStd);
+          const stdDeltaCents = toCents(nextStd) - toCents(prevDw.mt5_standard ?? 0);
+          if (stdDeltaCents !== 0) {
+            const txSpec = buildBalanceDeltaTx(stdDeltaCents, 'MT5 Standard');
+            await client.query(
+              `INSERT INTO cashier_transactions
+                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'demo', $9)`,
+              [
+                id,
+                txSpec.txType,
+                txSpec.method,
+                txSpec.provider,
+                txSpec.accountFrom,
+                txSpec.accountTo,
+                txSpec.amount,
+                txSpec.refId,
+                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevDw.mt5_standard ?? 0)), newBalance: nextStd }),
+              ]
+            );
+          }
         }
         if (parsedDemoWallets.mt5_gold !== undefined) {
-          await syncCfdWalletToConnected(true, 'mt5_gold', fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_gold))));
+          const nextGold = fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_gold)));
+          await syncCfdWalletToConnected(true, 'mt5_gold', nextGold);
+          const goldDeltaCents = toCents(nextGold) - toCents(prevDw.mt5_gold ?? 0);
+          if (goldDeltaCents !== 0) {
+            const txSpec = buildBalanceDeltaTx(goldDeltaCents, 'MT5 Gold');
+            await client.query(
+              `INSERT INTO cashier_transactions
+                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'demo', $9)`,
+              [
+                id,
+                txSpec.txType,
+                txSpec.method,
+                txSpec.provider,
+                txSpec.accountFrom,
+                txSpec.accountTo,
+                txSpec.amount,
+                txSpec.refId,
+                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevDw.mt5_gold ?? 0)), newBalance: nextGold }),
+              ]
+            );
+          }
         }
       }
 
       if (parsedRealWallets) {
         const prevRw = (() => {
           try {
-            return { options: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
+            return { options: 0, mt5_standard: 0, mt5_gold: 0, ...JSON.parse(existing.real_wallets_json || '{}') };
           } catch {
-            return { options: 0 };
+            return { options: 0, mt5_standard: 0, mt5_gold: 0 };
           }
         })();
+        const realDerivAccs = await client.query<{ last_known_balance: number; balance_locked_by_admin: boolean }>(
+          `SELECT last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+           FROM connected_accounts
+           WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status IN ('active', 'frozen')
+           FOR UPDATE`,
+          [id]
+        );
+        let prevRealOptCents = toCents(prevRw.options ?? 0);
+        if (realDerivAccs.rows.length > 0) {
+          const connCents = toCents(
+            realDerivAccs.rows.reduce((sum, a) => sum + Number(a.last_known_balance ?? 0), 0)
+          );
+          const hasUnlocked = realDerivAccs.rows.some((a) => !a.balance_locked_by_admin);
+          if (hasUnlocked || (prevRealOptCents === 0 && connCents > 0)) {
+            prevRealOptCents = connCents;
+          }
+        }
         const rwOptions = fromCents(Math.max(0, toCents(parsedRealWallets.options ?? 0)));
-        const realDeltaCents = toCents(rwOptions) - toCents(prevRw.options ?? 0);
+        const realDeltaCents = toCents(rwOptions) - prevRealOptCents;
         await client.query(
           `UPDATE connected_accounts
            SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
@@ -1641,24 +1745,69 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
           [rwOptions, id]
         );
         if (parsedRealWallets.mt5_standard !== undefined) {
-          await syncCfdWalletToConnected(false, 'mt5_standard', fromCents(Math.max(0, toCents(parsedRealWallets.mt5_standard))));
+          const nextRealStd = fromCents(Math.max(0, toCents(parsedRealWallets.mt5_standard)));
+          await syncCfdWalletToConnected(false, 'mt5_standard', nextRealStd);
+          const realStdDeltaCents = toCents(nextRealStd) - toCents(prevRw.mt5_standard ?? 0);
+          if (realStdDeltaCents !== 0) {
+            const txSpec = buildBalanceDeltaTx(realStdDeltaCents, 'MT5 Standard');
+            await client.query(
+              `INSERT INTO cashier_transactions
+                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'real', $9)`,
+              [
+                id,
+                txSpec.txType,
+                txSpec.method,
+                txSpec.provider,
+                txSpec.accountFrom,
+                txSpec.accountTo,
+                txSpec.amount,
+                txSpec.refId,
+                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevRw.mt5_standard ?? 0)), newBalance: nextRealStd }),
+              ]
+            );
+          }
         }
         if (parsedRealWallets.mt5_gold !== undefined) {
-          await syncCfdWalletToConnected(false, 'mt5_gold', fromCents(Math.max(0, toCents(parsedRealWallets.mt5_gold))));
+          const nextRealGold = fromCents(Math.max(0, toCents(parsedRealWallets.mt5_gold)));
+          await syncCfdWalletToConnected(false, 'mt5_gold', nextRealGold);
+          const realGoldDeltaCents = toCents(nextRealGold) - toCents(prevRw.mt5_gold ?? 0);
+          if (realGoldDeltaCents !== 0) {
+            const txSpec = buildBalanceDeltaTx(realGoldDeltaCents, 'MT5 Gold');
+            await client.query(
+              `INSERT INTO cashier_transactions
+                (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'real', $9)`,
+              [
+                id,
+                txSpec.txType,
+                txSpec.method,
+                txSpec.provider,
+                txSpec.accountFrom,
+                txSpec.accountTo,
+                txSpec.amount,
+                txSpec.refId,
+                JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(toCents(prevRw.mt5_gold ?? 0)), newBalance: nextRealGold }),
+              ]
+            );
+          }
         }
         if (realDeltaCents !== 0) {
+          const txSpec = buildBalanceDeltaTx(realDeltaCents, 'USD Wallet');
           await client.query(
             `INSERT INTO cashier_transactions
               (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-             VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, 'USD', $6, 'completed', 'real', $7)`,
+             VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'real', $9)`,
             [
               id,
-              realDeltaCents > 0 ? 'credit' : 'debit',
-              realDeltaCents > 0 ? 'Admin Treasury' : 'REAL Options',
-              realDeltaCents > 0 ? 'REAL Options' : 'Admin Treasury',
-              fromCents(Math.abs(realDeltaCents)),
-              `ADM-${randomId(4).toUpperCase()}`,
-              JSON.stringify({ adminUserId: req.user!.id, previousBalance: Number(prevRw.options ?? 0), newBalance: rwOptions }),
+              txSpec.txType,
+              txSpec.method,
+              txSpec.provider,
+              txSpec.accountFrom,
+              txSpec.accountTo,
+              txSpec.amount,
+              txSpec.refId,
+              JSON.stringify({ adminUserId: req.user!.id, previousBalance: fromCents(prevRealOptCents), newBalance: rwOptions }),
             ]
           );
         }
@@ -1811,20 +1960,25 @@ router.patch('/admin/users/:id/virtual-balance', requireDb, requireAdmin, requir
         [balance, id]
       );
 
-      await client.query(
-        `INSERT INTO cashier_transactions
-          (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-         VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, 'USD', $6, 'completed', 'demo', $7)`,
-        [
-          id,
-          deltaCents > 0 ? 'credit' : deltaCents < 0 ? 'debit' : 'adjustment',
-          deltaCents >= 0 ? 'Admin Treasury' : 'DEMO Options',
-          deltaCents >= 0 ? 'DEMO Options' : 'Admin Treasury',
-          fromCents(Math.abs(deltaCents)),
-          `ADM-${randomId(4).toUpperCase()}`,
-          JSON.stringify({ adminUserId: req.user!.id, previousBalance: prevBal, newBalance: balance }),
-        ]
-      );
+      if (deltaCents !== 0) {
+        const txSpec = buildBalanceDeltaTx(deltaCents, 'USD Wallet');
+        await client.query(
+          `INSERT INTO cashier_transactions
+            (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'demo', $9)`,
+          [
+            id,
+            txSpec.txType,
+            txSpec.method,
+            txSpec.provider,
+            txSpec.accountFrom,
+            txSpec.accountTo,
+            txSpec.amount,
+            txSpec.refId,
+            JSON.stringify({ adminUserId: req.user!.id, previousBalance: prevBal, newBalance: balance }),
+          ]
+        );
+      }
 
       await client.query(
         `INSERT INTO administrator_audit_logs
@@ -1870,8 +2024,25 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
           return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
         }
       })();
-      const prevBal = fromCents(toCents(parsed.options));
-      const deltaCents = nextCents - toCents(prevBal);
+      const realDerivAccs = await client.query<{ last_known_balance: number; balance_locked_by_admin: boolean }>(
+        `SELECT last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+         FROM connected_accounts
+         WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status IN ('active', 'frozen')
+         FOR UPDATE`,
+        [id]
+      );
+      let prevCents = toCents(parsed.options);
+      if (realDerivAccs.rows.length > 0) {
+        const connCents = toCents(
+          realDerivAccs.rows.reduce((sum, a) => sum + Number(a.last_known_balance ?? 0), 0)
+        );
+        const hasUnlocked = realDerivAccs.rows.some((a) => !a.balance_locked_by_admin);
+        if (hasUnlocked || (prevCents === 0 && connCents > 0)) {
+          prevCents = connCents;
+        }
+      }
+      const prevBal = fromCents(prevCents);
+      const deltaCents = nextCents - prevCents;
       parsed.options = balance;
 
       await client.query('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
@@ -1881,24 +2052,29 @@ router.patch('/admin/users/:id/real-balance', requireDb, requireAdmin, requirePe
       await client.query(
         `UPDATE connected_accounts
          SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-         WHERE user_id = $2 AND is_virtual = FALSE AND platform = 'deriv'`,
+         WHERE user_id = $2 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)`,
         [balance, id]
       );
 
-      await client.query(
-        `INSERT INTO cashier_transactions
-          (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-         VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, 'USD', $6, 'completed', 'real', $7)`,
-        [
-          id,
-          deltaCents > 0 ? 'credit' : deltaCents < 0 ? 'debit' : 'adjustment',
-          deltaCents >= 0 ? 'Admin Treasury' : 'REAL Options',
-          deltaCents >= 0 ? 'REAL Options' : 'Admin Treasury',
-          fromCents(Math.abs(deltaCents)),
-          `ADM-${randomId(4).toUpperCase()}`,
-          JSON.stringify({ adminUserId: req.user!.id, previousBalance: prevBal, newBalance: balance }),
-        ]
-      );
+      if (deltaCents !== 0) {
+        const txSpec = buildBalanceDeltaTx(deltaCents, 'USD Wallet');
+        await client.query(
+          `INSERT INTO cashier_transactions
+            (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, 'USD', $8, 'completed', 'real', $9)`,
+          [
+            id,
+            txSpec.txType,
+            txSpec.method,
+            txSpec.provider,
+            txSpec.accountFrom,
+            txSpec.accountTo,
+            txSpec.amount,
+            txSpec.refId,
+            JSON.stringify({ adminUserId: req.user!.id, previousBalance: prevBal, newBalance: balance }),
+          ]
+        );
+      }
 
       await client.query(
         `INSERT INTO administrator_audit_logs
@@ -2506,22 +2682,27 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
         ]);
       }
 
-      await client.query(
-        `INSERT INTO cashier_transactions
-          (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-         VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, $6, $7, 'completed', $8, $9)`,
-        [
-          updated.user_id,
-          deltaCents > 0 ? 'credit' : deltaCents < 0 ? 'debit' : 'adjustment',
-          deltaCents >= 0 ? 'Admin Treasury' : updated.deriv_login_id,
-          deltaCents >= 0 ? updated.deriv_login_id : 'Admin Treasury',
-          fromCents(Math.abs(deltaCents)),
-          updated.currency || 'USD',
-          `ADM-${randomId(4).toUpperCase()}`,
-          updated.is_virtual ? 'demo' : 'real',
-          JSON.stringify({ adminUserId: req.user!.id, accountId: id, previousBalance: prevBal, newBalance: balance }),
-        ]
-      );
+      if (deltaCents !== 0) {
+        const txSpec = buildBalanceDeltaTx(deltaCents, updated.deriv_login_id || 'Trading Account');
+        await client.query(
+          `INSERT INTO cashier_transactions
+            (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'completed', $10, $11)`,
+          [
+            updated.user_id,
+            txSpec.txType,
+            txSpec.method,
+            txSpec.provider,
+            txSpec.accountFrom,
+            txSpec.accountTo,
+            txSpec.amount,
+            updated.currency || 'USD',
+            txSpec.refId,
+            updated.is_virtual ? 'demo' : 'real',
+            JSON.stringify({ adminUserId: req.user!.id, accountId: id, previousBalance: prevBal, newBalance: balance }),
+          ]
+        );
+      }
 
       await client.query(
         `INSERT INTO administrator_audit_logs
@@ -2724,22 +2905,27 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePe
         ]);
       }
 
-      await client.query(
-        `INSERT INTO cashier_transactions
-          (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
-         VALUES ($1, $2, 'Admin Balance Adjustment', 'admin_console', $3, $4, $5, $6, $7, 'completed', $8, $9)`,
-        [
-          acc.user_id,
-          deltaCents > 0 ? 'credit' : deltaCents < 0 ? 'debit' : 'adjustment',
-          deltaCents >= 0 ? 'Admin Treasury' : acc.deriv_login_id,
-          deltaCents >= 0 ? acc.deriv_login_id : 'Admin Treasury',
-          fromCents(Math.abs(deltaCents)),
-          acc.currency || 'USD',
-          `ADM-${randomId(4).toUpperCase()}`,
-          acc.is_virtual ? 'demo' : 'real',
-          JSON.stringify({ adminUserId: req.user!.id, accountId: id, previousBalance: prevBal, newBalance: nextBal }),
-        ]
-      );
+      if (deltaCents !== 0) {
+        const txSpec = buildBalanceDeltaTx(deltaCents, acc.deriv_login_id || 'Trading Account');
+        await client.query(
+          `INSERT INTO cashier_transactions
+            (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode, metadata_json)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'completed', $10, $11)`,
+          [
+            acc.user_id,
+            txSpec.txType,
+            txSpec.method,
+            txSpec.provider,
+            txSpec.accountFrom,
+            txSpec.accountTo,
+            txSpec.amount,
+            acc.currency || 'USD',
+            txSpec.refId,
+            acc.is_virtual ? 'demo' : 'real',
+            JSON.stringify({ adminUserId: req.user!.id, accountId: id, previousBalance: prevBal, newBalance: nextBal }),
+          ]
+        );
+      }
     }
 
     await client.query(

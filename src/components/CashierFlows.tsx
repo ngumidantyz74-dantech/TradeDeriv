@@ -1003,8 +1003,17 @@ export const AllTransactionsScreen: React.FC<{
 }> = ({ open, onClose, transactions }) => {
   if (!open) return null;
 
+  const visibleTransactions = transactions.filter((tx) => {
+    const type = String(tx.tx_type || '').toLowerCase();
+    const methodLow = String(tx.method || '').toLowerCase();
+    const amt = Number(tx.amount || 0);
+    if (amt <= 0 && (type === 'adjustment' || methodLow.includes('admin'))) return false;
+    if (type === 'adjustment' && amt <= 0) return false;
+    return true;
+  });
+
   const grouped: Record<string, CashierTransaction[]> = {};
-  for (const tx of transactions) {
+  for (const tx of visibleTransactions) {
     const dt = new Date(tx.created_at);
     const label = Number.isNaN(dt.getTime())
       ? 'Recent'
@@ -1029,7 +1038,7 @@ export const AllTransactionsScreen: React.FC<{
 
         <h1 className="font-display text-[22px] font-bold tracking-tight mb-5">All transactions</h1>
 
-        {transactions.length === 0 ? (
+        {visibleTransactions.length === 0 ? (
           <div className="py-16 text-center text-sm text-[#9BA3B0]">No completed deposits, withdrawals, or transfers yet.</div>
         ) : (
           <div className="space-y-6">
@@ -1039,10 +1048,23 @@ export const AllTransactionsScreen: React.FC<{
                 <div className="divide-y divide-white/[0.08]">
                   {rows.map((tx) => {
                     const type = String(tx.tx_type || '').toLowerCase();
-                    const isDeposit = type === 'deposit' || type === 'credit';
-                    const isWithdraw = type === 'withdrawal' || type === 'withdraw' || type === 'debit';
+                    const fromLow = String(tx.account_from || '').toLowerCase();
+                    const toLow = String(tx.account_to || '').toLowerCase();
+                    const isDeposit =
+                      type === 'deposit' ||
+                      type === 'credit' ||
+                      (type === 'adjustment' && fromLow.includes('treasury'));
+                    const isWithdraw =
+                      type === 'withdrawal' ||
+                      type === 'withdraw' ||
+                      type === 'debit' ||
+                      (type === 'adjustment' && toLow.includes('treasury'));
                     const title = isDeposit ? 'Deposit' : isWithdraw ? 'Withdraw' : 'Transfer';
-                    const subtitle = !isDeposit && !isWithdraw ? tx.method : undefined;
+                    const rawMethod = String(tx.method || '');
+                    const subtitle =
+                      !isDeposit && !isWithdraw && !rawMethod.toLowerCase().includes('admin')
+                        ? rawMethod
+                        : undefined;
                     const Icon = isDeposit ? Plus : isWithdraw ? Minus : ArrowLeftRight;
                     const statusLabel =
                       tx.status === 'completed' || !tx.status
@@ -1059,7 +1081,7 @@ export const AllTransactionsScreen: React.FC<{
                         </div>
                         <div className="text-right shrink-0">
                           <p className="text-[14px] font-semibold font-mono-num text-white tabular-nums">
-                            {Number(tx.amount || 0).toFixed(2)} {tx.currency || 'USD'}
+                            {Math.abs(Number(tx.amount || 0)).toFixed(2)} {tx.currency || 'USD'}
                           </p>
                           <p className="text-[12px] text-[#17B978] font-medium flex items-center justify-end gap-1">
                             {statusLabel === 'Completed' ? null : <CheckCircle2 className="w-3 h-3" />}
