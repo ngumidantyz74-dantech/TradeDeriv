@@ -49,7 +49,7 @@ export const LandingHero: React.FC = () => {
       <div className="absolute inset-0 z-0">
         <img
           src="/src/assets/images/hero_trader_portrait_1795009382829.jpg"
-          alt="Trader using DERIV mobile terminal"
+          alt="Trader using deriv mobile terminal"
           referrerPolicy="no-referrer"
           className="w-full h-full object-cover object-center lg:object-[center_20%]"
         />
