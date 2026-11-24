@@ -10,6 +10,13 @@ import { bindClientToVerifiedRequestDevice } from '../rbac-device.ts';
 
 const router = Router();
 
+router.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 const USER_PUBLIC_COLS = `id, email, full_name, phone, country, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended, locked_until, email_verified, preferred_currency, preferred_language, display_theme, virtual_workspace_balance, real_wallets_json, demo_wallets_json, exchange_balances_json, real_exchange_balances_json, deriv_nickname, deriv_client_id, last_login_at, updated_at, created_at`;
 const USER_AUTH_COLS = `${USER_PUBLIC_COLS}, password_hash`;
 

@@ -418,7 +418,8 @@ export const SmartTraderPage: React.FC = () => {
           growthRate: activeGroup.isAccu ? growthRate : undefined,
           tpUsd: activeGroup.isAccu ? tpUsd : undefined,
           accountMode,
-          executionMode: accountMode === 'real' ? 'deriv' : 'virtual',
+          executionMode:
+            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || undefined,
           strategyKey: analyserSynced ? 'analyser_synced_smarttrader' : 'smart_trader',
           isAnalyserSynced: analyserSynced,

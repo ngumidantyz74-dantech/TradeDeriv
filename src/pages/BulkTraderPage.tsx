@@ -55,7 +55,8 @@ export const BulkTraderPage: React.FC = () => {
           slUsd: Number(slUsd) || null,
           tpUsd: Number(tpUsd) || null,
           accountMode,
-          executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
+          executionMode:
+            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });

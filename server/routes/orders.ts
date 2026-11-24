@@ -134,8 +134,24 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
     await derivWs.ensureSymbolSubscribed(symbol).catch(() => {});
     await derivWs.getLiveQuote(symbol).catch(() => null);
 
-    // Upfront batch balance check for wallet/demo modes to avoid half-filled batches
-    if (acctMode === 'demo' && (requestedBucket !== 'options' || body.executionMode !== 'deriv')) {
+    // Upfront batch balance check for wallet/demo modes (skip blocking when unlocked Demo Deriv account trades live)
+    let skipDemoLocalCheck = false;
+    if (acctMode === 'demo' && requestedBucket === 'options' && body.executionMode === 'deriv') {
+      const demoAcc = connectedAccId
+        ? await queryOne<{ balance_locked_by_admin: boolean }>(
+            "SELECT COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2 AND is_virtual = TRUE AND status = 'active'",
+            [connectedAccId, req.user!.id]
+          )
+        : await queryOne<{ balance_locked_by_admin: boolean }>(
+            "SELECT COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active' ORDER BY COALESCE(balance_locked_by_admin, FALSE) ASC, id ASC LIMIT 1",
+            [req.user!.id]
+          );
+      if (demoAcc && !demoAcc.balance_locked_by_admin) {
+        skipDemoLocalCheck = true;
+      }
+    }
+
+    if (acctMode === 'demo' && !skipDemoLocalCheck) {
       let effectiveBucket: WalletBucket = requestedBucket;
       let accBal: number | null = null;
       if (connectedAccId) {
@@ -448,7 +464,11 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
       strategyType: String(b.strategyType || 'Martingale'),
       symbol: String(b.symbol || '1HZ100V'),
       contractType: String(b.contractType || 'DIGITOVER'),
+      contractSideMode: b.contractSideMode === 'single' ? 'single' : 'both',
+      tradeSide: b.tradeSide ? String(b.tradeSide) : undefined,
       baseStake: Number(b.baseStake || b.stake || 1.0),
+      winStep: b.winStep !== undefined ? Number(b.winStep) : undefined,
+      maxWinSteps: b.maxWinSteps !== undefined ? Number(b.maxWinSteps) : undefined,
       barrier: b.barrier !== undefined ? String(b.barrier) : '2',
       duration: Number(b.duration || 1),
       durationUnit: String(b.durationUnit || 't'),
@@ -463,6 +483,8 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
       accountMode: b.accountMode === 'real' ? 'real' : 'demo',
       executionSpeed: b.executionSpeed === 'normal' ? 'normal' : 'fast',
       analyserSync: Boolean(b.analyserSync),
+      conditionType: b.conditionType,
+      conditionDigit: b.conditionDigit !== undefined ? Number(b.conditionDigit) : undefined,
     });
     res.json({ telemetry });
   } catch (err) {

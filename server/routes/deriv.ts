@@ -23,6 +23,13 @@ import { bindClientToVerifiedRequestDevice } from '../rbac-device.ts';
 const router = Router();
 const usedStateJtis = new Map<string, number>();
 
+router.use((_req, res, next) => {
+  res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
+  res.setHeader('Pragma', 'no-cache');
+  res.setHeader('Expires', '0');
+  next();
+});
+
 const USER_PROFILE_COLS =
   'id, email, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id, last_login_at, updated_at, created_at';
 
@@ -219,6 +226,32 @@ async function syncRealDerivWalletForUser(userId: number): Promise<void> {
   ]);
 }
 
+async function syncDemoDerivWalletForUser(userId: number): Promise<void> {
+  const demoRows = await query<{
+    id: number;
+    last_known_balance: number;
+    balance_locked_by_admin: boolean;
+  }>(
+    `SELECT id, last_known_balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+     FROM connected_accounts
+     WHERE user_id = $1
+       AND is_virtual = TRUE
+       AND status = 'active'
+       AND (platform = 'deriv' OR platform IS NULL)
+     ORDER BY id ASC`,
+    [userId]
+  );
+  if (demoRows.length === 0 || demoRows.some((r) => Boolean(r.balance_locked_by_admin))) {
+    return;
+  }
+
+  const primaryBalance = Number(Number(demoRows[0].last_known_balance || 0).toFixed(2));
+  await execute('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+    primaryBalance,
+    userId,
+  ]);
+}
+
 function cleanDerivFullName(raw?: string): string {
   const s = String(raw || '').trim();
   if (!s || s === 'Deriv Trader' || s === 'New Trader') return '';
@@ -321,7 +354,7 @@ async function ensureUserFromDerivProfile(profile: {
     );
     if (existingById) {
       const synced = await syncDerivProfileOnExistingUser(existingById, profile);
-      return { user: synced, isNew: false, preserveExistingBalances: true };
+      return { user: synced, isNew: false, preserveExistingBalances: false };
     }
   }
 
@@ -334,7 +367,7 @@ async function ensureUserFromDerivProfile(profile: {
     );
     if (existingByEmail) {
       const synced = await syncDerivProfileOnExistingUser(existingByEmail, profile);
-      return { user: synced, isNew: false, preserveExistingBalances: true };
+      return { user: synced, isNew: false, preserveExistingBalances: false };
     }
   }
 
@@ -354,7 +387,7 @@ async function ensureUserFromDerivProfile(profile: {
       ]);
       if (existingUser) {
         const synced = await syncDerivProfileOnExistingUser(existingUser, profile);
-        return { user: synced, isNew: false, preserveExistingBalances: true };
+        return { user: synced, isNew: false, preserveExistingBalances: false };
       }
     }
   }
@@ -378,10 +411,10 @@ async function ensureUserFromDerivProfile(profile: {
   );
   if (existingFallback) {
     const synced = await syncDerivProfileOnExistingUser(existingFallback, profile);
-    return { user: synced, isNew: false, preserveExistingBalances: true };
+    return { user: synced, isNew: false, preserveExistingBalances: false };
   }
 
-  // First Login: create new user
+  // First Login: create new user with exact last_login_at
   const globalSettings = await getSetting<{ defaultVirtualBalance?: number }>('global', {});
   const hash = await hashPasswordArgon2id(randomId(24));
   const resolvedName =
@@ -391,8 +424,8 @@ async function ensureUserFromDerivProfile(profile: {
   const resolvedPhone = String(profile.phone || '').trim();
   const resolvedCountry = normalizeDerivCountry(profile.country) || 'Kenya';
   const created = await queryOne<any>(
-    `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id)
-     VALUES ($1, $2, $3, $4, $5, 'user', 'active', TRUE, $6, $7, $8)
+    `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, virtual_workspace_balance, deriv_nickname, deriv_client_id, last_login_at)
+     VALUES ($1, $2, $3, $4, $5, 'user', 'active', TRUE, $6, $7, $8, NOW())
      RETURNING ${USER_PROFILE_COLS}`,
     [
       cleanEmail,
@@ -491,22 +524,25 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
         loginIds: entries.map((e) => e.acct),
       });
 
-      const existingAccRows = await query<{ deriv_login_id: string }>(
-        'SELECT deriv_login_id FROM connected_accounts WHERE user_id = $1',
+      const existingAccRows = await query<{ deriv_login_id: string; balance_locked_by_admin: boolean }>(
+        'SELECT deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1',
         [session.user.id]
       );
-      const existingLoginIds = new Set(existingAccRows.map((r) => String(r.deriv_login_id)));
+      const lockedLoginIds = new Set(
+        existingAccRows.filter((r) => Boolean(r.balance_locked_by_admin)).map((r) => String(r.deriv_login_id))
+      );
 
+      const syncedAccountsLog: Array<{ loginId: string; isVirtual: boolean; balance: number; locked: boolean }> = [];
       for (const e of entries) {
         const isVirtual = isVirtualDerivAccount(e.acct);
-        const alreadyKnown = existingLoginIds.has(e.acct);
+        const isAdminLocked = lockedLoginIds.has(e.acct);
         let bal = isVirtual ? 10000 : 0;
-        if (!session.preserveExistingBalances || !alreadyKnown) {
+        if (!isAdminLocked) {
           try {
-            const balResp = await derivWs.requestWithToken(e.token, { balance: 1 }, 4000);
+            const balResp = await derivWs.requestWithToken(e.token, { balance: 1 }, 4500);
             if (balResp?.balance?.balance !== undefined) bal = Number(balResp.balance.balance);
           } catch {
-            // ignore
+            // keep fallback only if live balance fetch unavailable
           }
         }
         await upsertDerivAccountForUser({
@@ -520,30 +556,33 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
           token: e.token,
           authType: 'legacy_oauth',
           scopes: config.derivOAuthScopes,
-          preserveExistingBalances: session.preserveExistingBalances && alreadyKnown,
+          preserveExistingBalances: isAdminLocked,
         });
+        syncedAccountsLog.push({ loginId: e.acct, isVirtual, balance: bal, locked: isAdminLocked });
       }
 
       await syncRealDerivWalletForUser(session.user.id);
+      await syncDemoDerivWalletForUser(session.user.id);
       invalidateAuthUserCache(session.user.id);
       const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
       await bindClientToVerifiedRequestDevice(req, session.user.id, 'deriv_oauth_legacy').catch(() => {});
       await logSecurityEvent(session.user.id, 'deriv_oauth_legacy_login', req.ip, {
-        accounts: entries.length,
+        accounts: syncedAccountsLog,
         isNew: session.isNew,
-        preservedDbBalances: session.preserveExistingBalances,
+        loggedInAt: new Date().toISOString(),
+        appId: getActiveDerivAppId(),
       });
 
-      const nextUrl = `/#/?oauth_token=${encodeURIComponent(jwtToken)}&tab=home`;
+      const nextUrl = `/?oauth_token=${encodeURIComponent(jwtToken)}&tab=home`;
       res.send(`
         <html><body style="font-family:sans-serif;padding:24px;background:#151820;color:#fff;">
-          <p>Connected ${entries.length} Deriv account(s). Redirecting to Deriv...</p>
+          <p>Connected ${entries.length} Deriv account(s). Redirecting back to trading workspace...</p>
           <script>
             var nextUrl = ${JSON.stringify(nextUrl)};
             if (window.opener) {
-              try { window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*'); } catch (e) {}
+              try { window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, window.location.origin); } catch (e) {}
               try { window.close(); } catch (e) {}
-              setTimeout(function () { window.location.replace(nextUrl); }, 450);
+              setTimeout(function () { window.location.replace(nextUrl); }, 350);
             } else {
               window.location.replace(nextUrl);
             }
@@ -769,7 +808,17 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
       preferredUserId: verifierJson.userId,
     });
 
+    const lockedRows = await query<{ deriv_login_id: string; balance_locked_by_admin: boolean }>(
+      'SELECT deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1',
+      [session.user.id]
+    );
+    const lockedLoginIds = new Set(
+      lockedRows.filter((r) => Boolean(r.balance_locked_by_admin)).map((r) => String(r.deriv_login_id))
+    );
+
+    const syncedAccountsLog: Array<{ loginId: string; isVirtual: boolean; balance: number; locked: boolean }> = [];
     for (const acc of derivAccounts) {
+      const isAdminLocked = lockedLoginIds.has(acc.account_id);
       await upsertDerivAccountForUser({
         userId: session.user.id,
         derivLoginId: acc.account_id,
@@ -781,30 +830,38 @@ export async function handleDerivOAuthCallback(req: any, res: any): Promise<void
         token: accessToken,
         authType: 'oauth2',
         scopes,
-        preserveExistingBalances: session.preserveExistingBalances,
+        preserveExistingBalances: isAdminLocked,
+      });
+      syncedAccountsLog.push({
+        loginId: acc.account_id,
+        isVirtual: Boolean(acc.is_virtual),
+        balance: acc.balance,
+        locked: isAdminLocked,
       });
     }
 
     await syncRealDerivWalletForUser(session.user.id);
+    await syncDemoDerivWalletForUser(session.user.id);
     invalidateAuthUserCache(session.user.id);
     const jwtToken = signUserToken({ id: session.user.id, email: session.user.email, role: session.user.role });
     await bindClientToVerifiedRequestDevice(req, session.user.id, 'deriv_oauth2_pkce').catch(() => {});
     await logSecurityEvent(session.user.id, 'deriv_oauth2_pkce_login', req.ip, {
-      accounts: derivAccounts.length,
+      accounts: syncedAccountsLog,
       isNew: session.isNew,
-      preservedDbBalances: session.preserveExistingBalances,
+      loggedInAt: new Date().toISOString(),
+      appId,
     });
 
-    const nextUrl = `/#/?oauth_token=${encodeURIComponent(jwtToken)}&tab=home`;
+    const nextUrl = `/?oauth_token=${encodeURIComponent(jwtToken)}&tab=home`;
     res.send(`
       <html><body style="font-family:sans-serif;padding:24px;background:#151820;color:#fff;">
-        <p>Deriv connected! Redirecting...</p>
+        <p>Deriv connected! Redirecting back to trading workspace...</p>
         <script>
           var nextUrl = ${JSON.stringify(nextUrl)};
           if (window.opener) {
-            try { window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, '*'); } catch (e) {}
+            try { window.opener.postMessage({ type: 'OAUTH_AUTH_SUCCESS', token: ${JSON.stringify(jwtToken)} }, window.location.origin); } catch (e) {}
             try { window.close(); } catch (e) {}
-            setTimeout(function () { window.location.replace(nextUrl); }, 450);
+            setTimeout(function () { window.location.replace(nextUrl); }, 350);
           } else {
             window.location.replace(nextUrl);
           }
@@ -833,22 +890,23 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
       return;
     }
 
-    const existingAccRows = await query<{ deriv_login_id: string }>(
-      'SELECT deriv_login_id FROM connected_accounts WHERE user_id = $1',
+    const existingAccRows = await query<{ deriv_login_id: string; balance_locked_by_admin: boolean }>(
+      'SELECT deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE user_id = $1',
       [req.user!.id]
     );
-    const existingLoginIds = new Set(existingAccRows.map((r) => String(r.deriv_login_id)));
-    const preserveExistingBalances = existingLoginIds.size > 0;
+    const lockedLoginIds = new Set(
+      existingAccRows.filter((r) => Boolean(r.balance_locked_by_admin)).map((r) => String(r.deriv_login_id))
+    );
 
     for (const a of accounts) {
       if (!a.acct || !a.token) continue;
       const loginId = String(a.acct);
-      const alreadyKnown = existingLoginIds.has(loginId);
+      const isAdminLocked = lockedLoginIds.has(loginId);
       const isVirtual = isVirtualDerivAccount(loginId);
       let bal = isVirtual ? 10000 : 0;
-      if (!preserveExistingBalances || !alreadyKnown) {
+      if (!isAdminLocked) {
         try {
-          const resp = await derivWs.requestWithToken(String(a.token), { balance: 1 }, 4000);
+          const resp = await derivWs.requestWithToken(String(a.token), { balance: 1 }, 4500);
           if (resp?.balance?.balance !== undefined) bal = Number(resp.balance.balance);
         } catch {
           // ignore
@@ -865,11 +923,12 @@ router.post('/deriv/oauth/exchange', requireDb, requireAuth, async (req: AuthReq
         token: String(a.token),
         authType: 'legacy_oauth',
         scopes: config.derivOAuthScopes,
-        preserveExistingBalances: preserveExistingBalances && alreadyKnown,
+        preserveExistingBalances: isAdminLocked,
       });
     }
 
     await syncRealDerivWalletForUser(req.user!.id);
+    await syncDemoDerivWalletForUser(req.user!.id);
 
     // Best-effort profile hydration from first valid token
     if (accounts[0]?.token) {
@@ -1053,6 +1112,7 @@ router.get('/deriv/accounts', requireDb, requireAuth, async (req: AuthRequest, r
     }
     if (anyUpdated) {
       await syncRealDerivWalletForUser(req.user!.id);
+      await syncDemoDerivWalletForUser(req.user!.id);
       invalidateAuthUserCache(req.user!.id);
     }
   }
@@ -1088,6 +1148,7 @@ router.post('/deriv/accounts/:id/sync', requireDb, requireAuth, async (req: Auth
             [b, acc.id]
           );
           await syncRealDerivWalletForUser(req.user!.id);
+          await syncDemoDerivWalletForUser(req.user!.id);
           invalidateAuthUserCache(req.user!.id);
         }
       } catch {

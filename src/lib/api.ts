@@ -62,6 +62,7 @@ export async function apiFetch<T = any>(
   }
 
   const resp = await fetch(path, {
+    cache: options.cache ?? 'no-store',
     ...options,
     headers,
   });
@@ -73,11 +74,26 @@ export async function apiFetch<T = any>(
   return data as T;
 }
 
+let activeClientDerivAppId = '1089';
+
+export function setClientDerivAppId(appId?: string | null): void {
+  const cleaned = String(appId || '').trim();
+  if (/^\d{3,10}$/.test(cleaned)) {
+    activeClientDerivAppId = cleaned;
+  }
+}
+
+export function getClientDerivAppId(): string {
+  return activeClientDerivAppId;
+}
+
 // Direct Browser Deriv WebSocket Helper (with automatic backend fallback in Market Analyser)
 export async function fetchDerivTickHistoryDirect(symbol: string, count = 100): Promise<number[]> {
   try {
     return await new Promise<number[]>((resolve, reject) => {
-      const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089&l=EN&brand=deriv');
+      const ws = new WebSocket(
+        `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(getClientDerivAppId())}&l=EN&brand=deriv`
+      );
       const timer = setTimeout(() => {
         try { ws.close(); } catch { /* ignore */ }
         reject(new Error('timeout'));
@@ -122,7 +138,9 @@ export function subscribeDerivTicksDirect(
   let closed = false;
   let ws: WebSocket | null = null;
   try {
-    ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089&l=EN&brand=deriv');
+    ws = new WebSocket(
+      `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(getClientDerivAppId())}&l=EN&brand=deriv`
+    );
     ws.onopen = () => {
       if (!closed && ws) {
         ws.send(JSON.stringify({ ticks: symbol, subscribe: 1 }));

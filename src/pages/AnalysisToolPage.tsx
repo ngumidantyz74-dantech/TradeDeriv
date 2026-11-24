@@ -365,7 +365,8 @@ export const AnalysisToolPage: React.FC = () => {
           tpPrice: extra?.tpPrice ?? undefined,
           timeframe: GRANULARITY_OPTIONS.find((g) => g.value === granularity)?.label || '15m',
           accountMode,
-          executionMode: isReal && activeConnectedAccount ? 'deriv' : 'virtual',
+          executionMode:
+            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });

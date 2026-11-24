@@ -232,7 +232,7 @@ export interface BotStrategy {
 export interface BotJournalEntry {
   id: string;
   time: string;
-  type: 'info' | 'stake' | 'bought' | 'profit' | 'loss' | 'error';
+  type: 'info' | 'stake' | 'bought' | 'profit' | 'loss' | 'warning' | 'session_profit' | 'error';
   text: string;
 }
 
@@ -341,6 +341,7 @@ export interface PublicSettings {
     allowRegistration?: boolean;
     defaultVirtualBalance?: number;
     adminPrivateSlug?: string;
+    derivAppId?: string;
   };
   announcements: Array<{
     id: string;

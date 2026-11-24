@@ -12,7 +12,7 @@ import type {
   ExchangePair,
   AnalyserSignalResult,
 } from '../types';
-import { apiFetch, getStoredToken, setStoredToken } from '../lib/api';
+import { apiFetch, getStoredToken, setStoredToken, getClientDerivAppId, setClientDerivAppId } from '../lib/api';
 import {
   getCfdAccountBucket,
   isCfdConnectedAccount,
@@ -285,6 +285,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         apiFetch<{ instruments: MarketInstrument[] }>('/api/market/instruments', { skipAuth: true }),
         apiFetch<{ pairs: ExchangePair[] }>('/api/exchange/pairs?filter=trending', { skipAuth: true }),
       ]);
+      if (settingsRes?.global?.derivAppId) {
+        setClientDerivAppId(settingsRes.global.derivAppId);
+      }
       setPublicSettings(settingsRes);
       setInstruments(instRes.instruments || []);
       setExchangePairs(exRes.pairs || []);
@@ -376,16 +379,33 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
+  const clearLegacySessionCaches = useCallback(() => {
+    try {
+      const toRemove: string[] = [];
+      for (let i = 0; i < sessionStorage.length; i++) {
+        const k = sessionStorage.key(i);
+        if (k && (k.startsWith('td_bot_session_') || k === 'td_loaded_bot')) {
+          toRemove.push(k);
+        }
+      }
+      toRemove.forEach((k) => sessionStorage.removeItem(k));
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
   const loginWithToken = useCallback(
     async (jwt: string) => {
+      clearLegacySessionCaches();
       setStoredToken(jwt);
       setToken(jwt);
       await refreshAll();
     },
-    [refreshAll]
+    [clearLegacySessionCaches, refreshAll]
   );
 
   const logout = useCallback(() => {
+    clearLegacySessionCaches();
     setStoredToken(null);
     setToken(null);
     setUser(null);
@@ -396,7 +416,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setActiveCfdBucket('mt5_standard');
     setActiveConnectedAccountId(null);
     setActiveTab('home');
-  }, [setActiveTab]);
+  }, [clearLegacySessionCaches, setActiveTab]);
 
   // Capture oauth_token in URL hash or query after Deriv OAuth2 redirect
   useEffect(() => {
@@ -653,7 +673,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     const connectDirect = () => {
       if (disposed) return;
       try {
-        const ws = new WebSocket('wss://ws.derivws.com/websockets/v3?app_id=1089&l=EN&brand=deriv');
+        const ws = new WebSocket(
+          `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(getClientDerivAppId())}&l=EN&brand=deriv`
+        );
         directWsRef.current = ws;
 
         ws.onopen = () => {

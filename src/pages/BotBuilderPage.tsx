@@ -40,11 +40,6 @@ import {
   Info,
   SlidersHorizontal,
   Check,
-  XCircle,
-  CheckCircle2,
-  Flag,
-  ShoppingBasket,
-  ListChecks,
   BookOpen,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
@@ -52,119 +47,25 @@ import { apiFetch } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { DepositSheet } from '../components/CashierFlows';
 import { SynthCandleBadge } from '../components/DerivBadges';
+import { BotBlocklyCanvas } from '../components/BotBlocklyCanvas';
+import {
+  createDefaultXmlWorkspaceState,
+  QUICK_STRATEGIES,
+  getAssignmentVal,
+  setAssignmentVal,
+  resolveSubtypeDef,
+  inferTradeCategoryFromContract,
+  inferMarketFromSymbol,
+  serializeBotWorkspaceXml,
+  parseBotWorkspaceXml,
+  type BotXmlWorkspaceState,
+  type QuickStrategyDef,
+} from '../lib/botXml';
 import {
   DerivBotInitializingLoader,
   BlocklyOverlayLoader,
 } from '../components/DerivLoadingModal';
-import type { BotTelemetry, BotJournalEntry, CandleData, MarketInstrument } from '../types';
-
-type TradeTypeGroup =
-  | 'Digits > Over/Under'
-  | 'Digits > Even/Odd'
-  | 'Digits > Match/Differ'
-  | 'Options > Rise/Fall'
-  | 'Options > Accumulators'
-  | 'CFDs > Multipliers';
-
-const TRADE_TYPE_OPTIONS: Record<TradeTypeGroup, Array<{ value: string; label: string }>> = {
-  'Digits > Over/Under': [
-    { value: 'DIGITOVER', label: 'Over' },
-    { value: 'DIGITUNDER', label: 'Under' },
-  ],
-  'Digits > Even/Odd': [
-    { value: 'DIGITEVEN', label: 'Even' },
-    { value: 'DIGITODD', label: 'Odd' },
-  ],
-  'Digits > Match/Differ': [
-    { value: 'DIGITMATCH', label: 'Matches' },
-    { value: 'DIGITDIFF', label: 'Differs' },
-  ],
-  'Options > Rise/Fall': [
-    { value: 'CALL', label: 'Rise (CALL)' },
-    { value: 'PUT', label: 'Fall (PUT)' },
-  ],
-  'Options > Accumulators': [{ value: 'ACCU', label: 'Accumulator (Growth)' }],
-  'CFDs > Multipliers': [
-    { value: 'MULTUP', label: 'Multiplier Up' },
-    { value: 'MULTDOWN', label: 'Multiplier Down' },
-  ],
-};
-
-interface QuickStrategyDef {
-  key: string;
-  name: string;
-  category: 'Accumulators' | 'Options';
-  contractType: string;
-  desc: string;
-  defaultFactor: string;
-}
-
-const QUICK_STRATEGIES: QuickStrategyDef[] = [
-  {
-    key: 'martingale',
-    name: 'Martingale',
-    category: 'Options',
-    contractType: 'DIGITOVER',
-    desc: 'Doubles or scales stake after a loss and resets to initial stake on a win.',
-    defaultFactor: '2.1',
-  },
-  {
-    key: 'martingale_stat_reset',
-    name: 'Martingale on Stat Reset',
-    category: 'Accumulators',
-    contractType: 'ACCU',
-    desc: 'Compounds accumulator targets and scales stake following statistical barrier resets.',
-    defaultFactor: '2.0',
-  },
-  {
-    key: 'dalembert',
-    name: "D'Alembert",
-    category: 'Options',
-    contractType: 'DIGITEVEN',
-    desc: 'Increases stake by one unit after a loss and decreases by one unit after a win.',
-    defaultFactor: '1.25',
-  },
-  {
-    key: 'dalembert_stat_reset',
-    name: "D'Alembert on Stat Reset",
-    category: 'Accumulators',
-    contractType: 'ACCU',
-    desc: 'Measured linear recovery progression synced to accumulator range resets.',
-    defaultFactor: '1.25',
-  },
-  {
-    key: 'reverse_martingale',
-    name: 'Reverse Martingale',
-    category: 'Options',
-    contractType: 'CALL',
-    desc: 'Increases stake during winning streaks to maximize trend momentum.',
-    defaultFactor: '1.6',
-  },
-  {
-    key: 'reverse_dalembert',
-    name: "Reverse D'Alembert",
-    category: 'Options',
-    contractType: 'PUT',
-    desc: 'Steps stake up gently after wins and steps down immediately after a loss.',
-    defaultFactor: '1.2',
-  },
-  {
-    key: 'oscars_grind',
-    name: "Oscar's Grind",
-    category: 'Options',
-    contractType: 'DIGITOVER',
-    desc: 'Targets steady +1 unit net session profit while capping drawdown during cold runs.',
-    defaultFactor: '1.3',
-  },
-  {
-    key: '1_3_2_6',
-    name: '1-3-2-6',
-    category: 'Options',
-    contractType: 'CALL',
-    desc: 'Structured 4-step positive progression cycle protecting early gains.',
-    defaultFactor: '1.5',
-  },
-];
+import type { BotTelemetry, BotJournalEntry, CandleData } from '../types';
 
 interface SavedBotItem {
   id: string;
@@ -180,6 +81,10 @@ interface SavedBotItem {
   martingale: string;
   takeProfit: string;
   stopLoss: string;
+  winStep?: string;
+  maxWinSteps?: string;
+  growthRate?: number;
+  xmlSnapshot?: BotXmlWorkspaceState;
 }
 
 const DEFAULT_SAVED_BOTS: SavedBotItem[] = [
@@ -190,13 +95,15 @@ const DEFAULT_SAVED_BOTS: SavedBotItem[] = [
     status: 'Local',
     symbol: '1HZ100V',
     contractType: 'DIGITMATCH',
-    stake: '0.5',
+    stake: '1',
     duration: '1',
     durationUnit: 't',
     barrier: '4',
     martingale: '1.2',
-    takeProfit: '5',
-    stopLoss: '3',
+    takeProfit: '10',
+    stopLoss: '6',
+    winStep: '0.5',
+    maxWinSteps: '3',
   },
   {
     id: 'preset-contwin',
@@ -205,25 +112,17 @@ const DEFAULT_SAVED_BOTS: SavedBotItem[] = [
     status: 'Local',
     symbol: '1HZ100V',
     contractType: 'CALL',
-    stake: '1.0',
+    stake: '1',
     duration: '1',
     durationUnit: 't',
-    barrier: '2',
+    barrier: '1',
     martingale: '2.1',
     takeProfit: '10',
     stopLoss: '6',
+    winStep: '0.5',
+    maxWinSteps: '3',
   },
 ];
-
-function inferGroupFromContract(ct: string): TradeTypeGroup {
-  const upper = String(ct || '').toUpperCase();
-  if (upper === 'ACCU') return 'Options > Accumulators';
-  if (upper === 'DIGITEVEN' || upper === 'DIGITODD') return 'Digits > Even/Odd';
-  if (upper === 'DIGITMATCH' || upper === 'DIGITDIFF') return 'Digits > Match/Differ';
-  if (upper === 'CALL' || upper === 'PUT') return 'Options > Rise/Fall';
-  if (upper === 'MULTUP' || upper === 'MULTDOWN') return 'CFDs > Multipliers';
-  return 'Digits > Over/Under';
-}
 
 function getContractDisplayLabel(ct: string): string {
   const u = String(ct || '').toUpperCase();
@@ -327,30 +226,12 @@ export const BotBuilderPage: React.FC = () => {
     martingale?: string;
     takeProfit?: string;
     stopLoss?: string;
+    parsedState?: Partial<BotXmlWorkspaceState>;
   } | null>(null);
 
-  // Saved Bots List (Dashboard "Your bots:")
-  const [savedBots, setSavedBots] = useState<SavedBotItem[]>(() => {
-    try {
-      const raw = localStorage.getItem('td_saved_bots_v1');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-      }
-    } catch {
-      // ignore
-    }
-    return DEFAULT_SAVED_BOTS;
-  });
+  // Saved Bots List (Dashboard "Your bots:" - session memory only, zero browser storage caching)
+  const [savedBots, setSavedBots] = useState<SavedBotItem[]>(DEFAULT_SAVED_BOTS);
   const [botRowMenuId, setBotRowMenuId] = useState<string | null>(null);
-
-  useEffect(() => {
-    try {
-      localStorage.setItem('td_saved_bots_v1', JSON.stringify(savedBots.slice(0, 20)));
-    } catch {
-      // ignore
-    }
-  }, [savedBots]);
 
   useEffect(() => {
     if (!menuOpen) return;
@@ -359,42 +240,79 @@ export const BotBuilderPage: React.FC = () => {
     return () => clearInterval(id);
   }, [menuOpen]);
 
-  // Block 1: Trade parameters
-  const [strategyName, setStrategyName] = useState('MatchesScalper');
-  const [strategyType, setStrategyType] = useState<string>('martingale');
-  const [marketCategory, setMarketCategory] = useState<'All' | MarketInstrument['category']>('Synthetic');
-  const [symbol, setSymbol] = useState(selectedSymbol || '1HZ100V');
-  const [tradeTypeGroup, setTradeTypeGroup] = useState<TradeTypeGroup>('Digits > Over/Under');
-  const [contractType, setContractType] = useState('DIGITOVER');
-  const [candleInterval, setCandleInterval] = useState<'1t' | '1m' | '5m' | '15m'>('1m');
-  const [restartBuySellOnError, setRestartBuySellOnError] = useState(false);
-  const [restartLastTradeOnError, setRestartLastTradeOnError] = useState(true);
-
-  // Run once at start
-  const [baseStake, setBaseStake] = useState('0.5');
-  const [barrier, setBarrier] = useState('2');
-  const [growthRate, setGrowthRate] = useState<number>(0.02);
-  const [martingale, setMartingale] = useState('2.1');
-  const [useMartingale, setUseMartingale] = useState<'true' | 'false'>('true');
-  const [takeProfit, setTakeProfit] = useState('10');
-  const [stopLoss, setStopLoss] = useState('6');
-  const [maxTrades, setMaxTrades] = useState('15');
-  const [multiplier, setMultiplier] = useState('100');
-
-  // Analyser Sync Toggle
+  // XML Blockly Workspace State + Undo / Redo Stacks
+  const [xmlState, setXmlState] = useState<BotXmlWorkspaceState>(() => {
+    const base = createDefaultXmlWorkspaceState();
+    const sym = selectedSymbol || base.symbol;
+    const inf = inferMarketFromSymbol(sym);
+    return { ...base, symbol: sym, market: inf.market, submarket: inf.submarket };
+  });
+  const [undoStack, setUndoStack] = useState<BotXmlWorkspaceState[]>([]);
+  const [redoStack, setRedoStack] = useState<BotXmlWorkspaceState[]>([]);
   const [analyserSync, setAnalyserSync] = useState<boolean>(false);
-
-  // Trade options & Block 2
-  const [duration, setDuration] = useState('1');
-  const [durationUnit, setDurationUnit] = useState('t');
-  const [entryCondition, setEntryCondition] = useState<'any_tick' | 'last_digit_gte' | 'last_digit_lte' | 'rsi_signal'>(
-    'any_tick'
-  );
-  const [conditionDigit, setConditionDigit] = useState('2');
-  const [executionSpeed, setExecutionSpeed] = useState<'fast' | 'normal'>('fast');
   const [canvasZoom, setCanvasZoom] = useState<number>(100);
+  const [qsStep2Symbol, setQsStep2Symbol] = useState<string>(xmlState.symbol);
+  const [qsStep2Stake, setQsStep2Stake] = useState<string>('1');
+  const [qsStep2Factor, setQsStep2Factor] = useState<string>('2.1');
+  const [qsStep2TP, setQsStep2TP] = useState<string>('10');
+  const [qsStep2SL, setQsStep2SL] = useState<string>('6');
+  const [qsStep2Growth, setQsStep2Growth] = useState<number>(0.02);
 
-  // Quick Strategy 2-Step Modal
+  // Derived active parameters from XML Workspace
+  const symbol = xmlState.symbol;
+  const baseStake = getAssignmentVal(xmlState.assignments, 'initialStake', '1');
+  const winStep = getAssignmentVal(xmlState.assignments, 'winStep', '0.5');
+  const maxWinSteps = getAssignmentVal(xmlState.assignments, 'maxWinSteps', '3');
+  const takeProfit = getAssignmentVal(xmlState.assignments, 'profitThreshold', '10');
+  const stopLoss = getAssignmentVal(xmlState.assignments, 'lossThreshold', '6');
+  const tradeSide = getAssignmentVal(xmlState.assignments, 'tradeSide', xmlState.thenPurchase || 'CALL');
+  const subtypeDef = resolveSubtypeDef(xmlState.tradeCategory, xmlState.tradeSubtype);
+  const contractType =
+    xmlState.contractTypeSelection !== 'Both'
+      ? xmlState.contractTypeSelection
+      : xmlState.thenPurchase || subtypeDef.legs[0].value;
+
+  const updateXmlState = useCallback(
+    (updater: (prev: BotXmlWorkspaceState) => BotXmlWorkspaceState) => {
+      setXmlState((prev) => {
+        const next = updater(prev);
+        if (next === prev) return prev;
+        setUndoStack((u) => [...u.slice(-39), prev]);
+        setRedoStack([]);
+        if (next.symbol !== prev.symbol) {
+          setSelectedSymbol(next.symbol);
+        }
+        return next;
+      });
+    },
+    [setSelectedSymbol]
+  );
+
+  const handleUndo = () => {
+    setUndoStack((u) => {
+      if (u.length === 0) return u;
+      const target = u[u.length - 1];
+      setXmlState((curr) => {
+        setRedoStack((r) => [curr, ...r.slice(0, 39)]);
+        return target;
+      });
+      return u.slice(0, -1);
+    });
+  };
+
+  const handleRedo = () => {
+    setRedoStack((r) => {
+      if (r.length === 0) return r;
+      const target = r[0];
+      setXmlState((curr) => {
+        setUndoStack((u) => [...u.slice(-39), curr]);
+        return target;
+      });
+      return r.slice(1);
+    });
+  };
+
+  // Quick Strategy 2-Step Modal (Exact 14 Deriv strategies)
   const [qsOpen, setQsOpen] = useState(false);
   const [qsStep, setQsStep] = useState<1 | 2>(1);
   const [qsSearch, setQsSearch] = useState('');
@@ -402,35 +320,16 @@ export const BotBuilderPage: React.FC = () => {
   const [qsSelected, setQsSelected] = useState<QuickStrategyDef>(QUICK_STRATEGIES[0]);
 
   const [telemetry, setTelemetry] = useState<BotTelemetry | null>(null);
-  const sessionAnchorKey = useMemo(
-    () => (user?.id ? `td_bot_session_${user.id}_${accountMode}` : null),
-    [user?.id, accountMode]
-  );
   const [sessionResetAt, setSessionResetAt] = useState<number>(() => Date.now());
+  const [dismissedOutcomeKey, setDismissedOutcomeKey] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Restore active/last session anchor per user + accountMode (never mix Demo/Real or stale historical runs)
+  // Reset telemetry anchor cleanly whenever active accountMode changes (never cache across logins)
   useEffect(() => {
-    if (!sessionAnchorKey) return;
-    try {
-      const saved = sessionStorage.getItem(sessionAnchorKey);
-      const parsed = saved ? Number(saved) : 0;
-      if (parsed > 0 && Number.isFinite(parsed)) {
-        setSessionResetAt(parsed);
-        return;
-      }
-    } catch {
-      // ignore
-    }
-    const now = Date.now();
-    setSessionResetAt(now);
-    try {
-      sessionStorage.setItem(sessionAnchorKey, String(now));
-    } catch {
-      // ignore
-    }
-  }, [sessionAnchorKey]);
+    setSessionResetAt(Date.now());
+    setDismissedOutcomeKey('');
+  }, [user?.id, accountMode]);
 
   // Embedded Lightweight Chart refs (for Deriv Bot Chart tab)
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
@@ -440,81 +339,71 @@ export const BotBuilderPage: React.FC = () => {
 
   const { optionsBal } = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount);
 
-  const filteredSymbols = useMemo(() => {
-    if (marketCategory === 'All') return instruments;
-    const list = instruments.filter((i) => i.category === marketCategory);
-    return list.length > 0 ? list : instruments;
-  }, [instruments, marketCategory]);
-
   // Consume tradePreset from OptionsHub or Market Analyser
   useEffect(() => {
     if (!tradePreset) return;
-    if (tradePreset.symbol) {
-      setSymbol(tradePreset.symbol);
-      const found = instruments.find((i) => i.symbol === tradePreset.symbol);
-      if (found) setMarketCategory(found.category);
-    }
-    if (tradePreset.contractType) {
-      setContractType(tradePreset.contractType);
-      setTradeTypeGroup(inferGroupFromContract(tradePreset.contractType));
-    }
-    if (tradePreset.barrier !== undefined) setBarrier(String(tradePreset.barrier));
-    if (tradePreset.growthRate) setGrowthRate(tradePreset.growthRate);
-    if (tradePreset.stake && tradePreset.stake > 0) setBaseStake(String(tradePreset.stake));
-    if (tradePreset.strategyType) setStrategyType(tradePreset.strategyType);
-    if (tradePreset.analyserSync) {
-      setAnalyserSync(true);
-      setStrategyName(`AnalyserSync_${tradePreset.symbol || symbol}`);
-    }
+    updateXmlState((prev) => {
+      let next = { ...prev };
+      if (tradePreset.symbol) {
+        const infMkt = inferMarketFromSymbol(tradePreset.symbol);
+        next.symbol = tradePreset.symbol;
+        next.market = infMkt.market;
+        next.submarket = infMkt.submarket;
+      }
+      if (tradePreset.contractType) {
+        const infCat = inferTradeCategoryFromContract(tradePreset.contractType);
+        const sub = resolveSubtypeDef(infCat.tradeCategory, infCat.tradeSubtype);
+        next.tradeCategory = infCat.tradeCategory;
+        next.tradeSubtype = infCat.tradeSubtype;
+        next.contractTypeSelection = tradePreset.contractType;
+        next.thenPurchase = tradePreset.contractType;
+        next.elsePurchase = sub.legs.find((l) => l.value !== tradePreset.contractType)?.value || tradePreset.contractType;
+        next.assignments = setAssignmentVal(next.assignments, 'tradeSide', tradePreset.contractType);
+      }
+      if (tradePreset.barrier !== undefined) next.prediction = String(tradePreset.barrier);
+      if (tradePreset.growthRate) next.growthRate = tradePreset.growthRate;
+      if (tradePreset.stake && tradePreset.stake > 0) {
+        next.assignments = setAssignmentVal(next.assignments, 'initialStake', String(tradePreset.stake));
+      }
+      if (tradePreset.strategyType) next.strategyType = tradePreset.strategyType;
+      if (tradePreset.analyserSync) {
+        next.strategyName = `AnalyserSync_${tradePreset.symbol || prev.symbol}`;
+      }
+      return next;
+    });
+    if (tradePreset.analyserSync) setAnalyserSync(true);
     setBotView('builder');
     setTradePreset(null);
-  }, [tradePreset, instruments, symbol, setTradePreset]);
-
-  // Load strategy if sent from TradingBotsPage
-  useEffect(() => {
-    const raw = sessionStorage.getItem('td_loaded_bot');
-    if (raw) {
-      sessionStorage.removeItem('td_loaded_bot');
-      try {
-        const s = JSON.parse(raw);
-        if (s.name) setStrategyName(s.name);
-        if (s.symbol) {
-          setSymbol(s.symbol);
-          const found = instruments.find((i) => i.symbol === s.symbol);
-          if (found) setMarketCategory(found.category);
-        }
-        if (s.contract_type) {
-          setContractType(s.contract_type);
-          setTradeTypeGroup(inferGroupFromContract(s.contract_type));
-        }
-        if (s.config?.stake) setBaseStake(String(s.config.stake));
-        if (s.config?.barrier !== undefined) setBarrier(String(s.config.barrier));
-        if (s.config?.duration) setDuration(String(s.config.duration));
-        if (s.config?.duration_unit) setDurationUnit(String(s.config.duration_unit));
-        if (s.config?.multiplier) setMultiplier(String(s.config.multiplier));
-        if (s.config?.martingale) setMartingale(String(s.config.martingale));
-        if (s.config?.takeProfit) setTakeProfit(String(s.config.takeProfit));
-        if (s.config?.stopLoss) setStopLoss(String(s.config.stopLoss));
-        if (s.config?.maxTrades) setMaxTrades(String(s.config.maxTrades));
-      } catch {
-        // ignore
-      }
-    }
-  }, [instruments]);
+  }, [tradePreset, updateXmlState, setTradePreset]);
 
   const handleToggleAnalyserSync = async (enable: boolean) => {
     setAnalyserSync(enable);
     if (enable) {
       const sig = analyserSignal || (await refreshAnalyserSignal(symbol));
       if (sig) {
-        setSymbol(sig.symbol || symbol);
-        setContractType(sig.contractType || 'DIGITOVER');
-        setTradeTypeGroup(inferGroupFromContract(sig.contractType));
-        if (sig.barrier) setBarrier(sig.barrier);
-        if (sig.growthRate) setGrowthRate(sig.growthRate);
-        setDuration(String(sig.duration || 1));
-        setDurationUnit(sig.durationUnit || 't');
-        setStrategyName(`AnalyserSync_${sig.symbol}`);
+        updateXmlState((prev) => {
+          const ct = sig.contractType || 'DIGITOVER';
+          const infCat = inferTradeCategoryFromContract(ct);
+          const sub = resolveSubtypeDef(infCat.tradeCategory, infCat.tradeSubtype);
+          const infMkt = inferMarketFromSymbol(sig.symbol || prev.symbol);
+          return {
+            ...prev,
+            strategyName: `AnalyserSync_${sig.symbol || prev.symbol}`,
+            symbol: sig.symbol || prev.symbol,
+            market: infMkt.market,
+            submarket: infMkt.submarket,
+            tradeCategory: infCat.tradeCategory,
+            tradeSubtype: infCat.tradeSubtype,
+            contractTypeSelection: ct,
+            thenPurchase: ct,
+            elsePurchase: sub.legs.find((l) => l.value !== ct)?.value || ct,
+            prediction: sig.barrier ? String(sig.barrier) : prev.prediction,
+            growthRate: sig.growthRate || prev.growthRate,
+            duration: String(sig.duration || 1),
+            durationUnit: sig.durationUnit || 't',
+            assignments: setAssignmentVal(prev.assignments, 'tradeSide', ct),
+          };
+        });
         showToast(`Synced Bot Builder to Live Market Analyser (${sig.contractType} · ${sig.confidence}%)`, 'success');
       }
     }
@@ -528,25 +417,13 @@ export const BotBuilderPage: React.FC = () => {
       if (tel?.running && tel.startedAt && tel.accountMode === accountMode) {
         const startedMs = new Date(tel.startedAt).getTime() - 2000;
         if (Number.isFinite(startedMs) && startedMs > 0) {
-          setSessionResetAt((prev) => {
-            if (prev === 0 || prev > startedMs) {
-              if (sessionAnchorKey) {
-                try {
-                  sessionStorage.setItem(sessionAnchorKey, String(startedMs));
-                } catch {
-                  // ignore
-                }
-              }
-              return startedMs;
-            }
-            return prev;
-          });
+          setSessionResetAt((prev) => (prev === 0 || prev > startedMs ? startedMs : prev));
         }
       }
     } catch {
       // ignore
     }
-  }, [accountMode, sessionAnchorKey]);
+  }, [accountMode]);
 
   useEffect(() => {
     pollStatus();
@@ -562,7 +439,7 @@ export const BotBuilderPage: React.FC = () => {
     refreshAll();
   }, [telemetry?.tradesPlaced, telemetry?.wins, telemetry?.losses, telemetry?.running, refreshOrders, refreshAll]);
 
-  // Embedded Lightweight Chart when botView === 'chart' (Screenshot 152825)
+  // Embedded Lightweight Chart when botView === 'chart'
   useEffect(() => {
     if (botView !== 'chart') return;
     let active = true;
@@ -652,34 +529,12 @@ export const BotBuilderPage: React.FC = () => {
     }
   }, [botView, ticks, symbol, candles.length]);
 
-  const handleGroupChange = (group: TradeTypeGroup) => {
-    setTradeTypeGroup(group);
-    const first = TRADE_TYPE_OPTIONS[group][0];
-    if (first) setContractType(first.value);
-  };
-
   const handleResetDefaults = () => {
-    setStrategyName('MatchesScalper');
-    setStrategyType('martingale');
-    setMarketCategory('Synthetic');
-    setSymbol('1HZ100V');
-    setTradeTypeGroup('Digits > Over/Under');
-    setContractType('DIGITOVER');
-    setBaseStake('0.5');
-    setBarrier('2');
-    setGrowthRate(0.02);
-    setMartingale('2.1');
-    setUseMartingale('true');
-    setTakeProfit('10');
-    setStopLoss('6');
-    setMaxTrades('15');
-    setDuration('1');
-    setDurationUnit('t');
-    setEntryCondition('any_tick');
-    setConditionDigit('2');
-    setExecutionSpeed('fast');
+    setXmlState(createDefaultXmlWorkspaceState());
+    setUndoStack([]);
+    setRedoStack([]);
     setAnalyserSync(false);
-    showToast('Workspace reset to default blocks', 'info');
+    showToast('Workspace reset to default XML blocks', 'info');
   };
 
   const handleSwitchAccount = (mode: 'demo' | 'real') => {
@@ -695,25 +550,33 @@ export const BotBuilderPage: React.FC = () => {
     if (e) e.preventDefault();
     setSubmitting(true);
     try {
+      // Trade with REAL Deriv account balances (Demo OR Real) when connected & NOT altered/locked by admin
+      const isLiveDerivUnlocked =
+        Boolean(activeConnectedAccount) && !activeConnectedAccount?.balance_locked_by_admin;
+
       const payload = {
-        strategyName: overrides?.strategyName ?? strategyName,
-        strategyType: overrides?.strategyType ?? strategyType,
+        strategyName: overrides?.strategyName ?? xmlState.strategyName,
+        strategyType: overrides?.strategyType ?? xmlState.strategyType,
         symbol: overrides?.symbol ?? symbol,
         contractType: overrides?.contractType ?? contractType,
-        baseStake: Number(overrides?.baseStake ?? baseStake),
-        barrier: overrides?.barrier ?? barrier,
-        duration: Number(overrides?.duration ?? duration),
-        durationUnit: overrides?.durationUnit ?? durationUnit,
-        multiplier: Number(multiplier),
-        martingale: useMartingale === 'true' ? Number(overrides?.martingale ?? martingale) : 1.0,
-        takeProfit: Number(overrides?.takeProfit ?? takeProfit),
-        stopLoss: Number(overrides?.stopLoss ?? stopLoss),
-        maxTrades: Number(maxTrades),
-        growthRate: overrides?.growthRate ?? growthRate,
+        contractSideMode: overrides?.contractSideMode ?? (xmlState.contractTypeSelection === 'Both' ? 'Both' : 'Single'),
+        tradeSide: overrides?.tradeSide ?? tradeSide,
+        winStep: Number(overrides?.winStep ?? winStep) || 0,
+        maxWinSteps: Number(overrides?.maxWinSteps ?? maxWinSteps) || 3,
+        baseStake: Number(overrides?.baseStake ?? baseStake) || 1,
+        barrier: overrides?.barrier ?? xmlState.prediction,
+        duration: Number(overrides?.duration ?? xmlState.duration) || 1,
+        durationUnit: overrides?.durationUnit ?? xmlState.durationUnit,
+        multiplier: 100,
+        martingale: Number(overrides?.martingale ?? xmlState.martingaleFactor) || 2.1,
+        takeProfit: Number(overrides?.takeProfit ?? takeProfit) || 10,
+        stopLoss: Number(overrides?.stopLoss ?? stopLoss) || 6,
+        maxTrades: Number(overrides?.maxTrades ?? xmlState.maxTrades) || 50,
+        growthRate: overrides?.growthRate ?? xmlState.growthRate,
         analyserSync: overrides?.analyserSync ?? analyserSync,
         accountMode,
-        executionSpeed,
-        executionMode: accountMode === 'real' ? 'deriv' : 'virtual',
+        executionSpeed: 'fast',
+        executionMode: isLiveDerivUnlocked ? 'deriv' : 'virtual',
         connectedAccountId: activeConnectedAccount?.id || null,
       };
       const res = await apiFetch<{ telemetry: BotTelemetry }>('/api/bots/run', {
@@ -724,13 +587,7 @@ export const BotBuilderPage: React.FC = () => {
         ? new Date(res.telemetry.startedAt).getTime() - 2000
         : Date.now() - 2000;
       setSessionResetAt(anchorMs);
-      if (sessionAnchorKey) {
-        try {
-          sessionStorage.setItem(sessionAnchorKey, String(anchorMs));
-        } catch {
-          // ignore
-        }
-      }
+      setDismissedOutcomeKey('');
       setTelemetry(res.telemetry);
       setTelemetryOpen(true);
       await Promise.all([refreshOrders(), refreshAll()]);
@@ -757,25 +614,20 @@ export const BotBuilderPage: React.FC = () => {
     const reader = new FileReader();
     reader.onload = () => {
       const xml = String(reader.result || '');
-      const symMatch = xml.match(/<field\s+name=["']SYMBOL_LIST["']>([^<]+)<\/field>/i);
-      const amtMatch = xml.match(/<field\s+name=["']AMOUNT["']>([^<]+)<\/field>/i);
-      const typeMatch = xml.match(/<field\s+name=["']TYPE_LIST["']>([^<]+)<\/field>/i);
-      const durMatch = xml.match(/<field\s+name=["']DURATION["']>([^<]+)<\/field>/i);
-      const predMatch = xml.match(/<field\s+name=["']PREDICTION["']>([^<]+)<\/field>/i);
-      const martMatch = xml.match(/<field\s+name=["']MARTINGALE["']>([^<]+)<\/field>/i);
-      const tpMatch = xml.match(/<field\s+name=["']TAKE_PROFIT["']>([^<]+)<\/field>/i);
-      const slMatch = xml.match(/<field\s+name=["']STOP_LOSS["']>([^<]+)<\/field>/i);
+      const parsed = parseBotWorkspaceXml(xml, xmlState);
+      const parsedAssignments = parsed.assignments || xmlState.assignments;
 
       setPendingXmlImport({
         fileName: file.name,
-        symbol: symMatch?.[1]?.trim(),
-        contractType: typeMatch?.[1]?.trim(),
-        stake: amtMatch?.[1]?.trim(),
-        duration: durMatch?.[1]?.trim(),
-        barrier: predMatch?.[1]?.trim(),
-        martingale: martMatch?.[1]?.trim(),
-        takeProfit: tpMatch?.[1]?.trim(),
-        stopLoss: slMatch?.[1]?.trim(),
+        symbol: parsed.symbol,
+        contractType: parsed.thenPurchase || parsed.contractTypeSelection,
+        stake: getAssignmentVal(parsedAssignments, 'initialStake', baseStake),
+        duration: parsed.duration,
+        barrier: parsed.prediction,
+        martingale: parsed.martingaleFactor,
+        takeProfit: getAssignmentVal(parsedAssignments, 'profitThreshold', takeProfit),
+        stopLoss: getAssignmentVal(parsedAssignments, 'lossThreshold', stopLoss),
+        parsedState: parsed,
       });
     };
     reader.readAsText(file);
@@ -786,18 +638,12 @@ export const BotBuilderPage: React.FC = () => {
     if (!pendingXmlImport) return;
     const p = pendingXmlImport;
     const cleanName = p.fileName.replace(/\.xml$/i, '');
-    if (p.symbol) setSymbol(p.symbol);
-    if (p.stake) setBaseStake(p.stake);
-    if (p.contractType) {
-      setContractType(p.contractType);
-      setTradeTypeGroup(inferGroupFromContract(p.contractType));
-    }
-    if (p.duration) setDuration(p.duration);
-    if (p.barrier) setBarrier(p.barrier);
-    if (p.martingale) setMartingale(p.martingale);
-    if (p.takeProfit) setTakeProfit(p.takeProfit);
-    if (p.stopLoss) setStopLoss(p.stopLoss);
-    setStrategyName(cleanName);
+
+    updateXmlState((prev) => ({
+      ...prev,
+      ...(p.parsedState || {}),
+      strategyName: cleanName,
+    }));
 
     setSavedBots((prev) => [
       {
@@ -808,10 +654,10 @@ export const BotBuilderPage: React.FC = () => {
         symbol: p.symbol || symbol,
         contractType: p.contractType || contractType,
         stake: p.stake || baseStake,
-        duration: p.duration || duration,
-        durationUnit,
-        barrier: p.barrier || barrier,
-        martingale: p.martingale || martingale,
+        duration: p.duration || xmlState.duration,
+        durationUnit: xmlState.durationUnit,
+        barrier: p.barrier || xmlState.prediction,
+        martingale: p.martingale || xmlState.martingaleFactor,
         takeProfit: p.takeProfit || takeProfit,
         stopLoss: p.stopLoss || stopLoss,
       },
@@ -821,67 +667,92 @@ export const BotBuilderPage: React.FC = () => {
     setPendingXmlImport(null);
     setLoadModalOpen(false);
     setBotView('builder');
-    showToast(`Loaded ${cleanName} into Bot Builder`, 'success');
+    showToast(`Loaded ${cleanName} XML blocks into Bot Builder`, 'success');
   };
 
   const handleSaveAndExportXml = () => {
-    const xml = `<xml xmlns="https://developers.google.com/blockly/xml">
-  <block type="trade_definition">
-    <field name="SYMBOL_LIST">${symbol}</field>
-    <field name="TYPE_LIST">${contractType}</field>
-    <field name="DURATION">${duration}</field>
-    <field name="DURATION_TYPE">${durationUnit}</field>
-    <field name="AMOUNT">${baseStake}</field>
-    <field name="PREDICTION">${barrier}</field>
-    <field name="MARTINGALE">${martingale}</field>
-    <field name="TAKE_PROFIT">${takeProfit}</field>
-    <field name="STOP_LOSS">${stopLoss}</field>
-  </block>
-</xml>`;
+    const xml = serializeBotWorkspaceXml(xmlState);
     const blob = new Blob([xml], { type: 'application/xml' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
-    a.download = `${strategyName.replace(/[^a-z0-9_-]/gi, '_')}.xml`;
+    a.download = `${xmlState.strategyName.replace(/[^a-z0-9_-]/gi, '_')}.xml`;
     a.click();
     URL.revokeObjectURL(url);
 
     setSavedBots((prev) => [
       {
         id: `local-${Date.now()}`,
-        name: strategyName,
+        name: xmlState.strategyName,
         lastModified: 'Just now',
         status: 'Local',
         symbol,
         contractType,
         stake: baseStake,
-        duration,
-        durationUnit,
-        barrier,
-        martingale,
+        duration: xmlState.duration,
+        durationUnit: xmlState.durationUnit,
+        barrier: xmlState.prediction,
+        martingale: xmlState.martingaleFactor,
         takeProfit,
         stopLoss,
+        winStep,
+        maxWinSteps,
+        growthRate: xmlState.growthRate,
+        xmlSnapshot: xmlState,
       },
-      ...prev.filter((b) => b.name !== strategyName),
+      ...prev.filter((b) => b.name !== xmlState.strategyName),
     ]);
     showToast('Strategy saved & Blockly XML exported', 'success');
   };
 
   const loadSavedBot = (b: SavedBotItem) => {
-    setStrategyName(b.name);
-    setSymbol(b.symbol);
-    setContractType(b.contractType);
-    setTradeTypeGroup(inferGroupFromContract(b.contractType));
-    setBaseStake(b.stake);
-    setDuration(b.duration);
-    setDurationUnit(b.durationUnit);
-    setBarrier(b.barrier);
-    setMartingale(b.martingale);
-    setTakeProfit(b.takeProfit);
-    setStopLoss(b.stopLoss);
+    if (b.xmlSnapshot) {
+      updateXmlState(() => b.xmlSnapshot!);
+    } else {
+      updateXmlState((prev) => {
+        const infCat = inferTradeCategoryFromContract(b.contractType);
+        const sub = resolveSubtypeDef(infCat.tradeCategory, infCat.tradeSubtype);
+        const infMkt = inferMarketFromSymbol(b.symbol);
+        let assignments = setAssignmentVal(prev.assignments, 'initialStake', b.stake);
+        assignments = setAssignmentVal(assignments, 'profitThreshold', b.takeProfit);
+        assignments = setAssignmentVal(assignments, 'lossThreshold', b.stopLoss);
+        if (b.winStep) assignments = setAssignmentVal(assignments, 'winStep', b.winStep);
+        if (b.maxWinSteps) assignments = setAssignmentVal(assignments, 'maxWinSteps', b.maxWinSteps);
+        assignments = setAssignmentVal(assignments, 'tradeSide', b.contractType);
+        return {
+          ...prev,
+          strategyName: b.name,
+          market: infMkt.market,
+          submarket: infMkt.submarket,
+          symbol: b.symbol,
+          tradeCategory: infCat.tradeCategory,
+          tradeSubtype: infCat.tradeSubtype,
+          contractTypeSelection: 'Both',
+          thenPurchase: b.contractType,
+          elsePurchase: sub.legs.find((l) => l.value !== b.contractType)?.value || b.contractType,
+          duration: b.duration,
+          durationUnit: b.durationUnit,
+          prediction: b.barrier,
+          martingaleFactor: b.martingale,
+          growthRate: b.growthRate ?? prev.growthRate,
+          assignments,
+        };
+      });
+    }
     setBotRowMenuId(null);
     setBotView('builder');
     showToast(`Loaded ${b.name}`, 'success');
+  };
+
+  const openQuickStrategyModal = () => {
+    setQsStep2Symbol(xmlState.symbol);
+    setQsStep2Stake(baseStake || '1');
+    setQsStep2Factor(xmlState.martingaleFactor || '2.1');
+    setQsStep2TP(takeProfit || '10');
+    setQsStep2SL(stopLoss || '6');
+    setQsStep2Growth(xmlState.growthRate || 0.02);
+    setQsStep(1);
+    setQsOpen(true);
   };
 
   const filteredQuickStrategies = useMemo(() => {
@@ -894,21 +765,50 @@ export const BotBuilderPage: React.FC = () => {
   }, [qsSearch, qsFilter]);
 
   const applyQuickStrategy = (runNow: boolean) => {
-    setStrategyName(qsSelected.name);
-    setStrategyType(qsSelected.key);
-    setContractType(qsSelected.contractType);
-    setTradeTypeGroup(inferGroupFromContract(qsSelected.contractType));
-    setUseMartingale('true');
+    const sub = resolveSubtypeDef(qsSelected.tradeCategory, qsSelected.tradeSubtype);
+    const infMkt = inferMarketFromSymbol(qsStep2Symbol);
+
+    updateXmlState((prev) => {
+      let assignments = setAssignmentVal(prev.assignments, 'initialStake', qsStep2Stake);
+      assignments = setAssignmentVal(assignments, 'profitThreshold', qsStep2TP);
+      assignments = setAssignmentVal(assignments, 'lossThreshold', qsStep2SL);
+      assignments = setAssignmentVal(assignments, 'tradeSide', qsSelected.contractType);
+      return {
+        ...prev,
+        strategyName: qsSelected.name,
+        strategyType: qsSelected.key,
+        market: infMkt.market,
+        submarket: infMkt.submarket,
+        symbol: qsStep2Symbol,
+        tradeCategory: qsSelected.tradeCategory,
+        tradeSubtype: qsSelected.tradeSubtype,
+        contractTypeSelection: qsSelected.contractType === 'ACCU' ? 'ACCU' : 'Both',
+        thenPurchase: qsSelected.contractType,
+        elsePurchase: sub.legs.find((l) => l.value !== qsSelected.contractType)?.value || qsSelected.contractType,
+        martingaleFactor: qsStep2Factor,
+        growthRate: qsStep2Growth,
+        assignments,
+      };
+    });
+
     setQsOpen(false);
     setBotView('builder');
     if (runNow) {
       handleRunBot(undefined, {
         strategyName: qsSelected.name,
         strategyType: qsSelected.key,
+        symbol: qsStep2Symbol,
         contractType: qsSelected.contractType,
+        contractSideMode: qsSelected.contractType === 'ACCU' ? 'Single' : 'Both',
+        tradeSide: qsSelected.contractType,
+        baseStake: Number(qsStep2Stake) || 1,
+        martingale: Number(qsStep2Factor) || 2.1,
+        takeProfit: Number(qsStep2TP) || 10,
+        stopLoss: Number(qsStep2SL) || 6,
+        growthRate: qsStep2Growth,
       });
     } else {
-      showToast(`${qsSelected.name} loaded into Bot Builder`, 'success');
+      showToast(`${qsSelected.name} XML blocks loaded into workspace`, 'success');
     }
   };
 
@@ -970,8 +870,6 @@ export const BotBuilderPage: React.FC = () => {
   const quoteDiff = latestQuote - prevQuote;
   const quotePct = prevQuote > 0 ? Math.abs((quoteDiff / prevQuote) * 100) : 0.01;
 
-  const contractChoices = TRADE_TYPE_OPTIONS[tradeTypeGroup];
-
   const journalEntries: BotJournalEntry[] = useMemo(() => {
     const raw = telemetry?.journal || [];
     if (raw.length === 0) {
@@ -980,18 +878,20 @@ export const BotBuilderPage: React.FC = () => {
           id: 'init-acct',
           time: new Date().toISOString(),
           type: 'info',
-          text: 'You are using your USD account.',
+          text: activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin
+            ? `You are using your live ${accountMode === 'demo' ? 'Demo' : 'Real'} Deriv account (${activeConnectedAccount.deriv_account_id}).`
+            : 'You are using your USD account.',
         },
       ];
     }
     return raw.filter((j) => {
       if (journalFilter === 'all') return true;
-      if (journalFilter === 'error') return j.type === 'error';
-      if (journalFilter === 'profit') return j.type === 'profit' || j.type === 'loss';
+      if (journalFilter === 'error') return j.type === 'error' || j.type === 'warning';
+      if (journalFilter === 'profit') return j.type === 'profit' || j.type === 'loss' || j.type === 'session_profit';
       if (journalFilter === 'bought') return j.type === 'bought' || j.type === 'stake';
       return true;
     });
-  }, [telemetry?.journal, journalFilter]);
+  }, [telemetry?.journal, journalFilter, activeConnectedAccount, accountMode]);
 
   const handleDownloadTransactions = () => {
     const rows = [
@@ -1024,19 +924,15 @@ export const BotBuilderPage: React.FC = () => {
 
   const handleResetSummaryStats = () => {
     if (telemetry?.running) return;
-    const now = Date.now();
-    setSessionResetAt(now);
-    if (sessionAnchorKey) {
-      try {
-        sessionStorage.setItem(sessionAnchorKey, String(now));
-      } catch {
-        // ignore
-      }
-    }
+    setSessionResetAt(Date.now());
+    setDismissedOutcomeKey('');
     setTelemetry(null);
   };
 
   const runState = telemetry?.runState || (telemetry?.running ? 'buying' : 'idle');
+  const outcomeKey = `${runState}:${telemetry?.tradesPlaced ?? 0}:${telemetry?.startedAt ?? ''}:${telemetry?.realizedPnl ?? 0}`;
+  const showOutcomePill =
+    (runState === 'won' || runState === 'lost') && !telemetry?.running && dismissedOutcomeKey !== outcomeKey;
 
   if (initLoading) {
     return <DerivBotInitializingLoader />;
@@ -1148,10 +1044,7 @@ export const BotBuilderPage: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => {
-                  setQsStep(1);
-                  setQsOpen(true);
-                }}
+                onClick={openQuickStrategyModal}
                 className="flex flex-col items-center gap-2 cursor-pointer group"
               >
                 <span className="w-[54px] h-[54px] rounded-xl bg-[#F4F5F7] dark:bg-[#181C25] flex items-center justify-center group-hover:ring-2 group-hover:ring-[#FF444F]/40">
@@ -1277,7 +1170,16 @@ export const BotBuilderPage: React.FC = () => {
                 <div className="flex items-center gap-1">
                   <select
                     value={symbol}
-                    onChange={(e) => setSymbol(e.target.value)}
+                    onChange={(e) => {
+                      const nextSym = e.target.value;
+                      const infMkt = inferMarketFromSymbol(nextSym);
+                      updateXmlState((prev) => ({
+                        ...prev,
+                        symbol: nextSym,
+                        market: infMkt.market,
+                        submarket: infMkt.submarket,
+                      }));
+                    }}
                     aria-label="Chart symbol"
                     className="bg-transparent text-[13px] font-bold text-[#111319] dark:text-white outline-none cursor-pointer truncate max-w-[165px]"
                   >
@@ -1307,11 +1209,11 @@ export const BotBuilderPage: React.FC = () => {
           </div>
         )}
 
-        {/* VIEW 3: BOT BUILDER WORKSPACE (Screenshots 152359, 152411, 152424) */}
+        {/* VIEW 3: EXACT DERIV BOT XML BLOCKLY WORKSPACE (Screenshots 205837, 210134, 210512, 210517, 210527) */}
         {botView === 'builder' && (
           <div className="flex-1 min-h-0 flex overflow-hidden">
-            {/* Left Vertical Workspace Icon Rail (Screenshots 152359, 152424) */}
-            <aside className="w-[46px] shrink-0 bg-white dark:bg-[#151820] border-r border-slate-200/80 dark:border-white/[0.08] flex flex-col items-center py-3 gap-3.5 z-10 overflow-y-auto no-scrollbar">
+            {/* Left Vertical Workspace Icon Rail */}
+            <aside className="w-[46px] shrink-0 bg-white dark:bg-[#151820] border-r border-slate-200/80 dark:border-white/[0.08] flex flex-col items-center py-3 gap-4 z-10 overflow-y-auto no-scrollbar">
               <button
                 type="button"
                 onClick={handleResetDefaults}
@@ -1327,7 +1229,7 @@ export const BotBuilderPage: React.FC = () => {
                   setPendingXmlImport(null);
                   setLoadModalOpen(true);
                 }}
-                title="Load strategy"
+                title="Import / Load XML"
                 className="p-1.5 text-[#374151] dark:text-slate-300 hover:text-[#0F4C6C] cursor-pointer"
               >
                 <FolderOpen className="w-[18px] h-[18px]" />
@@ -1343,38 +1245,38 @@ export const BotBuilderPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => handleToggleAnalyserSync(!analyserSync)}
-                title={analyserSync ? 'Analyser Live Sync ON' : 'Sync Market Analyser'}
+                title={analyserSync ? 'Analyser Live Sync ON' : 'Align / Sync Blocks'}
                 className={`p-1.5 rounded cursor-pointer ${
-                  analyserSync ? 'text-[#00A878] bg-[#00A878]/10' : 'text-[#374151] dark:text-slate-300 hover:text-[#00A878]'
+                  analyserSync
+                    ? 'text-[#00A878] bg-[#00A878]/10'
+                    : 'text-[#374151] dark:text-slate-300 hover:text-[#00A878]'
                 }`}
               >
                 <SlidersHorizontal className="w-[18px] h-[18px]" />
               </button>
 
-              <div className="w-6 border-t border-slate-200 dark:border-white/10" />
-
               <button
                 type="button"
-                onClick={handleResetDefaults}
+                disabled={undoStack.length === 0}
+                onClick={handleUndo}
                 title="Undo"
-                className="p-1.5 text-[#6B7280] dark:text-slate-400 hover:text-[#111319] dark:hover:text-white cursor-pointer"
+                className="p-1.5 text-[#6B7280] dark:text-slate-400 hover:text-[#111319] dark:hover:text-white disabled:opacity-35 cursor-pointer"
               >
                 <Undo2 className="w-[18px] h-[18px]" />
               </button>
               <button
                 type="button"
-                onClick={() => setExecutionSpeed((s) => (s === 'fast' ? 'normal' : 'fast'))}
-                title={`Execution Speed: ${executionSpeed}`}
-                className="p-1.5 text-[#6B7280] dark:text-slate-400 hover:text-[#111319] dark:hover:text-white cursor-pointer"
+                disabled={redoStack.length === 0}
+                onClick={handleRedo}
+                title="Redo"
+                className="p-1.5 text-[#6B7280] dark:text-slate-400 hover:text-[#111319] dark:hover:text-white disabled:opacity-35 cursor-pointer"
               >
                 <Redo2 className="w-[18px] h-[18px]" />
               </button>
 
-              <div className="w-6 border-t border-slate-200 dark:border-white/10" />
-
               <button
                 type="button"
-                onClick={() => setCanvasZoom((z) => Math.min(115, z + 5))}
+                onClick={() => setCanvasZoom((z) => Math.min(120, z + 5))}
                 title="Zoom in"
                 className="p-1.5 text-[#374151] dark:text-slate-300 hover:text-[#111319] dark:hover:text-white cursor-pointer"
               >
@@ -1382,7 +1284,7 @@ export const BotBuilderPage: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => setCanvasZoom((z) => Math.max(85, z - 5))}
+                onClick={() => setCanvasZoom((z) => Math.max(80, z - 5))}
                 title="Zoom out"
                 className="p-1.5 text-[#374151] dark:text-slate-300 hover:text-[#111319] dark:hover:text-white cursor-pointer"
               >
@@ -1390,382 +1292,14 @@ export const BotBuilderPage: React.FC = () => {
               </button>
             </aside>
 
-            {/* Right Blockly-style Workspace Canvas */}
-            <form
-              onSubmit={handleRunBot}
-              className="flex-1 overflow-auto bg-[#F4F5F7] dark:bg-[#0B0E14] px-3.5 py-3.5 space-y-5"
-            >
-              {/* Top Row: Quick strategy button + Analyser sync pill */}
-              <div className="flex flex-wrap items-center gap-2">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setQsStep(1);
-                    setQsOpen(true);
-                  }}
-                  className="px-4 py-2 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold shadow-xs cursor-pointer"
-                >
-                  Quick strategy
-                </button>
-
-                <button
-                  type="button"
-                  onClick={() => handleToggleAnalyserSync(!analyserSync)}
-                  className={`px-3 py-1.5 rounded-[4px] text-[11px] font-semibold border inline-flex items-center gap-1.5 cursor-pointer ${
-                    analyserSync
-                      ? 'bg-[#00A878] border-[#00A878] text-white'
-                      : 'bg-white dark:bg-[#181C25] border-slate-200 dark:border-white/10 text-[#374151] dark:text-slate-300'
-                  }`}
-                >
-                  <Sparkles className="w-3.5 h-3.5" />
-                  {analyserSync ? 'Analyser Sync ON' : 'Analyser Sync'}
-                </button>
-
-                <input
-                  type="text"
-                  value={strategyName}
-                  onChange={(e) => setStrategyName(e.target.value)}
-                  aria-label="Strategy Name"
-                  className="px-2.5 py-1.5 rounded-[4px] bg-white/90 dark:bg-[#181C25] border border-slate-200 dark:border-white/10 text-[12px] font-semibold w-36 outline-none"
-                />
-              </div>
-
-              {/* Blocks Container with Zoom & Horizontal Scroll for Block 4 matching 152359 & 152424 */}
-              <div
-                className="flex flex-col lg:flex-row gap-5 items-start pb-10 origin-top-left transition-transform"
-                style={{ transform: `scale(${canvasZoom / 100})` }}
-              >
-                <div className="space-y-6 w-full max-w-[460px]">
-                  {/* BLOCK 1: 1. Trade parameters (#0A405C Navy Blockly Frame) */}
-                  <div className="rounded-[4px] border-l-[6px] border-[#0A405C] bg-[#0A405C] shadow-xs overflow-hidden">
-                    <div className="px-3 py-2 text-white text-[12px] font-semibold flex items-center gap-2">
-                      <ListChecks className="w-3.5 h-3.5 text-white/90" />
-                      <span>1. Trade parameters</span>
-                    </div>
-
-                    <div className="bg-[#0A405C] pr-1 pb-2 space-y-1">
-                      {/* Market selector pill */}
-                      <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-1.5 flex flex-wrap items-center gap-1 text-[11px] text-[#111319] dark:text-slate-200">
-                        <span className="font-medium">Market:</span>
-                        <select
-                          value={marketCategory}
-                          onChange={(e) => setMarketCategory(e.target.value as any)}
-                          className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-medium outline-none"
-                        >
-                          <option value="Synthetic">Derived</option>
-                          <option value="Forex">Forex</option>
-                          <option value="Crypto">Crypto</option>
-                          <option value="Metals/Cmd">Commodities</option>
-                          <option value="Indices">Indices</option>
-                          <option value="All">All Markets</option>
-                        </select>
-                        <span className="text-slate-500">&gt;</span>
-                        <select
-                          value={symbol}
-                          onChange={(e) => setSymbol(e.target.value)}
-                          className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-medium outline-none max-w-[180px]"
-                        >
-                          {filteredSymbols.map((inst) => (
-                            <option key={inst.symbol} value={inst.symbol}>
-                              {inst.display_name}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {/* Trade Type pill */}
-                      <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-1.5 flex flex-wrap items-center gap-1 text-[11px] text-[#111319] dark:text-slate-200 w-fit max-w-full">
-                        <span className="font-medium">Trade Type:</span>
-                        <select
-                          value={tradeTypeGroup}
-                          onChange={(e) => handleGroupChange(e.target.value as TradeTypeGroup)}
-                          className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-medium outline-none"
-                        >
-                          {(Object.keys(TRADE_TYPE_OPTIONS) as TradeTypeGroup[]).map((grp) => (
-                            <option key={grp} value={grp}>
-                              {grp}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {/* Contract Type pill */}
-                      <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-1.5 flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit">
-                        <span className="font-medium">Contract Type:</span>
-                        <select
-                          value={contractType}
-                          onChange={(e) => setContractType(e.target.value)}
-                          className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-semibold outline-none"
-                        >
-                          {contractChoices.map((c) => (
-                            <option key={c.value} value={c.value}>
-                              {c.label}
-                            </option>
-                          ))}
-                        </select>
-                      </div>
-
-                      {/* Default Candle Interval pill */}
-                      <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-1.5 flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit">
-                        <span className="font-medium">Default Candle Interval:</span>
-                        <select
-                          value={candleInterval}
-                          onChange={(e) => setCandleInterval(e.target.value as any)}
-                          className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-medium outline-none"
-                        >
-                          <option value="1t">1 tick</option>
-                          <option value="1m">1 minute</option>
-                          <option value="5m">5 minutes</option>
-                          <option value="15m">15 minutes</option>
-                        </select>
-                      </div>
-
-                      {/* Restart buy/sell checkboxes matching Screenshot 152359 */}
-                      <label className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11px] text-[#111319] dark:text-slate-200 w-fit cursor-pointer">
-                        <span>Restart buy/sell on error (disable for better performance):</span>
-                        <input
-                          type="checkbox"
-                          checked={restartBuySellOnError}
-                          onChange={(e) => setRestartBuySellOnError(e.target.checked)}
-                          className="accent-[#0A405C]"
-                        />
-                      </label>
-
-                      <label className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11px] text-[#111319] dark:text-slate-200 w-fit cursor-pointer">
-                        <span>Restart last trade on error (bot ignores the unsuccessful trade):</span>
-                        <input
-                          type="checkbox"
-                          checked={restartLastTradeOnError}
-                          onChange={(e) => setRestartLastTradeOnError(e.target.checked)}
-                          className="accent-[#0A405C]"
-                        />
-                      </label>
-
-                      {/* Run once at start: */}
-                      <div className="pt-2">
-                        <div className="px-3 py-1.5 text-white text-[12px] font-semibold">Run once at start:</div>
-                        <div className="pl-2 space-y-1">
-                          {[
-                            {
-                              varName: 'initialStake',
-                              node: (
-                                <input
-                                  type="number"
-                                  step="0.1"
-                                  min="0.35"
-                                  value={baseStake}
-                                  onChange={(e) => setBaseStake(e.target.value)}
-                                  className="w-12 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                                />
-                              ),
-                            },
-                            {
-                              varName: 'prediction',
-                              node: (
-                                <input
-                                  type="text"
-                                  value={barrier}
-                                  onChange={(e) => setBarrier(e.target.value)}
-                                  className="w-12 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                                />
-                              ),
-                            },
-                            {
-                              varName: 'martingaleFactor',
-                              node: (
-                                <input
-                                  type="number"
-                                  step="0.1"
-                                  min="1"
-                                  value={martingale}
-                                  onChange={(e) => setMartingale(e.target.value)}
-                                  className="w-12 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                                />
-                              ),
-                            },
-                            {
-                              varName: 'profitThreshold',
-                              node: (
-                                <input
-                                  type="number"
-                                  min="1"
-                                  value={takeProfit}
-                                  onChange={(e) => setTakeProfit(e.target.value)}
-                                  className="w-12 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                                />
-                              ),
-                            },
-                            {
-                              varName: 'lossThreshold',
-                              node: (
-                                <input
-                                  type="number"
-                                  min="1"
-                                  value={stopLoss}
-                                  onChange={(e) => setStopLoss(e.target.value)}
-                                  className="w-12 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                                />
-                              ),
-                            },
-                            {
-                              varName: 'maxTrades',
-                              node: (
-                                <input
-                                  type="number"
-                                  min="1"
-                                  value={maxTrades}
-                                  onChange={(e) => setMaxTrades(e.target.value)}
-                                  className="w-12 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                                />
-                              ),
-                            },
-                            {
-                              varName: 'progression',
-                              node: (
-                                <select
-                                  value={useMartingale}
-                                  onChange={(e) => setUseMartingale(e.target.value as 'true' | 'false')}
-                                  className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-semibold outline-none"
-                                >
-                                  <option value="true">enabled</option>
-                                  <option value="false">flat</option>
-                                </select>
-                              ),
-                            },
-                          ].map((row) => (
-                            <div
-                              key={row.varName}
-                              className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-2.5 py-1 flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit"
-                            >
-                              <span>set</span>
-                              <span className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-semibold">
-                                {row.varName} ▾
-                              </span>
-                              <span>to</span>
-                              {row.node}
-                            </div>
-                          ))}
-
-                          {contractType === 'ACCU' && (
-                            <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-2.5 py-1 flex items-center gap-1.5 text-[11px] w-fit">
-                              <span>growthRate</span>
-                              {[0.01, 0.02, 0.03, 0.04, 0.05].map((r) => (
-                                <button
-                                  key={r}
-                                  type="button"
-                                  onClick={() => setGrowthRate(r)}
-                                  className={`px-2 py-0.5 rounded-full font-mono font-bold cursor-pointer ${
-                                    growthRate === r ? 'bg-[#FF444F] text-white' : 'bg-white dark:bg-[#151820]'
-                                  }`}
-                                >
-                                  {(r * 100).toFixed(0)}%
-                                </button>
-                              ))}
-                            </div>
-                          )}
-                        </div>
-                      </div>
-
-                      {/* Trade options: */}
-                      <div className="pt-2">
-                        <div className="px-3 py-1.5 text-white text-[12px] font-semibold">Trade options:</div>
-                        <div className="pl-2">
-                          <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-2.5 py-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit">
-                            <span>Duration:</span>
-                            <select
-                              value={durationUnit}
-                              onChange={(e) => setDurationUnit(e.target.value)}
-                              className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-semibold outline-none"
-                            >
-                              <option value="t">Ticks</option>
-                              <option value="s">Seconds</option>
-                              <option value="m">Minutes</option>
-                            </select>
-                            <input
-                              type="number"
-                              min="1"
-                              value={duration}
-                              onChange={(e) => setDuration(e.target.value)}
-                              className="w-10 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                            />
-                            <span>Stake: USD</span>
-                            <span className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num font-bold">
-                              {Number(baseStake || 0).toFixed(2)}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* BLOCK 2: 2. Purchase conditions */}
-                  <div className="rounded-[4px] border-l-[6px] border-[#0A405C] bg-[#0A405C] shadow-xs overflow-hidden">
-                    <div className="px-3 py-2 text-white text-[12px] font-semibold flex items-center gap-2">
-                      <ShoppingBasket className="w-3.5 h-3.5 text-white/90" />
-                      <span>2. Purchase conditions</span>
-                    </div>
-                    <div className="bg-[#0A405C] pr-1 pb-2 pl-2 space-y-1">
-                      <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-2.5 py-1.5 flex flex-wrap items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit max-w-full">
-                        <span className="font-semibold">if</span>
-                        <select
-                          value={entryCondition}
-                          onChange={(e) => setEntryCondition(e.target.value as any)}
-                          className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-medium outline-none max-w-[210px]"
-                        >
-                          <option value="any_tick">Every incoming tick (Instant)</option>
-                          <option value="last_digit_gte">Last digit is greater or equal</option>
-                          <option value="last_digit_lte">Last digit is less or equal</option>
-                          <option value="rsi_signal">Analyser RSI / SMC confirms</option>
-                        </select>
-                        {(entryCondition === 'last_digit_gte' || entryCondition === 'last_digit_lte') && (
-                          <input
-                            type="number"
-                            min="0"
-                            max="9"
-                            value={conditionDigit}
-                            onChange={(e) => setConditionDigit(e.target.value)}
-                            className="w-10 px-1.5 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-mono-num text-center font-bold outline-none"
-                          />
-                        )}
-                        <span className="font-semibold">then</span>
-                        <span className="px-2 py-0.5 rounded-full bg-[#00A878]/15 text-[#007F5B] dark:text-[#00A878] font-bold">
-                          Purchase ({getContractDisplayLabel(contractType)})
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                </div>
-
-                {/* BLOCK 4: 4. Restart trading conditions (Screenshots 152359, 152424) */}
-                <div className="w-full max-w-[420px] rounded-[4px] border-l-[6px] border-[#0A405C] bg-[#0A405C] shadow-xs overflow-hidden shrink-0">
-                  <div className="px-3 py-2 text-white text-[12px] font-semibold flex items-center gap-2">
-                    <Flag className="w-3.5 h-3.5 text-white/90" />
-                    <span>4. Restart trading conditions</span>
-                  </div>
-                  <div className="bg-[#0A405C] pr-1 pb-2 pl-2 space-y-1">
-                    <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-2.5 py-1.5 text-[11px] text-[#111319] dark:text-slate-200 flex flex-wrap items-center gap-1.5 w-fit">
-                      <span>Update Stake And Side On Result: resultIsWin</span>
-                      <span className="px-2 py-0.5 rounded-full bg-white dark:bg-[#151820] border border-slate-300 dark:border-white/15 font-semibold">
-                        Result is Win ▾
-                      </span>
-                    </div>
-                    <div className="bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-2.5 py-1.5 text-[11px] text-[#111319] dark:text-slate-200 flex flex-wrap items-center gap-1.5 w-fit">
-                      <span className="font-semibold">if</span>
-                      <span className="px-2 py-0.5 rounded-full bg-white/80 dark:bg-[#151820] border border-slate-300 dark:border-white/15">
-                        Evaluate Profit And Loss Limits with: lastProfit Contract Details:{' '}
-                        <strong>profit</strong>
-                      </span>
-                      <span className="font-semibold">then</span>
-                    </div>
-                    <div className="pl-2">
-                      <span className="inline-block bg-[#E5E7EB] dark:bg-[#1E2532] rounded-[4px] px-3 py-1.5 text-[11px] font-semibold text-[#111319] dark:text-slate-200">
-                        Trade again
-                      </span>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </form>
+            {/* Right Clean Blockly XML Canvas */}
+            <BotBlocklyCanvas
+              state={xmlState}
+              onChange={updateXmlState}
+              instruments={instruments}
+              canvasZoom={canvasZoom}
+              onOpenQuickStrategy={openQuickStrategyModal}
+            />
           </div>
         )}
 
@@ -2057,26 +1591,35 @@ export const BotBuilderPage: React.FC = () => {
 
                   <div>
                     {journalEntries.map((entry, idx) => {
-                      const stripeBg = idx % 2 === 1 ? 'bg-[#F4F5F7]/75 dark:bg-[#181C25]' : 'bg-white dark:bg-[#151820]';
+                      const stripeBg =
+                        idx % 2 === 1 ? 'bg-[#F4F5F7] dark:bg-[#181C25]' : 'bg-white dark:bg-[#151820]';
                       const colonIdx = entry.text.indexOf(':');
                       const prefix = colonIdx > 0 ? entry.text.slice(0, colonIdx + 1) : '';
                       const rest = colonIdx > 0 ? entry.text.slice(colonIdx + 1) : entry.text;
                       const prefixColor =
                         entry.type === 'error'
                           ? 'text-[#FF444F]'
-                          : entry.type === 'profit'
-                            ? 'text-[#2A9D8F]'
-                            : entry.type === 'bought' || entry.type === 'stake'
-                              ? 'text-[#2563EB] dark:text-[#60A5FA]'
-                              : entry.type === 'loss'
-                                ? 'text-[#374151] dark:text-slate-200'
-                                : 'text-[#111319] dark:text-white';
+                          : entry.type === 'warning'
+                            ? 'text-[#D99B26]'
+                            : entry.type === 'session_profit' || entry.type === 'profit'
+                              ? 'text-[#2A9D8F]'
+                              : entry.type === 'bought' || entry.type === 'stake'
+                                ? 'text-[#2563EB] dark:text-[#60A5FA]'
+                                : entry.type === 'loss'
+                                  ? 'text-[#374151] dark:text-slate-200'
+                                  : 'text-[#111319] dark:text-white';
 
                       return (
                         <div key={entry.id} className={`px-3.5 py-2.5 ${stripeBg}`}>
                           <p className="text-[12px] leading-snug break-words">
                             {entry.type === 'error' ? (
                               <span className="text-[#FF444F]">{entry.text}</span>
+                            ) : entry.type === 'warning' ? (
+                              <span className="text-[#D99B26] font-medium">{entry.text}</span>
+                            ) : entry.type === 'session_profit' ? (
+                              <span className="text-[#2A9D8F] font-medium">{entry.text}</span>
+                            ) : entry.type === 'stake' ? (
+                              <span className="text-[#2563EB] dark:text-[#60A5FA]">{entry.text}</span>
                             ) : prefix ? (
                               <>
                                 <span className={`${prefixColor} font-medium`}>{prefix}</span>
@@ -2086,9 +1629,7 @@ export const BotBuilderPage: React.FC = () => {
                                       ? 'text-[#FF444F] font-medium'
                                       : entry.type === 'profit'
                                         ? 'text-[#2A9D8F] font-medium'
-                                        : entry.type === 'stake'
-                                          ? 'text-[#2563EB] dark:text-[#60A5FA]'
-                                          : 'text-[#111319] dark:text-slate-200'
+                                        : 'text-[#111319] dark:text-slate-200'
                                   }
                                 >
                                   {rest}
@@ -2312,7 +1853,7 @@ export const BotBuilderPage: React.FC = () => {
                         </div>
                         <div>
                           <span className="text-slate-500">Duration:</span>{' '}
-                          <strong>{pendingXmlImport.duration || duration} ticks</strong>
+                          <strong>{pendingXmlImport.duration || xmlState.duration} ticks</strong>
                         </div>
                       </div>
                     </div>
@@ -2415,66 +1956,96 @@ export const BotBuilderPage: React.FC = () => {
             </button>
           )}
 
-          {/* Status & Progress Bar matching 152544 (Buying contract), 152613 (Won), 152655 (Lost) */}
-          <button
-            type="button"
+          {/* Status & Progress Bar matching 210257 (Dismissible Won/Lost overlay pill) */}
+          <div
+            role="button"
+            tabIndex={0}
             onClick={() => botView !== 'dashboard' && setTelemetryOpen((v) => !v)}
-            className={`flex-1 h-[40px] rounded-[4px] border px-3 flex flex-col justify-center cursor-pointer overflow-hidden ${
-              runState === 'won'
-                ? 'bg-[#00A878]/10 border-[#00A878]/30'
-                : runState === 'lost'
-                  ? 'bg-[#FF444F]/10 border-[#FF444F]/30'
+            onKeyDown={(e) => {
+              if ((e.key === 'Enter' || e.key === ' ') && botView !== 'dashboard') {
+                setTelemetryOpen((v) => !v);
+              }
+            }}
+            className={`relative flex-1 h-[40px] rounded-[4px] border px-3 flex flex-col justify-center cursor-pointer overflow-hidden ${
+              showOutcomePill && runState === 'won'
+                ? 'bg-gradient-to-r from-[#2A9D8F]/5 via-[#2A9D8F]/12 to-[#2A9D8F]/5 border-[#2A9D8F]/30'
+                : showOutcomePill && runState === 'lost'
+                  ? 'bg-gradient-to-r from-[#FF444F]/5 via-[#FF444F]/12 to-[#FF444F]/5 border-[#FF444F]/30'
                   : 'bg-[#F9FAFB] dark:bg-[#111319] border-slate-200 dark:border-white/[0.08]'
             }`}
           >
-            <div className="flex items-center justify-center gap-1.5 text-[12px] font-bold">
-              {runState === 'won' ? (
-                <span className="text-[#2A9D8F] inline-flex items-center gap-1">
-                  Won <CheckCircle2 className="w-3.5 h-3.5" />
-                </span>
-              ) : runState === 'lost' ? (
-                <span className="text-[#FF444F] inline-flex items-center gap-1">
-                  Lost <XCircle className="w-3.5 h-3.5" />
-                </span>
+            <div className="flex items-center justify-center gap-2 text-[13px] font-bold">
+              {showOutcomePill && runState === 'won' ? (
+                <>
+                  <span className="text-[#2A9D8F]">Won</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDismissedOutcomeKey(outcomeKey);
+                    }}
+                    aria-label="Dismiss won status"
+                    className="w-4 h-4 rounded-full border border-[#111319] dark:border-slate-300 text-[#111319] dark:text-slate-200 flex items-center justify-center hover:bg-black/5 cursor-pointer"
+                  >
+                    <X className="w-2.5 h-2.5" strokeWidth={2.5} />
+                  </button>
+                </>
+              ) : showOutcomePill && runState === 'lost' ? (
+                <>
+                  <span className="text-[#FF444F]">Lost</span>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setDismissedOutcomeKey(outcomeKey);
+                    }}
+                    aria-label="Dismiss lost status"
+                    className="w-4 h-4 rounded-full border border-[#111319] dark:border-slate-300 text-[#111319] dark:text-slate-200 flex items-center justify-center hover:bg-black/5 cursor-pointer"
+                  >
+                    <X className="w-2.5 h-2.5" strokeWidth={2.5} />
+                  </button>
+                </>
               ) : runState === 'bought' ? (
-                <span className="text-[#111319] dark:text-white">Contract bought</span>
+                <span className="text-[#111319] dark:text-white text-[12px]">Contract bought</span>
               ) : runState === 'buying' ? (
-                <span className="text-[#111319] dark:text-white">Buying contract</span>
+                <span className="text-[#111319] dark:text-white text-[12px]">Buying contract</span>
               ) : (
-                <span className="text-[#374151] dark:text-slate-300">Bot is not running</span>
+                <span className="text-[#374151] dark:text-slate-300 text-[12px]">Bot is not running</span>
               )}
             </div>
 
             {/* Progress bar + 3-node timeline track */}
-            <div className="relative w-full h-[3px] bg-slate-200 dark:bg-white/10 rounded-full mt-1.5">
+            <div className="relative w-full h-[2px] bg-slate-200 dark:bg-white/10 rounded-full mt-1.5">
               <div
                 className={`h-full rounded-full transition-all duration-300 ${
-                  runState === 'bought' || runState === 'won'
+                  runState === 'bought' || (showOutcomePill && runState === 'won')
                     ? 'bg-[#2A9D8F] w-full'
                     : runState === 'buying'
                       ? 'bg-[#FF444F] w-1/3'
-                      : runState === 'lost'
+                      : showOutcomePill && runState === 'lost'
                         ? 'bg-[#FF444F] w-full'
                         : 'w-0'
                 }`}
               />
               <span
-                className={`absolute left-0 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full ${
-                  telemetry?.running ? 'bg-[#FF444F]/60' : 'bg-slate-400'
+                className={`absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full ${
+                  telemetry?.running ? 'bg-[#FF444F]/70' : 'bg-slate-400'
                 }`}
               />
               <span
-                className={`absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full ${
-                  runState === 'bought' || runState === 'won' ? 'bg-[#2A9D8F]' : 'bg-slate-300'
+                className={`absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full ${
+                  runState === 'bought' || (showOutcomePill && runState === 'won')
+                    ? 'bg-[#2A9D8F]'
+                    : 'bg-slate-400'
                 }`}
               />
               <span
-                className={`absolute right-0 top-1/2 -translate-y-1/2 w-2 h-2 rounded-full ${
-                  runState === 'won' ? 'bg-[#2A9D8F]' : 'bg-slate-300'
+                className={`absolute right-0 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full ${
+                  showOutcomePill && runState === 'won' ? 'bg-[#2A9D8F]' : 'bg-slate-400'
                 }`}
               />
             </div>
-          </button>
+          </div>
         </div>
 
         {/* 4. DERIV BOT BOTTOM 5-TAB BAR (Home | Dashboard | Bot builder | Chart | Menu) */}
@@ -2723,189 +2294,232 @@ export const BotBuilderPage: React.FC = () => {
         </div>
       )}
 
-      {/* 2-STEP QUICK STRATEGY MODAL */}
+      {/* EXACT 2-STEP QUICK STRATEGY VIEW (Matches Screenshots 210110, 210125, 210129) */}
       {qsOpen && (
-        <div className="fixed inset-0 z-50 bg-black/65 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="w-full max-w-lg bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden shadow-2xl">
-            <div className="px-5 py-4 flex items-center justify-between border-b border-slate-100 dark:border-[#2A2F3D]">
-              <h3 className="font-display text-base font-bold">
-                Step {qsStep}/2: {qsStep === 1 ? 'Choose your strategy' : `Configure ${qsSelected.name}`}
-              </h3>
-              <button
-                type="button"
-                onClick={() => setQsOpen(false)}
-                className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-            <div className="h-1 bg-slate-200 dark:bg-[#111319] w-full">
-              <div className={`h-full bg-[#FF444F] transition-all ${qsStep === 1 ? 'w-1/2' : 'w-full'}`} />
-            </div>
+        <div className="absolute top-[54px] bottom-[56px] inset-x-0 z-45 bg-white dark:bg-[#151820] flex flex-col">
+          <div className="px-4 py-3.5 flex items-center justify-between border-b border-slate-100 dark:border-white/[0.06] shrink-0">
+            <h3 className="text-[15px] font-bold text-[#111319] dark:text-white">
+              Step {qsStep}/2: {qsStep === 1 ? 'Choose your strategy' : qsSelected.name}
+            </h3>
+            <button
+              type="button"
+              onClick={() => setQsOpen(false)}
+              aria-label="Close Quick Strategy"
+              className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer text-[#374151] dark:text-slate-300"
+            >
+              <X className="w-5 h-5" />
+            </button>
+          </div>
+          <div className="h-[3px] bg-slate-200 dark:bg-[#111319] w-full shrink-0">
+            <div className={`h-full bg-[#FF444F] transition-all ${qsStep === 1 ? 'w-1/2' : 'w-full'}`} />
+          </div>
 
-            {qsStep === 1 ? (
-              <div className="p-5 space-y-4">
-                <div className="relative">
-                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-1/2 -translate-y-1/2" />
+          {qsStep === 1 ? (
+            <div className="flex-1 overflow-y-auto px-4 py-3.5 space-y-4">
+              {/* Search + Video Guide Box (Matches 210110) */}
+              <div className="flex items-center gap-2.5">
+                <div className="relative flex-1">
+                  <Search className="w-4 h-4 text-[#6B7280] absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
                     value={qsSearch}
                     onChange={(e) => setQsSearch(e.target.value)}
-                    placeholder="Search strategy..."
-                    className="w-full pl-10 pr-4 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] text-sm outline-none"
+                    placeholder="Search"
+                    className="w-full pl-9 pr-3 py-2 rounded-[4px] bg-[#F2F3F5] dark:bg-[#111319] text-[13px] text-[#111319] dark:text-white placeholder:text-[#8E95A2] outline-none"
                   />
                 </div>
-
-                <div className="flex items-center gap-2">
-                  {(['All', 'Accumulators', 'Options'] as const).map((cat) => (
-                    <button
-                      key={cat}
-                      type="button"
-                      onClick={() => setQsFilter(cat)}
-                      className={`px-3.5 py-1.5 rounded-full text-xs font-bold border cursor-pointer ${
-                        qsFilter === cat
-                          ? 'bg-[#151820] text-white border-[#151820] dark:bg-white dark:text-[#151820]'
-                          : 'border-slate-200 dark:border-[#2A2F3D] text-slate-600 dark:text-slate-300'
-                      }`}
-                    >
-                      {cat}
-                    </button>
-                  ))}
-                </div>
-
-                <div className="max-h-80 overflow-y-auto divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                  {filteredQuickStrategies.map((strat) => (
-                    <button
-                      key={strat.key}
-                      type="button"
-                      onClick={() => {
-                        setQsSelected(strat);
-                        setMartingale(strat.defaultFactor);
-                        if (strat.contractType === 'ACCU') setGrowthRate(0.02);
-                        setQsStep(2);
-                      }}
-                      className="w-full py-3.5 px-2 flex items-center justify-between text-left hover:bg-[#F8F9FB] dark:hover:bg-white/5 cursor-pointer"
-                    >
-                      <div>
-                        <p className="text-sm font-bold">{strat.name}</p>
-                        <p className="text-[11px] text-slate-500">
-                          {strat.category} · {strat.desc}
-                        </p>
-                      </div>
-                      <ChevronRight className="w-4 h-4 text-slate-400 shrink-0" />
-                    </button>
-                  ))}
-                </div>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setQsOpen(false);
+                    setActiveTab('learning-hub');
+                  }}
+                  title="Strategy video guide"
+                  className="w-9 h-9 rounded-[4px] border border-slate-200 dark:border-white/15 flex items-center justify-center hover:bg-slate-50 dark:hover:bg-white/5 cursor-pointer shrink-0"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 text-[#111319] dark:text-slate-200" fill="none" stroke="currentColor" strokeWidth="1.8">
+                    <rect x="3" y="4" width="18" height="14" rx="2" />
+                    <polygon points="10,8 16,11 10,14" fill="currentColor" stroke="none" />
+                    <path d="M8 21h8" strokeLinecap="round" />
+                  </svg>
+                </button>
               </div>
-            ) : (
-              <div className="p-5 space-y-4 text-xs">
-                <p className="text-slate-500">{qsSelected.desc}</p>
-                <div className="grid grid-cols-2 gap-3">
-                  <div>
-                    <label className="block font-semibold text-slate-500 mb-1">Underlying Market</label>
-                    <select
-                      value={symbol}
-                      onChange={(e) => setSymbol(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-semibold"
-                    >
-                      {instruments.slice(0, 20).map((inst) => (
-                        <option key={inst.symbol} value={inst.symbol}>
-                          {inst.display_name}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-500 mb-1">Initial Stake (USD)</label>
-                    <input
-                      type="number"
-                      min="0.35"
-                      step="0.5"
-                      value={baseStake}
-                      onChange={(e) => setBaseStake(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono font-bold"
-                    />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-500 mb-1">Factor / Multiplier</label>
+
+              {/* Filter Chips: All | Accumulators | Options */}
+              <div className="flex items-center gap-2">
+                {(['All', 'Accumulators', 'Options'] as const).map((cat) => (
+                  <button
+                    key={cat}
+                    type="button"
+                    onClick={() => setQsFilter(cat)}
+                    className={`px-3.5 py-1 rounded-full text-[12px] font-medium border cursor-pointer transition-colors ${
+                      qsFilter === cat
+                        ? 'bg-[#111319] text-white border-[#111319] dark:bg-white dark:text-[#111319]'
+                        : 'bg-white dark:bg-transparent border-slate-200 dark:border-white/15 text-[#374151] dark:text-slate-300'
+                    }`}
+                  >
+                    {cat}
+                  </button>
+                ))}
+              </div>
+
+              {/* Grouped Strategy Rows matching Screenshots 210110 & 210125 */}
+              <div className="space-y-4 pb-6">
+                {(['Accumulators', 'Options'] as const).map((groupName) => {
+                  const groupItems = filteredQuickStrategies.filter((s) => s.category === groupName);
+                  if (groupItems.length === 0) return null;
+                  return (
+                    <div key={groupName}>
+                      <h4 className="text-[13px] font-bold text-[#111319] dark:text-white mb-1">
+                        {groupName}
+                      </h4>
+                      <div className="divide-y divide-slate-100 dark:divide-white/[0.06]">
+                        {groupItems.map((strat) => (
+                          <button
+                            key={strat.key}
+                            type="button"
+                            onClick={() => {
+                              setQsSelected(strat);
+                              setQsStep2Factor(strat.defaultFactor);
+                              if (strat.contractType === 'ACCU') setQsStep2Growth(0.02);
+                              setQsStep(2);
+                            }}
+                            className="w-full py-3.5 flex items-center justify-between text-left hover:bg-[#F8F9FA] dark:hover:bg-white/[0.03] cursor-pointer"
+                          >
+                            <span className="text-[13.5px] font-normal text-[#1F2329] dark:text-slate-100">
+                              {strat.name}
+                            </span>
+                            <ChevronRight className="w-4 h-4 text-[#6B7280] shrink-0" />
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          ) : (
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 text-xs">
+              <p className="text-[12.5px] text-[#525866] dark:text-slate-300 leading-relaxed">
+                {qsSelected.desc}
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-semibold text-[#525866] dark:text-slate-400 mb-1">
+                    Underlying Market
+                  </label>
+                  <select
+                    value={qsStep2Symbol}
+                    onChange={(e) => setQsStep2Symbol(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-[4px] bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 font-semibold outline-none"
+                  >
+                    {instruments.slice(0, 24).map((inst) => (
+                      <option key={inst.symbol} value={inst.symbol}>
+                        {inst.display_name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="block font-semibold text-[#525866] dark:text-slate-400 mb-1">
+                    Initial Stake (USD)
+                  </label>
+                  <input
+                    type="number"
+                    min="0.35"
+                    step="0.5"
+                    value={qsStep2Stake}
+                    onChange={(e) => setQsStep2Stake(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-[4px] bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 font-mono-num font-bold outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-[#525866] dark:text-slate-400 mb-1">
+                    Factor / Multiplier
+                  </label>
+                  <input
+                    type="number"
+                    min="1"
+                    step="0.1"
+                    value={qsStep2Factor}
+                    onChange={(e) => setQsStep2Factor(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-[4px] bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 font-mono-num font-bold outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block font-semibold text-[#525866] dark:text-slate-400 mb-1">
+                    Take Profit / Stop Loss ($)
+                  </label>
+                  <div className="flex gap-2">
                     <input
                       type="number"
                       min="1"
-                      step="0.1"
-                      value={martingale}
-                      onChange={(e) => setMartingale(e.target.value)}
-                      className="w-full px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono font-bold"
+                      value={qsStep2TP}
+                      onChange={(e) => setQsStep2TP(e.target.value)}
+                      className="w-1/2 px-2.5 py-2.5 rounded-[4px] bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 font-mono-num font-bold text-[#2A9D8F] outline-none"
                     />
-                  </div>
-                  <div>
-                    <label className="block font-semibold text-slate-500 mb-1">Take Profit / Stop Loss ($)</label>
-                    <div className="flex gap-1.5">
-                      <input
-                        type="number"
-                        min="1"
-                        value={takeProfit}
-                        onChange={(e) => setTakeProfit(e.target.value)}
-                        className="w-1/2 px-2 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono font-bold text-[#00A878]"
-                      />
-                      <input
-                        type="number"
-                        min="1"
-                        value={stopLoss}
-                        onChange={(e) => setStopLoss(e.target.value)}
-                        className="w-1/2 px-2 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono font-bold text-[#FF444F]"
-                      />
-                    </div>
-                  </div>
-                </div>
-
-                {qsSelected.category === 'Accumulators' && (
-                  <div>
-                    <label className="block font-semibold text-slate-500 mb-1">Accumulator Growth Rate</label>
-                    <div className="grid grid-cols-5 gap-1.5">
-                      {[0.01, 0.02, 0.03, 0.04, 0.05].map((r) => (
-                        <button
-                          key={r}
-                          type="button"
-                          onClick={() => setGrowthRate(r)}
-                          className={`py-2 rounded-xl font-mono font-bold cursor-pointer ${
-                            growthRate === r ? 'bg-[#FF444F] text-white' : 'bg-[#F4F5F7] dark:bg-[#111319]'
-                          }`}
-                        >
-                          {(r * 100).toFixed(0)}%
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <div className="flex items-center justify-between gap-2 pt-2">
-                  <button
-                    type="button"
-                    onClick={() => setQsStep(1)}
-                    className="px-4 py-2.5 rounded-xl border border-slate-200 dark:border-[#2A2F3D] font-semibold inline-flex items-center gap-1 cursor-pointer"
-                  >
-                    <ChevronLeft className="w-3.5 h-3.5" /> Back
-                  </button>
-                  <div className="flex items-center gap-2">
-                    <button
-                      type="button"
-                      onClick={() => applyQuickStrategy(false)}
-                      className="px-4 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-bold cursor-pointer"
-                    >
-                      Load Blocks
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => applyQuickStrategy(true)}
-                      className="px-5 py-2.5 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white font-bold cursor-pointer"
-                    >
-                      Run Strategy
-                    </button>
+                    <input
+                      type="number"
+                      min="1"
+                      value={qsStep2SL}
+                      onChange={(e) => setQsStep2SL(e.target.value)}
+                      className="w-1/2 px-2.5 py-2.5 rounded-[4px] bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 font-mono-num font-bold text-[#FF444F] outline-none"
+                    />
                   </div>
                 </div>
               </div>
-            )}
-          </div>
+
+              {qsSelected.category === 'Accumulators' && (
+                <div>
+                  <label className="block font-semibold text-[#525866] dark:text-slate-400 mb-1.5">
+                    Accumulator Growth Rate
+                  </label>
+                  <div className="grid grid-cols-5 gap-1.5">
+                    {[0.01, 0.02, 0.03, 0.04, 0.05].map((r) => (
+                      <button
+                        key={r}
+                        type="button"
+                        onClick={() => setQsStep2Growth(r)}
+                        className={`py-2 rounded-[4px] font-mono-num font-bold cursor-pointer ${
+                          qsStep2Growth === r
+                            ? 'bg-[#FF444F] text-white'
+                            : 'bg-[#F4F5F7] dark:bg-[#111319] text-[#111319] dark:text-slate-200'
+                        }`}
+                      >
+                        {(r * 100).toFixed(0)}%
+                      </button>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              <div className="flex items-center justify-between gap-2 pt-3 border-t border-slate-100 dark:border-white/[0.06]">
+                <button
+                  type="button"
+                  onClick={() => setQsStep(1)}
+                  className="px-4 py-2.5 rounded-[4px] border border-slate-200 dark:border-white/15 font-bold inline-flex items-center gap-1 cursor-pointer"
+                >
+                  <ChevronLeft className="w-3.5 h-3.5" /> Back
+                </button>
+                <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => applyQuickStrategy(false)}
+                    className="px-4 py-2.5 rounded-[4px] border border-slate-300 dark:border-white/20 font-bold cursor-pointer"
+                  >
+                    Load
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => applyQuickStrategy(true)}
+                    className="px-5 py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white font-bold cursor-pointer"
+                  >
+                    Run
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
         </div>
       )}
 

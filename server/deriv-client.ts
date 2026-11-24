@@ -62,6 +62,14 @@ export function getActiveDerivAppId(): string {
 export function getWsFeedAppId(): string {
   const active = getActiveDerivAppId();
   if (/^\d+$/.test(active)) return active;
+  const globalSettings = getCachedSetting<{ derivWsAppId?: string }>('global', {});
+  const commSettings = getCachedSetting<{ derivWsAppId?: string }>('commissions', {});
+  const wsCandidate = [
+    String(commSettings.derivWsAppId || '').trim(),
+    String(globalSettings.derivWsAppId || '').trim(),
+    String(process.env.DERIV_WS_APP_ID || '').trim(),
+  ].find((id) => /^\d+$/.test(id) && id !== '1089');
+  if (wsCandidate) return wsCandidate;
   const envWs = String(process.env.DERIV_WS_APP_ID || '').trim();
   if (/^\d+$/.test(envWs)) return envWs;
   return '1089';
@@ -986,12 +994,14 @@ export async function derivRestRequest<T = any>(
   options: { method?: string; body?: Record<string, unknown>; headers?: Record<string, string> } = {}
 ): Promise<T> {
   const url = `${config.derivApiBase}${path}`;
+  const appId = getActiveDerivAppId();
   const resp = await fetch(url, {
     method: options.method || 'GET',
     headers: {
       Authorization: `Bearer ${token}`,
       'Content-Type': 'application/json',
       Accept: 'application/json',
+      ...(appId ? { 'Deriv-App-ID': appId } : {}),
       ...(options.headers || {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,

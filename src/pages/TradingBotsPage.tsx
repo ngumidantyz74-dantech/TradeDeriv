@@ -224,7 +224,8 @@ export const TradingBotsPage: React.FC = () => {
           stopLoss: s.config?.stopLoss ?? 3,
           maxTrades: s.config?.maxTrades ?? 15,
           accountMode,
-          executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
+          executionMode:
+            activeConnectedAccount && !activeConnectedAccount.balance_locked_by_admin ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });

@@ -9,7 +9,11 @@ export interface BotSessionConfig {
   strategyType?: string;
   symbol: string;
   contractType: string;
+  contractSideMode?: 'both' | 'single';
+  tradeSide?: string;
   baseStake: number;
+  winStep?: number;
+  maxWinSteps?: number;
   barrier?: string;
   duration?: number;
   durationUnit?: string;
@@ -24,12 +28,14 @@ export interface BotSessionConfig {
   accountMode?: 'real' | 'demo';
   executionSpeed?: 'fast' | 'normal';
   analyserSync?: boolean;
+  conditionType?: 'any_tick' | 'last_digit_gte' | 'last_digit_lte' | 'rsi_signal';
+  conditionDigit?: number;
 }
 
 export interface BotJournalEntry {
   id: string;
   time: string;
-  type: 'info' | 'stake' | 'bought' | 'profit' | 'loss' | 'error';
+  type: 'info' | 'stake' | 'bought' | 'profit' | 'loss' | 'warning' | 'session_profit' | 'error';
   text: string;
 }
 
@@ -74,6 +80,13 @@ interface InternalBotSession extends BotTelemetry {
   isExecutingTrade: boolean;
   lastTradeAt: number;
   winStreak: number;
+  lossStreak: number;
+  winStep: number;
+  maxWinSteps: number;
+  contractSideMode: 'both' | 'single';
+  currentTradeSide: string;
+  conditionType: 'any_tick' | 'last_digit_gte' | 'last_digit_lte' | 'rsi_signal';
+  conditionDigit: number;
   runState: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
   journal: BotJournalEntry[];
 }
@@ -109,34 +122,80 @@ function getLastDigit(price: number, pipSize = 0.01): number {
   return Number(s[s.length - 1] || 0);
 }
 
-function applyProgressionStake(session: InternalBotSession, won: boolean): void {
+function flipBotTradeSide(side: string): string {
+  const s = String(side || '').toUpperCase();
+  if (s === 'CALL' || s === 'RISE') return 'PUT';
+  if (s === 'PUT' || s === 'FALL') return 'CALL';
+  if (s === 'DIGITOVER' || s === 'OVER') return 'DIGITUNDER';
+  if (s === 'DIGITUNDER' || s === 'UNDER') return 'DIGITOVER';
+  if (s === 'DIGITEVEN' || s === 'EVEN') return 'DIGITODD';
+  if (s === 'DIGITODD' || s === 'ODD') return 'DIGITEVEN';
+  if (s === 'DIGITMATCH' || s === 'MATCH') return 'DIGITDIFF';
+  if (s === 'DIGITDIFF' || s === 'DIFF') return 'DIGITMATCH';
+  if (s === 'MULTUP' || s === 'BUY') return 'MULTDOWN';
+  if (s === 'MULTDOWN' || s === 'SELL') return 'MULTUP';
+  return s;
+}
+
+function handleBotTradeSettled(session: InternalBotSession, pnl: number): void {
+  session.realizedPnl = Number((session.realizedPnl + pnl).toFixed(2));
+  session.runState = pnl >= 0 ? 'won' : 'lost';
+  appendJournal(
+    session,
+    pnl >= 0 ? 'profit' : 'loss',
+    pnl >= 0 ? `Profit amount: +${pnl.toFixed(2)} USD` : `Loss amount: ${pnl.toFixed(2)} USD`
+  );
+  const switched = applyProgressionStake(session, pnl >= 0);
+  if (switched) {
+    appendJournal(session, 'warning', '3 consecutive losses: switching Buy/Sell side');
+  }
+  const spStr = Number.isInteger(session.realizedPnl)
+    ? String(session.realizedPnl)
+    : session.realizedPnl.toFixed(2);
+  appendJournal(session, 'session_profit', `Session profit: ${spStr}`);
+  derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+}
+
+function applyProgressionStake(session: InternalBotSession, won: boolean): boolean {
   const style = session.strategyType.toLowerCase();
   const base = session.baseStake;
-  const factor = Math.max(1.1, session.martingaleFactor || 2.0);
+  const factor = Math.max(1.0, session.martingaleFactor || 2.0);
+  const winStep = Math.max(0, Number(session.winStep || 0));
+  const maxWinSteps = Math.max(1, Number(session.maxWinSteps || 3));
+  let switchedSide = false;
 
   if (won) {
     session.wins += 1;
     session.winStreak += 1;
+    session.lossStreak = 0;
 
-    if (style.includes('reverse martingale')) {
-      session.martingaleStep = session.winStreak >= 3 ? 0 : session.martingaleStep + 1;
+    if (style.includes('reverse_martingale') || style.includes('reverse martingale')) {
+      session.martingaleStep = session.winStreak >= maxWinSteps ? 0 : session.martingaleStep + 1;
       session.currentStake =
-        session.martingaleStep === 0 ? base : Number((session.currentStake * factor).toFixed(2));
-    } else if (style.includes("reverse d'alembert")) {
-      session.martingaleStep += 1;
-      session.currentStake = Number((session.currentStake + base).toFixed(2));
-    } else if (style.includes("d'alembert on stat reset")) {
+        session.martingaleStep === 0
+          ? base
+          : Number((session.currentStake * (factor > 1 ? factor : 2.0)).toFixed(2));
+    } else if (style.includes('reverse_dalembert') || style.includes("reverse d'alembert")) {
+      if (style.includes('stat_reset') || style.includes('stat reset')) {
+        session.martingaleStep = session.winStreak >= maxWinSteps ? 0 : session.martingaleStep + 1;
+        session.currentStake =
+          session.martingaleStep === 0 ? base : Number((session.currentStake + (winStep > 0 ? winStep : base)).toFixed(2));
+      } else {
+        session.martingaleStep += 1;
+        session.currentStake = Number((session.currentStake + (winStep > 0 ? winStep : base)).toFixed(2));
+      }
+    } else if (style.includes('dalembert_stat_reset') || style.includes("d'alembert on stat reset")) {
       if (session.winStreak >= 2) {
         session.martingaleStep = 0;
         session.currentStake = base;
       } else {
         session.martingaleStep = Math.max(0, session.martingaleStep - 1);
-        session.currentStake = Number(Math.max(base, session.currentStake - base).toFixed(2));
+        session.currentStake = Number(Math.max(base, session.currentStake - (winStep > 0 ? winStep : base)).toFixed(2));
       }
-    } else if (style.includes("d'alembert")) {
+    } else if (style.includes('dalembert') || style.includes("d'alembert")) {
       session.martingaleStep = Math.max(0, session.martingaleStep - 1);
-      session.currentStake = Number(Math.max(base, session.currentStake - base).toFixed(2));
-    } else if (style.includes("oscar")) {
+      session.currentStake = Number(Math.max(base, session.currentStake - (winStep > 0 ? winStep : base)).toFixed(2));
+    } else if (style.includes('oscar')) {
       if (session.realizedPnl >= 0) {
         session.martingaleStep = 0;
         session.currentStake = base;
@@ -144,11 +203,20 @@ function applyProgressionStake(session: InternalBotSession, won: boolean): void 
         session.martingaleStep += 1;
         session.currentStake = Number((session.currentStake + base).toFixed(2));
       }
-    } else if (style.includes('1-3-2-6')) {
+    } else if (style.includes('1_3_2_6') || style.includes('1-3-2-6')) {
       const seq = [1, 3, 2, 6];
       const mult = seq[session.winStreak % seq.length];
       session.martingaleStep = session.winStreak % seq.length;
       session.currentStake = Number((base * mult).toFixed(2));
+    } else if (winStep > 0 && style === 'xml_block_flow') {
+      if (session.winStreak <= maxWinSteps) {
+        session.martingaleStep = session.winStreak;
+        session.currentStake = Number((base + session.winStreak * winStep).toFixed(2));
+      } else {
+        session.martingaleStep = 0;
+        session.winStreak = 0;
+        session.currentStake = base;
+      }
     } else {
       session.martingaleStep = 0;
       session.currentStake = base;
@@ -156,17 +224,31 @@ function applyProgressionStake(session: InternalBotSession, won: boolean): void 
   } else {
     session.losses += 1;
     session.winStreak = 0;
+    session.lossStreak += 1;
 
-    if (style.includes('reverse') || style.includes('1-3-2-6')) {
+    if (session.lossStreak >= 3 && session.contractSideMode === 'both') {
+      session.currentTradeSide = flipBotTradeSide(session.currentTradeSide);
+      session.lossStreak = 0;
+      switchedSide = true;
+    }
+
+    if (style.includes('reverse') || style.includes('1_3_2_6') || style.includes('1-3-2-6')) {
       session.martingaleStep = 0;
       session.currentStake = base;
-    } else if (style.includes("oscar")) {
-      // Oscar's Grind keeps unit steady on a loss
+    } else if (style.includes('oscar')) {
       session.currentStake = Number(Math.max(base, session.currentStake).toFixed(2));
-    } else if (style.includes("d'alembert")) {
+    } else if (style.includes('dalembert') || style.includes("d'alembert")) {
       session.martingaleStep += 1;
-      session.currentStake = Number((session.currentStake + base).toFixed(2));
-    } else if (style.includes('stat reset') && session.martingaleStep >= 4) {
+      session.currentStake = Number((session.currentStake + (winStep > 0 ? winStep : base)).toFixed(2));
+    } else if (style.includes('stat_reset') || style.includes('stat reset')) {
+      if (session.martingaleStep >= 4) {
+        session.martingaleStep = 0;
+        session.currentStake = base;
+      } else {
+        session.martingaleStep += 1;
+        session.currentStake = Number(Math.min(base * 16, session.currentStake * factor).toFixed(2));
+      }
+    } else if (style === 'xml_block_flow') {
       session.martingaleStep = 0;
       session.currentStake = base;
     } else {
@@ -174,10 +256,11 @@ function applyProgressionStake(session: InternalBotSession, won: boolean): void 
       session.currentStake = Number(Math.min(base * 16, session.currentStake * factor).toFixed(2));
     }
   }
+  return switchedSide;
 }
 
 function decideBotSide(session: InternalBotSession, latestPrice: number, pipSize: number) {
-  const ct = session.contractType.toUpperCase();
+  const ct = String(session.currentTradeSide || session.contractType || '').toUpperCase();
   const digit = getLastDigit(latestPrice, pipSize);
   const prices = session.recentPrices;
   const avg5 = prices.length >= 5 ? prices.slice(-5).reduce((a, b) => a + b, 0) / 5 : latestPrice;
@@ -209,13 +292,11 @@ function decideBotSide(session: InternalBotSession, latestPrice: number, pipSize
     return { contractType: 'DIGITMATCH', side: 'MATCH', barrier: session.barrier || String(digit), reason: `Match target digit ${session.barrier || digit}` };
   }
   if (ct === 'CALL' || ct === 'PUT') {
-    const bullish = latestPrice >= avg5;
-    const chosen = ct === 'CALL' ? (bullish ? 'CALL' : 'PUT') : 'PUT';
-    return { contractType: chosen, side: chosen, barrier: '', reason: `Momentum ${latestPrice.toFixed(2)} vs 5-tick avg ${avg5.toFixed(2)} -> ${chosen}` };
+    return { contractType: ct, side: ct, barrier: '', reason: `Block tradeSide ${ct} @ ${latestPrice.toFixed(2)}` };
   }
   if (ct === 'MULTUP' || ct === 'MULTDOWN') {
-    const bullish = latestPrice >= avg5;
-    const chosen = bullish ? 'MULTUP' : 'MULTDOWN';
+    const bullish = ct === 'MULTUP' ? true : latestPrice >= avg5;
+    const chosen = ct === 'MULTUP' || ct === 'MULTDOWN' ? ct : bullish ? 'MULTUP' : 'MULTDOWN';
     return { contractType: chosen, side: chosen === 'MULTUP' ? 'BUY' : 'SELL', barrier: '', reason: `Trend ${latestPrice.toFixed(2)} vs SMA5 ${avg5.toFixed(2)} -> ${chosen}` };
   }
   return { contractType: 'DIGITOVER', side: 'OVER', barrier: '2', reason: 'Default OVER 2' };
@@ -259,16 +340,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         closeOrderById(order.id, session.userId)
           .then((closed) => {
             if (closed) {
-              const p = Number(closed.pnl || 0);
-              session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
-              session.runState = p >= 0 ? 'won' : 'lost';
-              appendJournal(
-                session,
-                p >= 0 ? 'profit' : 'loss',
-                p >= 0 ? `Profit amount: +${p.toFixed(2)} USD` : `Loss amount: ${p.toFixed(2)} USD`
-              );
-              applyProgressionStake(session, p >= 0);
-              derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+              handleBotTradeSettled(session, Number(closed.pnl || 0));
             }
           })
           .finally(() => closingOrderLocks.delete(order.id))
@@ -297,16 +369,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         closeOrderById(order.id, session.userId)
           .then((closed) => {
             if (closed) {
-              const p = Number(closed.pnl || 0);
-              session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
-              session.runState = p >= 0 ? 'won' : 'lost';
-              appendJournal(
-                session,
-                p >= 0 ? 'profit' : 'loss',
-                p >= 0 ? `Profit amount: +${p.toFixed(2)} USD` : `Loss amount: ${p.toFixed(2)} USD`
-              );
-              applyProgressionStake(session, p >= 0);
-              derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+              handleBotTradeSettled(session, Number(closed.pnl || 0));
             }
           })
           .finally(() => closingOrderLocks.delete(order.id))
@@ -339,10 +402,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       closeOrderById(order.id, session.userId)
         .then((closed) => {
           if (closed) {
-            const p = Number(closed.pnl || 0);
-            session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
-            applyProgressionStake(session, p >= 0);
-            derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+            handleBotTradeSettled(session, Number(closed.pnl || 0));
           }
         })
         .finally(() => closingOrderLocks.delete(order.id))
@@ -374,6 +434,12 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   );
   if (stillOpen) return;
 
+  if (!session.analyserSync) {
+    const ld = getLastDigit(tick.quote, tick.pipSize);
+    if (session.conditionType === 'last_digit_gte' && ld < session.conditionDigit) return;
+    if (session.conditionType === 'last_digit_lte' && ld > session.conditionDigit) return;
+  }
+
   session.isExecutingTrade = true;
   session.runState = 'buying';
   try {
@@ -386,6 +452,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       const sig = await computeLiveAnalyserSignal(session.symbol);
       targetSymbol = sig.symbol;
       session.contractType = sig.contractType;
+      session.currentTradeSide = sig.contractType;
       session.barrier = sig.barrier;
       duration = sig.duration;
       durationUnit = sig.durationUnit;
@@ -398,7 +465,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     }
 
     session.lastSignal = decision.reason;
-    appendJournal(session, 'stake', `${session.strategyName || 'Bot'} stake: ${session.currentStake.toFixed(2)}`);
+    appendJournal(session, 'stake', 'Trade info');
     derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
 
     const order = await placeUnifiedOrder({
@@ -451,16 +518,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
           if (!row || row.status === 'CLOSED') {
             clearInterval(checkInterval);
             if (row) {
-              const p = Number(row.pnl || 0);
-              session.realizedPnl = Number((session.realizedPnl + p).toFixed(2));
-              session.runState = p >= 0 ? 'won' : 'lost';
-              appendJournal(
-                session,
-                p >= 0 ? 'profit' : 'loss',
-                p >= 0 ? `Profit amount: +${p.toFixed(2)} USD` : `Loss amount: ${p.toFixed(2)} USD`
-              );
-              applyProgressionStake(session, p >= 0);
-              derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+              handleBotTradeSettled(session, Number(row.pnl || 0));
             }
           }
         } catch {
@@ -548,37 +606,37 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   };
 
   const targetMode: 'real' | 'demo' = cfg.accountMode === 'real' ? 'real' : 'demo';
+  const targetIsVirtual = targetMode === 'demo';
   let resolvedConnectedAccountId: number | null = cfg.connectedAccountId || null;
-  let resolvedExecutionMode: 'virtual' | 'deriv' =
-    cfg.executionMode || (targetMode === 'real' ? 'deriv' : 'virtual');
-  let resolvedRealLoginId: string | null = null;
-  let resolvedRealIsDbLocked = false;
+  let resolvedDerivLoginId: string | null = null;
+  let resolvedIsDbLocked = false;
 
-  if (targetMode === 'real') {
-    const realAcc = resolvedConnectedAccountId
-      ? await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
-          `SELECT id, deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
-           FROM connected_accounts
-           WHERE id = $1 AND user_id = $2 AND is_virtual = FALSE AND status = 'active'`,
-          [resolvedConnectedAccountId, cfg.userId]
-        )
-      : await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
-          `SELECT id, deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
-           FROM connected_accounts
-           WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active'
-           ORDER BY COALESCE(balance_locked_by_admin, FALSE) ASC, id ASC
-           LIMIT 1`,
-          [cfg.userId]
-        );
-    if (realAcc) {
-      resolvedConnectedAccountId = realAcc.id;
-      resolvedRealLoginId = realAcc.deriv_login_id;
-      resolvedRealIsDbLocked = Boolean(realAcc.balance_locked_by_admin);
-      if (!resolvedRealIsDbLocked) {
-        resolvedExecutionMode = 'deriv';
-      }
-    }
+  const matchingAcc = resolvedConnectedAccountId
+    ? await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
+        `SELECT id, deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+         FROM connected_accounts
+         WHERE id = $1 AND user_id = $2 AND is_virtual = $3 AND (platform = 'deriv' OR platform IS NULL) AND status = 'active'`,
+        [resolvedConnectedAccountId, cfg.userId, targetIsVirtual]
+      )
+    : await queryOne<{ id: number; deriv_login_id: string; balance_locked_by_admin: boolean }>(
+        `SELECT id, deriv_login_id, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+         FROM connected_accounts
+         WHERE user_id = $1 AND is_virtual = $2 AND (platform = 'deriv' OR platform IS NULL) AND status = 'active'
+         ORDER BY COALESCE(balance_locked_by_admin, FALSE) ASC, id ASC
+         LIMIT 1`,
+        [cfg.userId, targetIsVirtual]
+      );
+
+  if (matchingAcc) {
+    resolvedConnectedAccountId = matchingAcc.id;
+    resolvedDerivLoginId = matchingAcc.deriv_login_id;
+    resolvedIsDbLocked = Boolean(matchingAcc.balance_locked_by_admin);
   }
+
+  const resolvedExecutionMode: 'virtual' | 'deriv' =
+    matchingAcc && !resolvedIsDbLocked ? 'deriv' : 'virtual';
+
+  const initialTradeSide = String(cfg.tradeSide || cfg.contractType || 'CALL').toUpperCase();
 
   const session: InternalBotSession = {
     userId: cfg.userId,
@@ -618,6 +676,13 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     isExecutingTrade: false,
     lastTradeAt: 0,
     winStreak: 0,
+    lossStreak: 0,
+    winStep: Number(cfg.winStep || 0),
+    maxWinSteps: Number(cfg.maxWinSteps || 3),
+    contractSideMode: cfg.contractSideMode === 'single' ? 'single' : 'both',
+    currentTradeSide: initialTradeSide,
+    conditionType: cfg.conditionType || 'any_tick',
+    conditionDigit: Number(cfg.conditionDigit ?? 2),
     runState: 'buying',
     journal: [],
   };
@@ -625,8 +690,10 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   appendJournal(
     session,
     'info',
-    targetMode === 'real' && resolvedRealLoginId && !resolvedRealIsDbLocked
-      ? `You are using your live Real Deriv account (${resolvedRealLoginId}).`
+    matchingAcc && !resolvedIsDbLocked && resolvedDerivLoginId
+      ? targetMode === 'real'
+        ? `You are using your live Real Deriv account (${resolvedDerivLoginId}).`
+        : `You are using your live Demo Deriv account (${resolvedDerivLoginId}).`
       : 'You are using your USD account.'
   );
 
