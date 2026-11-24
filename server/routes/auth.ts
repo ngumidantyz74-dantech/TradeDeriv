@@ -391,8 +391,24 @@ router.post('/account/create-trading-account', requireDb, requireAuth, async (re
       Financial: 'mt5_financial',
       cTrader: 'ctrader',
     };
+    const resolvedPlatform = labelMap[account_type] || platform;
+    const isVirt = Boolean(is_virtual);
 
-    let createdLoginId = `${platform.toUpperCase()}-${is_virtual ? 'VR' : 'RL'}-${randomId(3).toUpperCase()}`;
+    const existing = await queryOne<any>(
+      `SELECT id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
+              last_known_balance as balance, last_known_balance, balance_locked_by_admin, status, scopes, updated_at
+       FROM connected_accounts
+       WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
+         AND (LOWER(account_type) = LOWER($3) OR (platform = $4 AND LOWER(account_type) LIKE '%' || LOWER($3) || '%'))
+       ORDER BY id DESC LIMIT 1`,
+      [req.user!.id, isVirt, account_type, resolvedPlatform]
+    );
+    if (existing) {
+      res.status(200).json({ account: existing, existing: true });
+      return;
+    }
+
+    let createdLoginId = `${platform.toUpperCase()}-${isVirt ? 'VR' : 'RL'}-${randomId(3).toUpperCase()}`;
     let balance = 0;
 
     if (derivToken && !derivToken.startsWith('ory_at_') && platform === 'mt5') {
@@ -401,7 +417,7 @@ router.post('/account/create-trading-account', requireDb, requireAuth, async (re
           derivToken,
           {
             mt5_new_account: 1,
-            account_type: is_virtual ? 'demo' : 'real',
+            account_type: isVirt ? 'demo' : 'real',
             mt5_account_type: account_type.toLowerCase().includes('financial') ? 'financial' : 'synthetic',
             currency,
           },
@@ -416,6 +432,35 @@ router.post('/account/create-trading-account', requireDb, requireAuth, async (re
       }
     }
 
+    if (balance === 0) {
+      const low = `${account_type} ${resolvedPlatform}`.toLowerCase();
+      const bucket =
+        low.includes('gold') || low.includes('swap') || low.includes('ctrader') ? 'mt5_gold' : 'mt5_standard';
+      const u = await queryOne<{ real_wallets_json: string; demo_wallets_json: string }>(
+        'SELECT real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
+        [req.user!.id]
+      );
+      const otherInBucket = await query<{ account_type: string; platform: string }>(
+        `SELECT account_type, platform FROM connected_accounts WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'`,
+        [req.user!.id, isVirt]
+      );
+      const hasSameBucket = otherInBucket.some((a) => {
+        const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+        const b = s.includes('gold') || s.includes('swap') || s.includes('ctrader') ? 'mt5_gold' : 'mt5_standard';
+        return (s.includes('mt5') || s.includes('cfd') || s.includes('ctrader') || s.includes('standard') || s.includes('swap') || s.includes('zero') || s.includes('fin')) && b === bucket;
+      });
+      if (!hasSameBucket && u) {
+        try {
+          const w = JSON.parse((isVirt ? u.demo_wallets_json : u.real_wallets_json) || '{}');
+          if (Number(w?.[bucket] || 0) > 0) {
+            balance = Number(w[bucket]);
+          }
+        } catch {
+          // ignore
+        }
+      }
+    }
+
     const created = await queryOne<any>(
       `INSERT INTO connected_accounts (
         user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
@@ -423,15 +468,7 @@ router.post('/account/create-trading-account', requireDb, requireAuth, async (re
       ) VALUES ($1, $2, $2, $3, $4, $5, $6, $7, $7, FALSE, 'active', 'trade account_manage')
       RETURNING id, user_id, deriv_login_id, deriv_account_id, account_type, platform, currency, is_virtual,
                 last_known_balance as balance, last_known_balance, balance_locked_by_admin, status, scopes, updated_at`,
-      [
-        req.user!.id,
-        createdLoginId,
-        account_type,
-        labelMap[account_type] || platform,
-        currency,
-        Boolean(is_virtual),
-        balance,
-      ]
+      [req.user!.id, createdLoginId, account_type, resolvedPlatform, currency, isVirt, balance]
     );
 
     await addNotification(

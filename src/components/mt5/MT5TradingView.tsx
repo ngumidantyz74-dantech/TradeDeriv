@@ -128,6 +128,8 @@ export const MT5TradingView: React.FC = () => {
     user,
     accounts,
     accountMode,
+    tradingScope,
+    activeCfdBucket,
     activeConnectedAccount,
     selectedSymbol,
     setSelectedSymbol,
@@ -1187,8 +1189,14 @@ export const MT5TradingView: React.FC = () => {
           barrier: tradeMode === 'Over/Under' ? barrier : null,
           duration: isAccu ? 1 : tradeMode === 'MT5 Market' ? 5 : durationTicks,
           durationUnit: 't',
-          executionMode: accountMode === 'real' && activeConnectedAccount ? 'deriv' : 'virtual',
+          executionMode:
+            tradingScope === 'cfd'
+              ? 'virtual'
+              : accountMode === 'real' && activeConnectedAccount
+                ? 'deriv'
+                : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
+          walletBucket: tradingScope === 'cfd' ? activeCfdBucket : 'options',
           strategyKey: strategyTag,
           timeframe: tfLabel,
           accountMode,
@@ -1368,18 +1376,22 @@ export const MT5TradingView: React.FC = () => {
 
   const openOrders = useMemo(() => {
     return orders
-      .filter(
-        (o) =>
-          o.status === 'OPEN' &&
-          (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode
-      )
+      .filter((o) => {
+        if (o.status !== 'OPEN') return false;
+        const orderMode = o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo');
+        if (orderMode !== accountMode) return false;
+        const bucket = o.wallet_bucket || 'options';
+        return tradingScope === 'cfd'
+          ? bucket === 'mt5_standard' || bucket === 'mt5_gold'
+          : bucket === 'options';
+      })
       .map((o) => {
         const metrics = computeLiveOrderMetrics(o, ticks);
         return metrics.currentPrice > 0
           ? { ...o, current_price: metrics.currentPrice, pnl: metrics.pnl }
           : o;
       });
-  }, [orders, accountMode, ticks]);
+  }, [orders, accountMode, tradingScope, ticks]);
   const closedOrders = orders.filter((o) => o.status === 'CLOSED');
   const filteredClosedOrders = useMemo(() => {
     return closedOrders.filter((o) => {
@@ -1402,8 +1414,16 @@ export const MT5TradingView: React.FC = () => {
   const floatingPnl = openOrders.reduce((acc, o) => acc + Number(o.pnl || 0), 0);
   const usedMargin = openOrders.reduce((acc, o) => acc + Number(o.stake || 0), 0);
   const canonicalBalances = useMemo(
-    () => getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount),
-    [user, accounts, accountMode, activeConnectedAccount]
+    () =>
+      getCanonicalBalances(
+        user,
+        accounts,
+        accountMode,
+        activeConnectedAccount,
+        tradingScope,
+        activeCfdBucket
+      ),
+    [user, accounts, accountMode, activeConnectedAccount, tradingScope, activeCfdBucket]
   );
   const balance = canonicalBalances.activeTradingBalance;
   const equity = balance + floatingPnl;
@@ -2139,11 +2159,19 @@ export const MT5TradingView: React.FC = () => {
                   : 'bg-[#00A878]/15 text-[#00A878]'
               }`}
             >
-              {accountMode === 'real'
-                ? activeConnectedAccount
-                  ? `REAL (${activeConnectedAccount.deriv_account_id})`
-                  : 'REAL WALLET (DB)'
-                : 'DEMO WORKSPACE'}
+              {tradingScope === 'cfd'
+                ? accountMode === 'real'
+                  ? activeConnectedAccount
+                    ? `REAL CFD (${activeConnectedAccount.account_type || activeConnectedAccount.deriv_account_id})`
+                    : `REAL CFD (${activeCfdBucket === 'mt5_gold' ? 'Swap-Free / Gold' : 'MT5 Standard'})`
+                  : activeConnectedAccount
+                    ? `DEMO CFD (${activeConnectedAccount.account_type || activeConnectedAccount.deriv_account_id})`
+                    : `DEMO CFD (${activeCfdBucket === 'mt5_gold' ? 'Swap-Free / Gold' : 'MT5 Standard'})`
+                : accountMode === 'real'
+                  ? activeConnectedAccount
+                    ? `REAL (${activeConnectedAccount.deriv_account_id})`
+                    : 'REAL WALLET (DB)'
+                  : 'DEMO WORKSPACE'}
             </span>
           </div>
 
@@ -2874,7 +2902,11 @@ export const MT5TradingView: React.FC = () => {
               <p>
                 Account:{' '}
                 <strong className="font-mono-num">
-                  {activeConnectedAccount?.deriv_account_id || 'Real DB USD Wallet'}
+                  {tradingScope === 'cfd'
+                    ? activeConnectedAccount?.account_type ||
+                      activeConnectedAccount?.deriv_account_id ||
+                      (activeCfdBucket === 'mt5_gold' ? 'CFD Gold / Swap-Free' : 'CFD MT5 Standard')
+                    : activeConnectedAccount?.deriv_account_id || 'Real DB USD Wallet'}
                 </strong>{' '}
                 (Real Funds)
               </p>

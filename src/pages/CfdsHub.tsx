@@ -14,18 +14,17 @@ import {
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
-import { getCanonicalBalances } from '../lib/balances';
+import { getCanonicalBalances, getCfdAccountBucket, type CfdBucket } from '../lib/balances';
 import { Mt5Badge, CTraderBadge } from '../components/DerivBadges';
 import { DepositSheet, TransferScreen } from '../components/CashierFlows';
 
 interface SelectedCfdDetail {
   code: 'STD' | 'SWF' | 'GOLD' | 'FIN' | 'ZRS' | 'cT';
   title: string;
-  balance: number;
-  server: string;
-  loginId: string;
-  leverage: string;
-  isDemo: boolean;
+  bucket: CfdBucket;
+  accountId: number | null;
+  defaultLoginId: string;
+  isWalletFallback?: boolean;
 }
 
 export const CfdsHub: React.FC = () => {
@@ -42,7 +41,7 @@ export const CfdsHub: React.FC = () => {
     formatMoney,
     refreshAccounts,
     refreshAll,
-    setActiveTab,
+    openCfdTrade,
     setSelectedSymbol,
     showToast,
   } = useApp();
@@ -58,6 +57,7 @@ export const CfdsHub: React.FC = () => {
 
   const cfdAccounts = accounts.filter(
     (a) =>
+      a.status === 'active' &&
       (a.platform?.includes('mt5') || a.platform === 'ctrader') &&
       (accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual)
   );
@@ -65,7 +65,25 @@ export const CfdsHub: React.FC = () => {
     mt5StdBal: stdWalletBal,
     mt5GoldBal: goldWalletBal,
     cfdsTotalBal: totalValue,
-  } = getCanonicalBalances(user, accounts, accountMode, null);
+  } = getCanonicalBalances(user, accounts, accountMode, null, 'cfd');
+
+  const getDisplayedCfdCardBalance = (acc: {
+    id: number;
+    account_type?: string;
+    platform?: string;
+    balance?: number;
+    balance_locked_by_admin?: boolean;
+  }) => {
+    const raw = Number(acc.balance || 0);
+    if (raw > 0 || acc.balance_locked_by_admin) return raw;
+    const bucket = getCfdAccountBucket(acc);
+    const bucketAccs = cfdAccounts.filter((a) => getCfdAccountBucket(a) === bucket);
+    const bucketSum = bucketAccs.reduce((s, a) => s + Number(a.balance || 0), 0);
+    if (bucketSum === 0) {
+      return bucket === 'mt5_gold' ? goldWalletBal : stdWalletBal;
+    }
+    return raw;
+  };
 
   const renderSplitMoney = (usdAmount: number, hero = false) => {
     if (hideBalances) {
@@ -119,17 +137,48 @@ export const CfdsHub: React.FC = () => {
     }
   };
 
+  const liveDetail = selectedDetail
+    ? (() => {
+        const matchedAcc =
+          (selectedDetail.accountId && selectedDetail.accountId > 0
+            ? cfdAccounts.find((a) => a.id === selectedDetail.accountId)
+            : null) ||
+          cfdAccounts.find(
+            (a) => String(a.account_type || '').toLowerCase() === selectedDetail.title.toLowerCase()
+          ) ||
+          null;
+        const isDemo = accountMode === 'demo';
+        const balance = matchedAcc
+          ? getDisplayedCfdCardBalance(matchedAcc)
+          : selectedDetail.isWalletFallback
+            ? selectedDetail.bucket === 'mt5_gold'
+              ? goldWalletBal
+              : stdWalletBal
+            : 0;
+        return {
+          ...selectedDetail,
+          accountId: matchedAcc?.id ?? (selectedDetail.accountId && selectedDetail.accountId > 0 ? selectedDetail.accountId : null),
+          balance,
+          server: isDemo ? 'Deriv-Demo' : 'Deriv-Server-02',
+          loginId: matchedAcc?.deriv_account_id || selectedDetail.defaultLoginId,
+          leverage: selectedDetail.code === 'GOLD' ? '1:500' : '1:1000',
+          isDemo,
+        };
+      })()
+    : null;
+
   const handleResetDemo = async () => {
     setResettingDemo(true);
     try {
       await apiFetch('/api/orders/reset-balance', {
         method: 'POST',
-        body: JSON.stringify({ accountMode: 'demo' }),
+        body: JSON.stringify({
+          accountMode: 'demo',
+          target: liveDetail ? liveDetail.bucket : 'cfd',
+          accountId: liveDetail?.accountId || undefined,
+        }),
       });
       await refreshAll();
-      if (selectedDetail) {
-        setSelectedDetail({ ...selectedDetail, balance: 10000 });
-      }
       showToast('Demo balance reset successfully', 'success');
     } catch (err) {
       showToast(err instanceof Error ? err.message : 'Unable to reset demo balance', 'error');
@@ -141,22 +190,29 @@ export const CfdsHub: React.FC = () => {
   const openDetailForAccount = (
     name: string,
     code: SelectedCfdDetail['code'],
-    balance: number,
-    loginId: string
+    accountId: number | null,
+    loginId: string,
+    isWalletFallback = false
   ) => {
+    const bucket: CfdBucket = code === 'GOLD' || code === 'SWF' || code === 'cT' ? 'mt5_gold' : 'mt5_standard';
     setSelectedDetail({
       code,
       title: name,
-      balance,
-      server: accountMode === 'demo' ? 'Deriv-Demo' : 'Deriv-Server-02',
-      loginId,
-      leverage: code === 'GOLD' ? '1:500' : '1:1000',
-      isDemo: accountMode === 'demo',
+      bucket,
+      accountId: accountId && accountId > 0 ? accountId : null,
+      defaultLoginId: loginId,
+      isWalletFallback,
     });
   };
 
-  if (selectedDetail) {
-    const accountOrders = orders.slice(0, 12);
+  if (liveDetail) {
+    const accountOrders = orders
+      .filter(
+        (o) =>
+          (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode &&
+          (o.wallet_bucket === 'mt5_standard' || o.wallet_bucket === 'mt5_gold')
+      )
+      .slice(0, 12);
     return (
       <div className="min-h-[82vh] bg-white dark:bg-[#0E0F13] text-[#111319] dark:text-white">
         <div className="max-w-3xl mx-auto px-5 pt-5 pb-12">
@@ -181,20 +237,20 @@ export const CfdsHub: React.FC = () => {
 
           <div className="flex flex-col items-center text-center pb-8 border-b border-slate-200 dark:border-white/10">
             <div className="mb-5">
-              {selectedDetail.code === 'cT' ? (
+              {liveDetail.code === 'cT' ? (
                 <CTraderBadge />
               ) : (
-                <Mt5Badge variant={selectedDetail.code} size="lg" />
+                <Mt5Badge variant={liveDetail.code} size="lg" />
               )}
             </div>
 
             <p className="font-mono-num text-3xl sm:text-4xl font-bold">
-              {formatMoney(selectedDetail.balance, { hideable: true })}
+              {formatMoney(liveDetail.balance, { hideable: true })}
             </p>
 
             <div className="flex items-center gap-2 mt-2">
-              <span className="text-sm text-[#525866] dark:text-slate-300">{selectedDetail.title}</span>
-              {selectedDetail.isDemo && (
+              <span className="text-sm text-[#525866] dark:text-slate-300">{liveDetail.title}</span>
+              {liveDetail.isDemo && (
                 <span className="px-2 py-0.5 rounded border border-slate-300 dark:border-white/25 text-[10px] font-semibold text-[#525866] dark:text-slate-300">
                   Demo
                 </span>
@@ -202,7 +258,7 @@ export const CfdsHub: React.FC = () => {
             </div>
 
             <div className="flex items-center justify-center gap-10 mt-8">
-              {!selectedDetail.isDemo && (
+              {!liveDetail.isDemo && (
                 <button
                   type="button"
                   onClick={() => setDepositOpen(true)}
@@ -217,12 +273,12 @@ export const CfdsHub: React.FC = () => {
 
               <button
                 type="button"
-                onClick={() => setActiveTab('mt5-tv')}
+                onClick={() => openCfdTrade({ bucket: liveDetail.bucket, accountId: liveDetail.accountId })}
                 className="flex flex-col items-center gap-2 cursor-pointer"
               >
                 <span
                   className={`w-12 h-12 rounded-full flex items-center justify-center ${
-                    selectedDetail.isDemo
+                    liveDetail.isDemo
                       ? 'bg-[#FF444F] hover:bg-[#E63946] text-white'
                       : 'border border-slate-300 dark:border-white/30 hover:bg-black/5 dark:hover:bg-white/10 text-[#111319] dark:text-white'
                   }`}
@@ -232,7 +288,7 @@ export const CfdsHub: React.FC = () => {
                 <span className="text-xs font-medium">Trade</span>
               </button>
 
-              {selectedDetail.isDemo && (
+              {liveDetail.isDemo && (
                 <button
                   type="button"
                   disabled={resettingDemo}
@@ -311,22 +367,22 @@ export const CfdsHub: React.FC = () => {
                 </div>
                 <div className="flex justify-between py-2 border-b border-white/10">
                   <span className="text-slate-400">Server</span>
-                  <span className="font-mono-num font-semibold">{selectedDetail.server}</span>
+                  <span className="font-mono-num font-semibold">{liveDetail.server}</span>
                 </div>
                 <div className="flex justify-between py-2 border-b border-white/10">
                   <span className="text-slate-400">Login ID</span>
-                  <span className="font-mono-num font-semibold">{selectedDetail.loginId}</span>
+                  <span className="font-mono-num font-semibold">{liveDetail.loginId}</span>
                 </div>
                 <div className="flex justify-between py-2">
                   <span className="text-slate-400">Max Leverage</span>
-                  <span className="font-mono-num font-semibold">{selectedDetail.leverage}</span>
+                  <span className="font-mono-num font-semibold">{liveDetail.leverage}</span>
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => {
                   setDetailsModalOpen(false);
-                  setActiveTab('mt5-tv');
+                  openCfdTrade({ bucket: liveDetail.bucket, accountId: liveDetail.accountId });
                 }}
                 className="w-full mt-5 py-3 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-sm cursor-pointer"
               >
@@ -429,6 +485,26 @@ export const CfdsHub: React.FC = () => {
           },
         ];
 
+  const heroCfdAcc =
+    cfdAccounts.find((a) => getDisplayedCfdCardBalance(a) > 0) ||
+    cfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
+    cfdAccounts[0] ||
+    null;
+
+  const handleOpenHeroTrade = () => {
+    const bucket: CfdBucket = heroCfdAcc
+      ? getCfdAccountBucket(heroCfdAcc)
+      : stdWalletBal > 0
+        ? 'mt5_standard'
+        : goldWalletBal > 0
+          ? 'mt5_gold'
+          : 'mt5_standard';
+    openCfdTrade({
+      bucket,
+      accountId: heroCfdAcc?.id || null,
+    });
+  };
+
   return (
     <div className="max-w-7xl mx-auto">
       {/* Upper Dark Hero Block matching 105311 (Real) & 105321 (Demo) */}
@@ -464,7 +540,7 @@ export const CfdsHub: React.FC = () => {
           <div className="grid grid-cols-2 max-w-md mx-auto lg:mx-0 lg:flex lg:items-center lg:gap-20 mt-6">
             <button
               type="button"
-              onClick={() => setActiveTab('mt5-tv')}
+              onClick={handleOpenHeroTrade}
               className="flex flex-col items-center gap-1.5 cursor-pointer group"
             >
               <span className="w-11 h-11 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] flex items-center justify-center transition-colors">
@@ -488,7 +564,7 @@ export const CfdsHub: React.FC = () => {
           <div className="flex justify-center lg:justify-start mt-6">
             <button
               type="button"
-              onClick={() => setActiveTab('mt5-tv')}
+              onClick={handleOpenHeroTrade}
               className="flex flex-col items-center gap-1.5 cursor-pointer group"
             >
               <span className="w-11 h-11 rounded-full bg-[#FF444F] group-hover:bg-[#E63946] flex items-center justify-center transition-colors">
@@ -507,33 +583,38 @@ export const CfdsHub: React.FC = () => {
           {displayedAccounts.map((acc) => {
             const name = String(acc.account_type || 'CFDs | Standard');
             const lower = name.toLowerCase();
+            const isCTrader = lower.includes('ctrader') || ('platform' in acc && acc.platform === 'ctrader');
             const isGold = lower.includes('gold');
             const isSwf = lower.includes('swap');
             const isZrs = lower.includes('zero');
             const isFin = lower.includes('fin');
-            const badgeCode: SelectedCfdDetail['code'] = isGold
-              ? 'GOLD'
-              : isSwf
-                ? 'SWF'
-                : isZrs
-                  ? 'ZRS'
-                  : isFin
-                    ? 'FIN'
-                    : 'STD';
+            const badgeCode: SelectedCfdDetail['code'] = isCTrader
+              ? 'cT'
+              : isGold
+                ? 'GOLD'
+                : isSwf
+                  ? 'SWF'
+                  : isZrs
+                    ? 'ZRS'
+                    : isFin
+                      ? 'FIN'
+                      : 'STD';
+            const cardBalance = cfdAccounts.length > 0 ? getDisplayedCfdCardBalance(acc) : Number(acc.balance || 0);
+            const isFallbackCard = cfdAccounts.length === 0 && (acc.id === 0 || acc.id === -1 || acc.id === -2);
             return (
               <button
                 key={acc.id}
                 type="button"
                 onClick={() =>
-                  openDetailForAccount(name, badgeCode, Number(acc.balance || 0), acc.deriv_account_id)
+                  openDetailForAccount(name, badgeCode, acc.id, acc.deriv_account_id, isFallbackCard)
                 }
                 className="min-w-[164px] text-left p-3.5 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#1958B7] transition-colors cursor-pointer shrink-0"
               >
                 <div className="mb-3">
-                  <Mt5Badge variant={badgeCode} />
+                  {badgeCode === 'cT' ? <CTraderBadge size="sm" /> : <Mt5Badge variant={badgeCode} />}
                 </div>
                 <p className="text-[13px] font-medium text-[#374151] dark:text-[#E2E6ED] truncate">{name}</p>
-                <div className="mt-1">{renderSplitMoney(Number(acc.balance || 0), false)}</div>
+                <div className="mt-1">{renderSplitMoney(cardBalance, false)}</div>
               </button>
             );
           })}
@@ -620,13 +701,26 @@ export const CfdsHub: React.FC = () => {
         </div>
 
         <div className="flex gap-3 overflow-x-auto no-scrollbar pb-1 lg:grid lg:grid-cols-3">
-          {availableCards.map((item) => (
-            <button
-              key={item.name}
-              type="button"
-              onClick={() => openDetailForAccount(item.name, item.code, 0, `${item.code}-${accountMode.toUpperCase()}`)}
-              className="min-w-[280px] sm:min-w-[300px] lg:min-w-0 text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex items-center justify-between gap-3 cursor-pointer shrink-0"
-            >
+          {availableCards.map((item) => {
+            const existing = cfdAccounts.find(
+              (a) =>
+                a.platform === item.platform ||
+                String(a.account_type || '').toLowerCase().includes(item.name.toLowerCase())
+            );
+            return (
+              <button
+                key={item.name}
+                type="button"
+                onClick={() =>
+                  openDetailForAccount(
+                    item.name,
+                    item.code,
+                    existing?.id || null,
+                    existing?.deriv_account_id || `${item.code}-${accountMode.toUpperCase()}`
+                  )
+                }
+                className="min-w-[280px] sm:min-w-[300px] lg:min-w-0 text-left p-4 rounded-2xl bg-[#F4F5F7] dark:bg-[#181B22] border border-slate-200/80 dark:border-white/[0.06] hover:border-[#FF444F]/50 flex items-center justify-between gap-3 cursor-pointer shrink-0"
+              >
               <div className="min-w-0">
                 <h3 className="font-display text-[15px] font-bold text-[#111319] dark:text-white">{item.name}</h3>
                 <p className="text-[12px] text-[#525866] dark:text-[#9BA3B0] mt-0.5 line-clamp-1">{item.desc}</p>
@@ -635,8 +729,9 @@ export const CfdsHub: React.FC = () => {
                 </span>
               </div>
               {item.badge}
-            </button>
-          ))}
+              </button>
+            );
+          })}
         </div>
       </section>
 

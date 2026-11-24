@@ -13,6 +13,12 @@ import type {
   AnalyserSignalResult,
 } from '../types';
 import { apiFetch, getStoredToken, setStoredToken } from '../lib/api';
+import {
+  getCfdAccountBucket,
+  isCfdConnectedAccount,
+  type CfdBucket,
+  type TradingScope,
+} from '../lib/balances';
 
 export interface TradeLaunchPreset {
   symbol?: string;
@@ -31,6 +37,11 @@ interface AppContextValue {
   accounts: ConnectedAccount[];
   accountMode: 'real' | 'demo';
   setAccountMode: (m: 'real' | 'demo') => void;
+  tradingScope: TradingScope;
+  setTradingScope: (s: TradingScope) => void;
+  activeCfdBucket: CfdBucket;
+  setActiveCfdBucket: (b: CfdBucket) => void;
+  openCfdTrade: (opts?: { bucket?: CfdBucket; accountId?: number | null; symbol?: string }) => void;
   activeConnectedAccount: ConnectedAccount | null;
   setActiveConnectedAccountId: (id: number | null) => void;
   currencyDisplay: 'USD' | 'KSH';
@@ -86,6 +97,8 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [user, setUser] = useState<UserProfile | null>(null);
   const [accounts, setAccounts] = useState<ConnectedAccount[]>([]);
   const [accountMode, setAccountMode] = useState<'real' | 'demo'>('demo');
+  const [tradingScope, setTradingScope] = useState<TradingScope>('options');
+  const [activeCfdBucket, setActiveCfdBucket] = useState<CfdBucket>('mt5_standard');
   const [activeConnectedAccountId, setActiveConnectedAccountId] = useState<number | null>(null);
   const [currencyDisplay, setCurrencyDisplay] = useState<'USD' | 'KSH'>(() => {
     const saved = localStorage.getItem('td_currency_v2');
@@ -97,6 +110,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     return saved === 'light' ? 'light' : 'dark';
   });
   const [activeTab, setActiveTabState] = useState<NavTab>('home');
+  const activeTabRef = useRef<NavTab>('home');
   const [selectedSymbol, setSelectedSymbol] = useState<string>('1HZ100V');
   const [tradePreset, setTradePreset] = useState<TradeLaunchPreset | null>(null);
   const [ticks, setTicks] = useState<Record<string, TickData>>({});
@@ -162,7 +176,34 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       if (t !== 'home') {
         resetHomeTaps();
       }
+      if (t === 'cfds') {
+        setTradingScope('cfd');
+        setActiveConnectedAccountId(null);
+      } else if (!(t === 'mt5-tv' && activeTabRef.current === 'mt5-tv')) {
+        setTradingScope('options');
+        setActiveConnectedAccountId(null);
+      }
+      activeTabRef.current = t;
       setActiveTabState(t);
+      if (typeof window !== 'undefined') {
+        window.scrollTo({ top: 0, behavior: 'auto' });
+      }
+    },
+    [resetLogoTaps, resetHomeTaps]
+  );
+
+  const openCfdTrade = useCallback(
+    (opts?: { bucket?: CfdBucket; accountId?: number | null; symbol?: string }) => {
+      resetLogoTaps();
+      resetHomeTaps();
+      if (opts?.symbol) {
+        setSelectedSymbol(opts.symbol);
+      }
+      setTradingScope('cfd');
+      setActiveCfdBucket(opts?.bucket || 'mt5_standard');
+      setActiveConnectedAccountId(opts?.accountId && opts.accountId > 0 ? opts.accountId : null);
+      activeTabRef.current = 'mt5-tv';
+      setActiveTabState('mt5-tv');
       if (typeof window !== 'undefined') {
         window.scrollTo({ top: 0, behavior: 'auto' });
       }
@@ -351,6 +392,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     setAccounts([]);
     setOrders([]);
     setWorkspacePreferences({});
+    setTradingScope('options');
+    setActiveCfdBucket('mt5_standard');
+    setActiveConnectedAccountId(null);
     setActiveTab('home');
   }, [setActiveTab]);
 
@@ -775,9 +819,35 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     accountMode === 'demo' ? Boolean(a.is_virtual) : !a.is_virtual
   );
   const activeConnectedAccount =
-    modeAccounts.find((a) => a.id === activeConnectedAccountId) ||
-    modeAccounts.find((a) => a.status === 'active') ||
-    null;
+    tradingScope === 'cfd'
+      ? (() => {
+          const cfdModeAccs = modeAccounts.filter(
+            (a) => a.status === 'active' && isCfdConnectedAccount(a)
+          );
+          const byId = activeConnectedAccountId
+            ? cfdModeAccs.find((a) => a.id === activeConnectedAccountId)
+            : undefined;
+          if (byId) return byId;
+          const bucketMatches = cfdModeAccs.filter(
+            (a) => getCfdAccountBucket(a) === activeCfdBucket
+          );
+          const pool = bucketMatches.length > 0 ? bucketMatches : cfdModeAccs;
+          return (
+            pool.find((a) => Number(a.balance || 0) > 0) ||
+            pool.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
+            pool[0] ||
+            null
+          );
+        })()
+      : (() => {
+          const optModeAccs = modeAccounts.filter(
+            (a) => a.status === 'active' && !isCfdConnectedAccount(a)
+          );
+          const byId = activeConnectedAccountId
+            ? optModeAccs.find((a) => a.id === activeConnectedAccountId)
+            : undefined;
+          return byId || optModeAccs[0] || null;
+        })();
 
   const unreadCount = notifications.filter((n) => !n.is_read).length;
 
@@ -789,6 +859,11 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         accounts,
         accountMode,
         setAccountMode,
+        tradingScope,
+        setTradingScope,
+        activeCfdBucket,
+        setActiveCfdBucket,
+        openCfdTrade,
         activeConnectedAccount,
         setActiveConnectedAccountId,
         currencyDisplay,

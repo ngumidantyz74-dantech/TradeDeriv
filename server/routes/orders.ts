@@ -3,12 +3,19 @@ import { pool, query, queryOne, execute, ensureDatabaseSchema, requireDb, addNot
 import { SEEDED_BOT_STRATEGIES } from '../catalog.ts';
 import { derivWs } from '../deriv-client.ts';
 import { requireAuth, type AuthRequest } from '../middleware/auth.ts';
-import { placeUnifiedOrder, closeOrderById, bulkCloseOrders, updateOrderLimits } from '../trade-execution.ts';
+import {
+  placeUnifiedOrder,
+  closeOrderById,
+  bulkCloseOrders,
+  updateOrderLimits,
+  classifyConnectedAccountBucket,
+  type WalletBucket,
+} from '../trade-execution.ts';
 import { startBotSession, stopBotSession, closeAllBotOrders, getBotStatus } from '../bot-engine-service.ts';
 
 const router = Router();
 
-const ORDER_COLS = `id, user_id, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, pnl, sl_usd, tp_usd, sl_price, tp_price, barrier, duration, duration_unit, execution_mode, connected_account_id, account_mode, source, strategy_key, timeframe, notes, deriv_contract_id, status, opened_at, closed_at`;
+const ORDER_COLS = `id, user_id, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, pnl, sl_usd, tp_usd, sl_price, tp_price, barrier, duration, duration_unit, execution_mode, connected_account_id, account_mode, wallet_bucket, source, strategy_key, timeframe, notes, deriv_contract_id, status, opened_at, closed_at`;
 
 const BOT_STRATEGIES_TTL_MS = 5 * 60 * 1000;
 let botStrategiesCache: any[] | null = null;
@@ -86,6 +93,8 @@ async function handleExecuteOrder(req: AuthRequest, res: any) {
       durationUnit: body.durationUnit || 't',
       executionMode: body.executionMode || 'virtual',
       connectedAccountId: body.connectedAccountId ? Number(body.connectedAccountId) : null,
+      walletBucket:
+        body.walletBucket === 'mt5_standard' || body.walletBucket === 'mt5_gold' ? body.walletBucket : 'options',
       source: body.source || 'manual',
       strategyKey: body.strategyKey ? String(body.strategyKey) : '',
       timeframe: body.timeframe ? String(body.timeframe) : '',
@@ -117,17 +126,56 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
     const totalBatchStake = Number((unitStake * count).toFixed(2));
     const acctMode = body.accountMode === 'real' ? 'real' : 'demo';
 
+    const requestedBucket: WalletBucket =
+      body.walletBucket === 'mt5_standard' || body.walletBucket === 'mt5_gold' ? body.walletBucket : 'options';
+    const connectedAccId = body.connectedAccountId ? Number(body.connectedAccountId) : null;
+
     // Pre-warm live Deriv subscription and spot quote so entry and live P/L stream immediately
     await derivWs.ensureSymbolSubscribed(symbol).catch(() => {});
     await derivWs.getLiveQuote(symbol).catch(() => null);
 
     // Upfront batch balance check for wallet/demo modes to avoid half-filled batches
-    if (acctMode === 'demo' && body.executionMode !== 'deriv') {
-      const u = await queryOne<{ virtual_workspace_balance: number }>(
-        'SELECT virtual_workspace_balance FROM users WHERE id = $1',
+    if (acctMode === 'demo' && (requestedBucket !== 'options' || body.executionMode !== 'deriv')) {
+      let effectiveBucket: WalletBucket = requestedBucket;
+      let accBal: number | null = null;
+      if (connectedAccId) {
+        const acc = await queryOne<{
+          account_type: string;
+          platform: string;
+          last_known_balance: number;
+          balance: number;
+          balance_locked_by_admin: boolean;
+        }>(
+          "SELECT account_type, platform, last_known_balance, balance, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin FROM connected_accounts WHERE id = $1 AND user_id = $2 AND is_virtual = TRUE AND status = 'active'",
+          [connectedAccId, req.user!.id]
+        );
+        if (acc) {
+          const derived = classifyConnectedAccountBucket(acc);
+          if (derived !== 'options') effectiveBucket = derived;
+          accBal = Number(acc.last_known_balance ?? acc.balance ?? 0);
+        }
+      }
+
+      const u = await queryOne<{ virtual_workspace_balance: number; demo_wallets_json: string }>(
+        'SELECT virtual_workspace_balance, demo_wallets_json FROM users WHERE id = $1',
         [req.user!.id]
       );
-      if (Number(u?.virtual_workspace_balance ?? 0) < totalBatchStake) {
+      if (effectiveBucket !== 'options') {
+        let dwBal = 0;
+        try {
+          const dw = JSON.parse(u?.demo_wallets_json || '{}');
+          dwBal = Number(dw?.[effectiveBucket] || 0);
+        } catch {
+          dwBal = 0;
+        }
+        const availDemoCfd = accBal !== null && (accBal > 0 || dwBal === 0) ? accBal : dwBal;
+        if (availDemoCfd < totalBatchStake) {
+          res.status(400).json({
+            error: `Insufficient Demo CFD balance ($${availDemoCfd.toFixed(2)}) for ${count}x $${unitStake.toFixed(2)} batch ($${totalBatchStake.toFixed(2)}).`,
+          });
+          return;
+        }
+      } else if (Number(u?.virtual_workspace_balance ?? 0) < totalBatchStake) {
         res.status(400).json({
           error: `Insufficient Demo balance ($${Number(u?.virtual_workspace_balance ?? 0).toFixed(2)}) for ${count}x $${unitStake.toFixed(2)} batch ($${totalBatchStake.toFixed(2)}).`,
         });
@@ -153,7 +201,8 @@ router.post('/orders/bulk', requireDb, requireAuth, async (req: AuthRequest, res
         duration: body.duration !== undefined ? Number(body.duration) : 5,
         durationUnit: body.durationUnit || 't',
         executionMode: body.executionMode || 'virtual',
-        connectedAccountId: body.connectedAccountId ? Number(body.connectedAccountId) : null,
+        connectedAccountId: connectedAccId,
+        walletBucket: requestedBucket,
         accountMode: acctMode,
         strategyKey: body.strategyKey ? String(body.strategyKey) : '',
         timeframe: body.timeframe ? String(body.timeframe) : '',
@@ -244,26 +293,102 @@ router.post('/orders/reset-balance', requireDb, requireAuth, async (req: AuthReq
     res.status(400).json({ error: 'Reset balance is only available for Demo accounts.' });
     return;
   }
+
+  const rawTarget = String(req.body?.target || 'options').toLowerCase();
+  const targetAccountId = req.body?.accountId ? Number(req.body.accountId) : null;
+  const resetBucket: 'options' | 'mt5_standard' | 'mt5_gold' | 'cfd' =
+    rawTarget === 'mt5_standard' || rawTarget === 'mt5_gold' || rawTarget === 'cfd' ? rawTarget : 'options';
+
+  if (resetBucket !== 'options') {
+    const u = await queryOne<{ demo_wallets_json: string }>(
+      'SELECT demo_wallets_json FROM users WHERE id = $1',
+      [req.user!.id]
+    );
+    const dw = (() => {
+      try {
+        return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
+      } catch {
+        return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+      }
+    })();
+
+    const demoCfdAccs = await query<{ id: number; account_type: string; platform: string; last_known_balance: number }>(
+      `SELECT id, account_type, platform, last_known_balance
+       FROM connected_accounts
+       WHERE user_id = $1 AND is_virtual = TRUE AND status = 'active'
+       ORDER BY id ASC`,
+      [req.user!.id]
+    );
+
+    const bucketsToReset: Array<'mt5_standard' | 'mt5_gold'> =
+      resetBucket === 'cfd' ? ['mt5_standard', 'mt5_gold'] : [resetBucket];
+
+    for (const b of bucketsToReset) {
+      const matching = demoCfdAccs.filter((a) => classifyConnectedAccountBucket(a) === b);
+      if (targetAccountId && matching.some((a) => Number(a.id) === targetAccountId)) {
+        await execute(
+          'UPDATE connected_accounts SET balance = 10000.00, last_known_balance = 10000.00, updated_at = NOW() WHERE id = $1 AND user_id = $2',
+          [targetAccountId, req.user!.id]
+        );
+        for (const a of matching) {
+          if (Number(a.id) === targetAccountId) a.last_known_balance = 10000.0;
+        }
+        derivWs.emitUserEvent(req.user!.id, 'account_updated', { accountId: targetAccountId, balance: 10000.0 });
+        dw[b] = Number(matching.reduce((s, a) => s + Number(a.last_known_balance || 0), 0).toFixed(2));
+      } else if (matching.length > 0) {
+        const primary = matching[matching.length - 1];
+        for (const a of matching) {
+          const val = Number(a.id) === Number(primary.id) ? 10000.0 : 0;
+          await execute(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+            [val, a.id]
+          );
+          a.last_known_balance = val;
+          derivWs.emitUserEvent(req.user!.id, 'account_updated', { accountId: a.id, balance: val });
+        }
+        dw[b] = 10000.0;
+      } else {
+        dw[b] = 10000.0;
+      }
+    }
+
+    await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+      JSON.stringify(dw),
+      req.user!.id,
+    ]);
+    derivWs.emitUserEvent(req.user!.id, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
+
+    await addNotification(
+      req.user!.id,
+      'Demo CFD Balance Reset',
+      `Demo ${resetBucket === 'mt5_gold' ? 'CFD Gold / Swap-Free' : 'CFD Standard'} balance reset to $10,000.00 USD. Options & Real balances remain untouched.`,
+      'account'
+    );
+    res.json({ ok: true, demo_wallets: dw, balance: 10000.0 });
+    return;
+  }
+
   await execute(
     `UPDATE users
      SET virtual_workspace_balance = 10000.00,
-         demo_wallets_json = '{"mt5_standard":0,"mt5_gold":0,"exchange_usdt":0}',
          updated_at = NOW()
      WHERE id = $1`,
     [req.user!.id]
   );
   await execute(
     `UPDATE connected_accounts
-     SET balance = CASE WHEN platform = 'deriv' THEN 10000.00 ELSE 0 END,
-         last_known_balance = CASE WHEN platform = 'deriv' THEN 10000.00 ELSE 0 END,
+     SET balance = 10000.00,
+         last_known_balance = 10000.00,
          updated_at = NOW()
-     WHERE user_id = $1 AND is_virtual = TRUE`,
+     WHERE user_id = $1 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)`,
     [req.user!.id]
   );
+  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { virtual_workspace_balance: 10000.0 });
+  derivWs.emitUserEvent(req.user!.id, 'account_updated', { userId: req.user!.id });
   await addNotification(
     req.user!.id,
     'Demo Balance Reset',
-    'Demo Options balance reset to $10,000.00 USD. Real balances remain untouched.',
+    'Demo Options balance reset to $10,000.00 USD. Real & CFD balances remain untouched.',
     'account'
   );
   res.json({ ok: true, virtual_workspace_balance: 10000.0 });

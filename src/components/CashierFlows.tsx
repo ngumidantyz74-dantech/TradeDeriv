@@ -516,6 +516,7 @@ interface TransferTargetItem {
   decimals: number;
   balance: number;
   backendKey: string;
+  accountId?: number | null;
   icon: React.ReactNode;
 }
 
@@ -540,14 +541,19 @@ export const TransferScreen: React.FC<{
   );
 
   const items: TransferTargetItem[] = useMemo(() => {
-    const std2Bal =
-      Number(realCfdAccounts.find((a) => String(a.account_type).includes('Standard 2'))?.balance ?? 0);
-    const std3Bal =
-      Number(realCfdAccounts.find((a) => String(a.account_type).includes('Standard 3'))?.balance ?? canonical.mt5StdBal);
-    const swfBal =
-      Number(realCfdAccounts.find((a) => String(a.account_type).toLowerCase().includes('swap'))?.balance ?? canonical.mt5GoldBal);
-    const ctrBal =
-      Number(realCfdAccounts.find((a) => a.platform === 'ctrader')?.balance ?? 0);
+    const std2Acc = realCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 2'));
+    const std3Acc = realCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3'));
+    const swfAcc = realCfdAccounts.find((a) => String(a.account_type || '').toLowerCase().includes('swap'));
+    const ctrAcc = realCfdAccounts.find(
+      (a) => a.platform === 'ctrader' || String(a.account_type || '').toLowerCase().includes('ctrader')
+    );
+
+    const std2Bal = Number(std2Acc?.balance ?? 0);
+    const std3Bal = Number(
+      std3Acc?.balance ?? (std2Acc ? (std2Bal === 0 ? canonical.mt5StdBal : 0) : canonical.mt5StdBal)
+    );
+    const swfBal = Number(swfAcc?.balance ?? canonical.mt5GoldBal);
+    const ctrBal = Number(ctrAcc?.balance ?? 0);
 
     const spot = user?.real_exchange_balances || {};
     const cryptoWallets: Array<{ code: string; label: string; dec: number }> = [
@@ -573,7 +579,8 @@ export const TransferScreen: React.FC<{
         currency: 'USD',
         decimals: 2,
         balance: std2Bal,
-        backendKey: 'MT5 Standard',
+        backendKey: 'CFDs | Standard 2',
+        accountId: std2Acc?.id ?? null,
         icon: <Mt5Badge variant="STD" size="sm" />,
       },
       {
@@ -583,7 +590,8 @@ export const TransferScreen: React.FC<{
         currency: 'USD',
         decimals: 2,
         balance: std3Bal,
-        backendKey: 'MT5 Standard',
+        backendKey: 'CFDs | Standard 3',
+        accountId: std3Acc?.id ?? null,
         icon: <Mt5Badge variant="STD" size="sm" />,
       },
       {
@@ -593,7 +601,8 @@ export const TransferScreen: React.FC<{
         currency: 'USD',
         decimals: 2,
         balance: swfBal,
-        backendKey: 'MT5 Gold',
+        backendKey: 'Swap-Free',
+        accountId: swfAcc?.id ?? null,
         icon: <Mt5Badge variant="SWF" size="sm" />,
       },
       {
@@ -603,7 +612,8 @@ export const TransferScreen: React.FC<{
         currency: 'USD',
         decimals: 2,
         balance: ctrBal,
-        backendKey: 'MT5 Gold',
+        backendKey: 'cTrader',
+        accountId: ctrAcc?.id ?? null,
         icon: <CTraderBadge size="sm" />,
       },
       {
@@ -671,6 +681,8 @@ export const TransferScreen: React.FC<{
         body: JSON.stringify({
           account_from: fromItem.backendKey,
           account_to: toItem.backendKey,
+          account_from_id: fromItem.accountId ?? null,
+          account_to_id: toItem.accountId ?? null,
           amount: numericAmount,
           currency: 'USD',
           accountMode: 'real',

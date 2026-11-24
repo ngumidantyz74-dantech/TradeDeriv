@@ -17,6 +17,37 @@ function extractDerivOtpWsUrl(otpResp: any): string {
   return `wss://ws.derivws.com/websockets/v3?app_id=${encodeURIComponent(getActiveDerivAppId())}&otp=${encodeURIComponent(raw)}`;
 }
 
+export type WalletBucket = 'options' | 'mt5_standard' | 'mt5_gold';
+
+export function classifyConnectedAccountBucket(
+  acc?: { account_type?: string | null; platform?: string | null } | null
+): WalletBucket {
+  if (!acc) return 'options';
+  const p = String(acc.platform || '').toLowerCase();
+  const t = String(acc.account_type || '').toLowerCase();
+  if (
+    p.includes('gold') ||
+    p.includes('swap') ||
+    p === 'ctrader' ||
+    t.includes('gold') ||
+    t.includes('swap') ||
+    t.includes('ctrader')
+  ) {
+    return 'mt5_gold';
+  }
+  if (
+    p.includes('mt5') ||
+    p.includes('cfd') ||
+    t.includes('cfd') ||
+    t.includes('standard') ||
+    t.includes('zero') ||
+    t.includes('fin')
+  ) {
+    return 'mt5_standard';
+  }
+  return 'options';
+}
+
 export interface PlaceOrderInput {
   userId: number;
   symbol: string;
@@ -34,6 +65,7 @@ export interface PlaceOrderInput {
   durationUnit?: string;
   executionMode?: 'virtual' | 'deriv';
   connectedAccountId?: number | null;
+  walletBucket?: WalletBucket;
   source?: 'manual' | 'bot' | 'bulk';
   strategyKey?: string;
   timeframe?: string;
@@ -127,7 +159,7 @@ export async function getDecryptedAccountToken(
 }
 
 const ORDER_SELECT_COLS =
-  'id, user_id, connected_account_id, deriv_contract_id, execution_mode, source, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, sl_price, tp_price, sl_usd, tp_usd, barrier, duration, duration_unit, payout, pnl, status, strategy_key, timeframe, account_mode, notes, opened_at, closed_at';
+  'id, user_id, connected_account_id, deriv_contract_id, execution_mode, source, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, sl_price, tp_price, sl_usd, tp_usd, barrier, duration, duration_unit, payout, pnl, status, strategy_key, timeframe, account_mode, wallet_bucket, notes, opened_at, closed_at';
 
 async function checkUserRiskLimits(userId: number, stake: number, source: string): Promise<void> {
   if (source === 'bulk') return;
@@ -231,7 +263,11 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     trading_suspended: boolean;
     virtual_workspace_balance: number;
     real_wallets_json: string;
-  }>('SELECT id, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended, virtual_workspace_balance, real_wallets_json FROM users WHERE id = $1', [input.userId]);
+    demo_wallets_json: string;
+  }>(
+    'SELECT id, role, status, COALESCE(trading_suspended, FALSE) as trading_suspended, virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
+    [input.userId]
+  );
   if (!user) throw new Error('User not found');
   if (user.role === 'owner' || user.role === 'admin') {
     throw new Error('Owner / Admin MIS accounts are for administration only, not trading.');
@@ -322,22 +358,51 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
     }
   })();
+  const userDemoWallets = (() => {
+    try {
+      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(user.demo_wallets_json || '{}') };
+    } catch {
+      return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+    }
+  })();
 
-  if (explicitDeriv || input.connectedAccountId) {
-    const requestedAcc = input.connectedAccountId
-      ? await queryOne<{ id: number; is_virtual: boolean; balance_locked_by_admin: boolean; last_known_balance: number }>(
-          "SELECT id, is_virtual, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin, last_known_balance FROM connected_accounts WHERE id = $1 AND user_id = $2 AND status = 'active'",
-          [input.connectedAccountId, input.userId]
-        )
-      : await queryOne<{ id: number; is_virtual: boolean; balance_locked_by_admin: boolean; last_known_balance: number }>(
-          "SELECT id, is_virtual, COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = $2 AND status = 'active' ORDER BY id ASC LIMIT 1",
-          [input.userId, targetIsVirtual]
-        );
+  const requestedBucket: WalletBucket =
+    input.walletBucket === 'mt5_standard' || input.walletBucket === 'mt5_gold' ? input.walletBucket : 'options';
 
-    const matchingAcc = requestedAcc && Boolean(requestedAcc.is_virtual) === targetIsVirtual ? requestedAcc : null;
-    const targetAccId = matchingAcc?.id;
-    resolvedConnectedAccountId = targetAccId || null;
+  const modeAccounts = await query<{
+    id: number;
+    is_virtual: boolean;
+    account_type: string;
+    platform: string;
+    balance: number;
+    last_known_balance: number;
+    balance_locked_by_admin: boolean;
+  }>(
+    `SELECT id, is_virtual, account_type, platform, balance, last_known_balance,
+            COALESCE(balance_locked_by_admin, FALSE) as balance_locked_by_admin
+     FROM connected_accounts
+     WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
+     ORDER BY id ASC`,
+    [input.userId, targetIsVirtual]
+  );
 
+  const requestedAcc = input.connectedAccountId
+    ? modeAccounts.find((a) => Number(a.id) === Number(input.connectedAccountId)) || null
+    : requestedBucket === 'options'
+      ? modeAccounts.find((a) => a.platform === 'deriv' || !a.platform) || null
+      : modeAccounts
+          .filter((a) => classifyConnectedAccountBucket(a) === requestedBucket)
+          .sort((a, b) => Number(b.last_known_balance ?? b.balance ?? 0) - Number(a.last_known_balance ?? a.balance ?? 0))[0] ||
+        null;
+
+  const matchingAcc = requestedAcc && Boolean(requestedAcc.is_virtual) === targetIsVirtual ? requestedAcc : null;
+  const targetAccId = matchingAcc?.id;
+  resolvedConnectedAccountId = targetAccId || null;
+
+  const accDerivedBucket = matchingAcc ? classifyConnectedAccountBucket(matchingAcc) : 'options';
+  const effectiveBucket: WalletBucket = accDerivedBucket !== 'options' ? accDerivedBucket : requestedBucket;
+
+  if (effectiveBucket === 'options' && (explicitDeriv || input.connectedAccountId)) {
     // If Admin funded/locked this Real account OR DB Real wallet funds are used with siteSettlementForLockedReal enabled,
     // settle atomically on the local Real balance ledger rather than blocking when upstream Deriv account has $0.
     const adminFundedReal =
@@ -534,7 +599,80 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   }
 
   if (actualMode === 'virtual') {
-    if (accountMode === 'real') {
+    if (effectiveBucket !== 'options') {
+      const bucketLabel = effectiveBucket === 'mt5_gold' ? 'CFDs Gold / Swap-Free' : 'CFDs Standard';
+      const bucketAccs = modeAccounts.filter((a) => classifyConnectedAccountBucket(a) === effectiveBucket);
+      if (accountMode === 'real') {
+        const rw = { ...userRealWallets };
+        const accBal = matchingAcc ? Number(matchingAcc.last_known_balance ?? matchingAcc.balance ?? 0) : 0;
+        const useAccBal =
+          matchingAcc && (accBal > 0 || Boolean(matchingAcc.balance_locked_by_admin) || Number(rw[effectiveBucket] || 0) === 0);
+        const availCfd = useAccBal ? accBal : Number(rw[effectiveBucket] || 0);
+        if (availCfd < stake) {
+          throw new Error(
+            `Insufficient Real ${bucketLabel} balance ($${availCfd.toFixed(2)} available, $${stake.toFixed(2)} required). Transfer funds to your Real CFD account.`
+          );
+        }
+        const nextAccBal = Number((availCfd - stake).toFixed(2));
+        if (matchingAcc) {
+          await execute(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+            [nextAccBal, matchingAcc.id]
+          );
+          matchingAcc.last_known_balance = nextAccBal;
+          matchingAcc.balance = nextAccBal;
+          derivWs.emitUserEvent(input.userId, 'account_updated', {
+            accountId: matchingAcc.id,
+            balance: nextAccBal,
+          });
+          rw[effectiveBucket] = Number(
+            bucketAccs.reduce((sum, a) => sum + Number(a.last_known_balance ?? a.balance ?? 0), 0).toFixed(2)
+          );
+        } else {
+          rw[effectiveBucket] = nextAccBal;
+        }
+        await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+          JSON.stringify(rw),
+          input.userId,
+        ]);
+        derivWs.emitUserEvent(input.userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
+      } else {
+        accountMode = 'demo';
+        const dw = { ...userDemoWallets };
+        const accBal = matchingAcc ? Number(matchingAcc.last_known_balance ?? matchingAcc.balance ?? 0) : 0;
+        const useAccBal =
+          matchingAcc && (accBal > 0 || Boolean(matchingAcc.balance_locked_by_admin) || Number(dw[effectiveBucket] || 0) === 0);
+        const availDemoCfd = useAccBal ? accBal : Number(dw[effectiveBucket] || 0);
+        if (availDemoCfd < stake) {
+          throw new Error(
+            `Insufficient Demo ${bucketLabel} balance ($${availDemoCfd.toFixed(2)} available, $${stake.toFixed(2)} required). Reset your Demo CFD balance in CFDs Hub.`
+          );
+        }
+        const nextAccBal = Number((availDemoCfd - stake).toFixed(2));
+        if (matchingAcc) {
+          await execute(
+            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+            [nextAccBal, matchingAcc.id]
+          );
+          matchingAcc.last_known_balance = nextAccBal;
+          matchingAcc.balance = nextAccBal;
+          derivWs.emitUserEvent(input.userId, 'account_updated', {
+            accountId: matchingAcc.id,
+            balance: nextAccBal,
+          });
+          dw[effectiveBucket] = Number(
+            bucketAccs.reduce((sum, a) => sum + Number(a.last_known_balance ?? a.balance ?? 0), 0).toFixed(2)
+          );
+        } else {
+          dw[effectiveBucket] = nextAccBal;
+        }
+        await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+          JSON.stringify(dw),
+          input.userId,
+        ]);
+        derivWs.emitUserEvent(input.userId, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
+      }
+    } else if (accountMode === 'real') {
       const rw = { ...userRealWallets };
       const realAccRow = resolvedConnectedAccountId
         ? await queryOne<{ id: number; last_known_balance: number; balance_locked_by_admin: boolean }>(
@@ -599,8 +737,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       symbol, side, contract_type, lots, stake, multiplier,
       entry_price, current_price, sl_price, tp_price, sl_usd, tp_usd,
       barrier, duration, duration_unit, payout, pnl, status,
-      strategy_key, timeframe, account_mode, notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN', $23, $24, $25, $26)
+      strategy_key, timeframe, account_mode, wallet_bucket, notes
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN', $23, $24, $25, $26, $27)
     RETURNING ${ORDER_SELECT_COLS}`,
     [
       input.userId,
@@ -628,6 +766,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       input.strategyKey || '',
       input.timeframe || '',
       accountMode,
+      effectiveBucket,
       storedNotes,
     ]
   );
@@ -720,9 +859,110 @@ export async function creditSettledPayoutToUser(
   userId: number,
   accountMode: string,
   creditAmount: number,
-  connectedAccountId?: number | null
+  connectedAccountId?: number | null,
+  walletBucket?: string | null
 ): Promise<void> {
   if (creditAmount <= 0) return;
+
+  let effectiveBucket: WalletBucket =
+    walletBucket === 'mt5_standard' || walletBucket === 'mt5_gold' ? walletBucket : 'options';
+
+  const isVirtual = accountMode !== 'real';
+  const modeAccounts = await query<{
+    id: number;
+    account_type: string;
+    platform: string;
+    last_known_balance: number;
+  }>(
+    `SELECT id, account_type, platform, last_known_balance
+     FROM connected_accounts
+     WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
+     ORDER BY id ASC`,
+    [userId, isVirtual]
+  );
+
+  let targetAcc = connectedAccountId
+    ? modeAccounts.find((a) => Number(a.id) === Number(connectedAccountId)) || null
+    : null;
+  if (!walletBucket && targetAcc) {
+    effectiveBucket = classifyConnectedAccountBucket(targetAcc);
+  }
+
+  if (effectiveBucket !== 'options') {
+    const bucketAccs = modeAccounts.filter((a) => classifyConnectedAccountBucket(a) === effectiveBucket);
+    if (!targetAcc) {
+      targetAcc =
+        bucketAccs.sort((a, b) => Number(b.last_known_balance || 0) - Number(a.last_known_balance || 0))[0] || null;
+    }
+
+    if (accountMode === 'real') {
+      const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
+        userId,
+      ]);
+      const rw = (() => {
+        try {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+        } catch {
+          return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+
+      if (targetAcc) {
+        const nextAccBal = Number((Number(targetAcc.last_known_balance || 0) + creditAmount).toFixed(2));
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+          [nextAccBal, targetAcc.id]
+        );
+        targetAcc.last_known_balance = nextAccBal;
+        derivWs.emitUserEvent(userId, 'account_updated', { accountId: targetAcc.id, balance: nextAccBal });
+        rw[effectiveBucket] = Number(
+          bucketAccs.reduce((sum, a) => sum + Number(a.last_known_balance || 0), 0).toFixed(2)
+        );
+      } else {
+        rw[effectiveBucket] = Number((Number(rw[effectiveBucket] || 0) + creditAmount).toFixed(2));
+      }
+
+      await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(rw),
+        userId,
+      ]);
+      derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
+    } else {
+      const u = await queryOne<{ demo_wallets_json: string }>('SELECT demo_wallets_json FROM users WHERE id = $1', [
+        userId,
+      ]);
+      const dw = (() => {
+        try {
+          return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
+        } catch {
+          return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+        }
+      })();
+
+      if (targetAcc) {
+        const nextAccBal = Number((Number(targetAcc.last_known_balance || 0) + creditAmount).toFixed(2));
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+          [nextAccBal, targetAcc.id]
+        );
+        targetAcc.last_known_balance = nextAccBal;
+        derivWs.emitUserEvent(userId, 'account_updated', { accountId: targetAcc.id, balance: nextAccBal });
+        dw[effectiveBucket] = Number(
+          bucketAccs.reduce((sum, a) => sum + Number(a.last_known_balance || 0), 0).toFixed(2)
+        );
+      } else {
+        dw[effectiveBucket] = Number((Number(dw[effectiveBucket] || 0) + creditAmount).toFixed(2));
+      }
+
+      await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+        JSON.stringify(dw),
+        userId,
+      ]);
+      derivWs.emitUserEvent(userId, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
+    }
+    return;
+  }
+
   if (accountMode === 'real') {
     const u = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
       userId,
@@ -740,9 +980,9 @@ export async function creditSettledPayoutToUser(
       userId,
     ]);
     const realAcc = connectedAccountId
-      ? await queryOne<{ id: number }>('SELECT id FROM connected_accounts WHERE id = $1 AND is_virtual = FALSE', [connectedAccountId])
+      ? await queryOne<{ id: number }>("SELECT id FROM connected_accounts WHERE id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)", [connectedAccountId])
       : await queryOne<{ id: number }>(
-          "SELECT id FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND platform = 'deriv' AND status = 'active' ORDER BY id ASC LIMIT 1",
+          "SELECT id FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL) AND status = 'active' ORDER BY id ASC LIMIT 1",
           [userId]
         );
     if (realAcc) {
@@ -816,7 +1056,13 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
     [exitPrice, payout, pnl, order.id]
   );
 
-  await creditSettledPayoutToUser(order.user_id, order.account_mode, payout, order.connected_account_id);
+  await creditSettledPayoutToUser(
+    order.user_id,
+    order.account_mode,
+    payout,
+    order.connected_account_id,
+    order.wallet_bucket
+  );
 
   untrackOpenMtmOrder(order.id);
   derivWs.emitUserEvent(order.user_id, 'order_closed', closedOrder);
@@ -903,14 +1149,26 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
       pnl = Math.max(currentPnl, accrued);
     }
     const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
-    await creditSettledPayoutToUser(order.user_id, order.account_mode, credit, order.connected_account_id);
+    await creditSettledPayoutToUser(
+      order.user_id,
+      order.account_mode,
+      credit,
+      order.connected_account_id,
+      order.wallet_bucket
+    );
   } else {
     const isUp = ['MULTUP', 'CALL', 'BUY', 'DIGITOVER'].includes(order.contract_type);
     const pctDiff = (exitPrice - order.entry_price) / (order.entry_price || 1);
     const directional = isUp ? pctDiff : -pctDiff;
     pnl = Number(Math.max(-order.stake, directional * order.stake * order.multiplier).toFixed(2));
     const credit = Math.max(0, Number((order.stake + pnl).toFixed(2)));
-    await creditSettledPayoutToUser(order.user_id, order.account_mode, credit, order.connected_account_id);
+    await creditSettledPayoutToUser(
+      order.user_id,
+      order.account_mode,
+      credit,
+      order.connected_account_id,
+      order.wallet_bucket
+    );
   }
 
   const closedOrder = await queryOne<any>(

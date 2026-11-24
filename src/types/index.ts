@@ -132,6 +132,7 @@ export interface OrderRecord {
   strategy_key?: string;
   timeframe?: string;
   account_mode?: 'real' | 'demo';
+  wallet_bucket?: 'options' | 'mt5_standard' | 'mt5_gold';
   notes?: string;
 }
 

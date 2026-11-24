@@ -134,6 +134,8 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
     user,
     accounts,
     activeConnectedAccount,
+    tradingScope,
+    activeCfdBucket,
     activeTab,
     setActiveTab,
     accountMode,
@@ -160,7 +162,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
   const [searchOpen, setSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
 
-  const canonical = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount);
+  const canonical = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount, tradingScope, activeCfdBucket);
 
   const initials = (user?.full_name || user?.email || 'DR')
     .split(/\s+/)
@@ -302,7 +304,9 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
               <span className={accountMode === 'real' ? 'text-[#00A878]' : 'text-amber-400'}>
                 {accountMode === 'real' ? 'Real' : 'Demo'}
               </span>
-              <span className="font-mono-num">{formatMoney(canonical.activeTradingBalance, { hideable: true })}</span>
+              <span className="font-mono-num">
+                {formatMoney(activeTab === 'cfds' ? canonical.cfdsTotalBal : canonical.activeTradingBalance, { hideable: true })}
+              </span>
             </div>
 
             <div className="flex items-center bg-[#F4F5F7] dark:bg-[#1D202A] p-1 rounded-full">

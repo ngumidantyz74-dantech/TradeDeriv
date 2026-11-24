@@ -19,8 +19,10 @@ function parseJsonObj<T>(raw: string | null | undefined, fallback: T): T {
 
 function normalizeWalletBucket(label: string): WalletBucket {
   const s = String(label || '').trim().toLowerCase();
-  if (s.includes('gold')) return 'mt5_gold';
-  if (s.includes('standard') || s.includes('mt5')) return 'mt5_standard';
+  if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
+  if (s.includes('standard') || s.includes('mt5') || s.includes('zero') || s.includes('fin') || s.includes('cfd')) {
+    return 'mt5_standard';
+  }
   if (s.includes('exchange') || s.includes('dxn') || s.includes('usdt')) return 'exchange_usdt';
   return 'options';
 }
@@ -253,7 +255,17 @@ router.post('/cashier/deposit', requireDb, requireAuth, async (req: AuthRequest,
     ]
   );
 
-  derivWs.emitUserEvent(req.user!.id, 'balance_updated', { mode, amount: amt });
+  const freshUser = await queryOne<any>(
+    'SELECT virtual_workspace_balance, real_wallets_json, demo_wallets_json FROM users WHERE id = $1',
+    [req.user!.id]
+  );
+  derivWs.emitUserEvent(req.user!.id, 'balance_updated', {
+    mode,
+    amount: amt,
+    virtual_workspace_balance: freshUser?.virtual_workspace_balance,
+    real_wallets: parseJsonObj(freshUser?.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+    demo_wallets: parseJsonObj(freshUser?.demo_wallets_json, { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 }),
+  });
   await addNotification(
     req.user!.id,
     'Deposit Processed',
@@ -383,6 +395,8 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
   const {
     account_from = 'USD Wallet',
     account_to = 'MT5 Standard',
+    account_from_id = null,
+    account_to_id = null,
     amount,
     currency = 'USD',
     accountMode = 'demo',
@@ -391,8 +405,11 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
   const mode: ModeKey = accountMode === 'real' ? 'real' : 'demo';
   const fromBucket = normalizeWalletBucket(account_from);
   const toBucket = normalizeWalletBucket(account_to);
+  const fromAccId = account_from_id ? Number(account_from_id) : null;
+  const toAccId = account_to_id ? Number(account_to_id) : null;
+  const isDistinctAccountIdTransfer = Boolean(fromAccId && toAccId && fromAccId !== toAccId);
 
-  if (fromBucket === toBucket) {
+  if (fromBucket === toBucket && !isDistinctAccountIdTransfer) {
     res.status(400).json({ error: 'Source and destination wallets must be different' });
     return;
   }
@@ -462,20 +479,39 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     );
     const modeAccounts = accRes.rows;
 
-    const findMatchingConnectedAccount = (bucket: WalletBucket) => {
-      if (bucket === 'options') return modeAccounts.find((a) => a.platform === 'deriv');
-      if (bucket === 'mt5_gold') {
-        return modeAccounts.find((a) => String(a.platform || '').includes('gold') || String(a.account_type || '').toLowerCase().includes('gold'));
+    const accBucketOf = (a: any): WalletBucket => {
+      const p = String(a.platform || '').toLowerCase();
+      const t = String(a.account_type || '').toLowerCase();
+      if (p.includes('gold') || p.includes('swap') || p === 'ctrader' || t.includes('gold') || t.includes('swap') || t.includes('ctrader')) {
+        return 'mt5_gold';
       }
-      if (bucket === 'mt5_standard') {
-        return modeAccounts.find(
-          (a) =>
-            String(a.platform || '').startsWith('mt5') &&
-            !String(a.platform || '').includes('gold') &&
-            !String(a.account_type || '').toLowerCase().includes('gold')
-        );
+      if (p.includes('mt5') || p.includes('cfd') || t.includes('cfd') || t.includes('standard') || t.includes('zero') || t.includes('fin')) {
+        return 'mt5_standard';
       }
-      return null;
+      return 'options';
+    };
+
+    const findMatchingConnectedAccount = (bucket: WalletBucket, preferredId?: number | null, labelHint?: string) => {
+      if (preferredId) {
+        const byId = modeAccounts.find((a) => Number(a.id) === preferredId);
+        if (byId) return byId;
+      }
+      if (bucket === 'options') return modeAccounts.find((a) => a.platform === 'deriv' || !a.platform);
+      const candidates = modeAccounts.filter((a) => accBucketOf(a) === bucket);
+      if (candidates.length === 0) return null;
+      const hint = String(labelHint || '').toLowerCase();
+      if (hint) {
+        const byHint = candidates.find((a) => {
+          const t = String(a.account_type || '').toLowerCase();
+          return t === hint || t.includes(hint) || hint.includes(t);
+        });
+        if (byHint) return byHint;
+      }
+      return (
+        candidates.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
+        candidates.find((a) => Number(a.last_known_balance ?? 0) > 0) ||
+        candidates[candidates.length - 1]
+      );
     };
 
     const rw = parseJsonObj(user.real_wallets_json, { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 });
@@ -483,23 +519,30 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     const dex = parseJsonObj(user.exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
     const rex = parseJsonObj(user.real_exchange_balances_json, { USDT: 0, USDC: 0, BTC: 0, ETH: 0 });
 
-    const realOptionsAcc = findMatchingConnectedAccount('options');
+    const fromMatchedAcc = findMatchingConnectedAccount(fromBucket, fromAccId, account_from);
+    const toMatchedAcc = findMatchingConnectedAccount(toBucket, toAccId, account_to);
 
-    const getBucketBalance = (bucket: WalletBucket): number => {
+    const getBucketBalance = (bucket: WalletBucket, matchedAcc?: any): number => {
       if (mode === 'real') {
         if (bucket === 'options') {
-          return realOptionsAcc ? Number(realOptionsAcc.last_known_balance ?? 0) : Number(rw.options ?? 0);
+          return matchedAcc ? Number(matchedAcc.last_known_balance ?? 0) : Number(rw.options ?? 0);
         }
         if (bucket === 'exchange_usdt') return Number(rex.USDT ?? rw.exchange_usdt ?? 0);
+        if (matchedAcc && (Number(matchedAcc.last_known_balance ?? 0) > 0 || isDistinctAccountIdTransfer || Number(rw[bucket] ?? 0) === 0)) {
+          return Number(matchedAcc.last_known_balance ?? 0);
+        }
         return Number(rw[bucket] ?? 0);
       } else {
         if (bucket === 'options') return Number(user.virtual_workspace_balance ?? 0);
         if (bucket === 'exchange_usdt') return Number(dex.USDT ?? dw.exchange_usdt ?? 0);
+        if (matchedAcc && (Number(matchedAcc.last_known_balance ?? 0) > 0 || isDistinctAccountIdTransfer || Number(dw[bucket] ?? 0) === 0)) {
+          return Number(matchedAcc.last_known_balance ?? 0);
+        }
         return Number(dw[bucket] ?? 0);
       }
     };
 
-    const sourceBal = getBucketBalance(fromBucket);
+    const sourceBal = getBucketBalance(fromBucket, fromMatchedAcc);
     if (sourceBal + 1e-9 < amt) {
       await client.query('ROLLBACK');
       res.status(400).json({
@@ -509,50 +552,61 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
     }
 
     const nextSourceBal = Number(Math.max(0, sourceBal - amt).toFixed(2));
-    const nextDestBal = Number((getBucketBalance(toBucket) + amt).toFixed(2));
+    const nextDestBal = Number((getBucketBalance(toBucket, toMatchedAcc) + amt).toFixed(2));
 
-    const applyBucketUpdate = async (bucket: WalletBucket, nextVal: number) => {
+    const applyBucketUpdate = async (bucket: WalletBucket, nextVal: number, matchedAcc: any) => {
       if (mode === 'real') {
-        rw[bucket] = nextVal;
-        if (bucket === 'exchange_usdt') {
-          rex.USDT = nextVal;
-        }
-        const matchedAcc = findMatchingConnectedAccount(bucket);
         if (matchedAcc) {
           await client.query(
             'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
             [nextVal, matchedAcc.id]
           );
           matchedAcc.last_known_balance = nextVal;
+          const bucketAccs = modeAccounts.filter((a) => accBucketOf(a) === bucket);
+          rw[bucket] =
+            bucketAccs.length > 0 && (bucket === 'mt5_standard' || bucket === 'mt5_gold')
+              ? Number(bucketAccs.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2))
+              : nextVal;
+        } else {
+          rw[bucket] = nextVal;
+        }
+        if (bucket === 'exchange_usdt') {
+          rex.USDT = nextVal;
         }
       } else {
         if (bucket === 'options') {
           user.virtual_workspace_balance = nextVal;
-          const demoOptAcc = findMatchingConnectedAccount('options');
-          if (demoOptAcc) {
-            await client.query(
-              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-              [nextVal, demoOptAcc.id]
-            );
-          }
-        } else {
-          dw[bucket] = nextVal;
-          if (bucket === 'exchange_usdt') {
-            dex.USDT = nextVal;
-          }
-          const matchedAcc = findMatchingConnectedAccount(bucket);
           if (matchedAcc) {
             await client.query(
               'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
               [nextVal, matchedAcc.id]
             );
+            matchedAcc.last_known_balance = nextVal;
+          }
+        } else {
+          if (matchedAcc) {
+            await client.query(
+              'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+              [nextVal, matchedAcc.id]
+            );
+            matchedAcc.last_known_balance = nextVal;
+            const bucketAccs = modeAccounts.filter((a) => accBucketOf(a) === bucket);
+            dw[bucket] =
+              bucketAccs.length > 0 && (bucket === 'mt5_standard' || bucket === 'mt5_gold')
+                ? Number(bucketAccs.reduce((s, a) => s + Number(a.last_known_balance ?? 0), 0).toFixed(2))
+                : nextVal;
+          } else {
+            dw[bucket] = nextVal;
+          }
+          if (bucket === 'exchange_usdt') {
+            dex.USDT = nextVal;
           }
         }
       }
     };
 
-    await applyBucketUpdate(fromBucket, nextSourceBal);
-    await applyBucketUpdate(toBucket, nextDestBal);
+    await applyBucketUpdate(fromBucket, nextSourceBal, fromMatchedAcc);
+    await applyBucketUpdate(toBucket, nextDestBal, toMatchedAcc);
 
     if (mode === 'real') {
       await client.query(
@@ -571,7 +625,7 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
       `INSERT INTO cashier_transactions (user_id, tx_type, method, provider, account_from, account_to, amount, currency, reference_id, status, account_mode)
        VALUES ($1, 'transfer', 'Internal Platform Transfer', 'deriv', $2, $3, $4, $5, $6, 'completed', $7)
        RETURNING ${CASHIER_TX_COLS}`,
-      [req.user!.id, bucketDisplayName(fromBucket), bucketDisplayName(toBucket), amt, currency, ref, mode]
+      [req.user!.id, account_from || bucketDisplayName(fromBucket), account_to || bucketDisplayName(toBucket), amt, currency, ref, mode]
     );
 
     await client.query('COMMIT');
@@ -580,10 +634,13 @@ router.post('/cashier/transfer', requireDb, requireAuth, async (req: AuthRequest
       mode,
       from: fromBucket,
       to: toBucket,
+      real_wallets: rw,
       realWallets: rw,
+      demo_wallets: dw,
       demoWallets: dw,
       virtual_workspace_balance: user.virtual_workspace_balance,
     });
+    derivWs.emitUserEvent(req.user!.id, 'account_updated', { userId: req.user!.id });
 
     await addNotification(
       req.user!.id,

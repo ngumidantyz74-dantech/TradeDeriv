@@ -1240,6 +1240,52 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
       const prevBal = fromCents(currentCents);
       const nextBal = fromCents(nextCents);
 
+      const classifyBucket = (a: { account_type?: string | null; platform?: string | null }) => {
+        const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+        if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
+        if (s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')) return 'mt5_standard';
+        return 'options';
+      };
+
+      const syncBucketConnectedAccounts = async (isVirt: boolean, targetBucket: string, targetBal: number) => {
+        if (targetBucket !== 'mt5_standard' && targetBucket !== 'mt5_gold') return;
+        const accRes = await client.query<{ id: number; account_type: string; platform: string; last_known_balance: number }>(
+          `SELECT id, account_type, platform, last_known_balance
+           FROM connected_accounts
+           WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
+           ORDER BY id ASC`,
+          [targetUserId, isVirt]
+        );
+        const matching = accRes.rows.filter((a) => classifyBucket(a) === targetBucket);
+        if (matching.length === 0) return;
+        const primary =
+          matching.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
+          matching.find((a) => Number(a.last_known_balance || 0) > 0) ||
+          matching[matching.length - 1];
+        const othersSum = matching
+          .filter((a) => Number(a.id) !== Number(primary.id))
+          .reduce((s, a) => s + Number(a.last_known_balance || 0), 0);
+        if (targetBal >= othersSum) {
+          const nextPrimary = fromCents(toCents(targetBal - othersSum));
+          await client.query(
+            `UPDATE connected_accounts
+             SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+             WHERE id = $2`,
+            [nextPrimary, primary.id]
+          );
+        } else {
+          for (const a of matching) {
+            const val = Number(a.id) === Number(primary.id) ? targetBal : 0;
+            await client.query(
+              `UPDATE connected_accounts
+               SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+               WHERE id = $2`,
+              [val, a.id]
+            );
+          }
+        }
+      };
+
       if (mode === 'demo') {
         if (bucket === 'options') {
           await client.query(
@@ -1249,7 +1295,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
           await client.query(
             `UPDATE connected_accounts
              SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-             WHERE user_id = $2 AND is_virtual = TRUE AND platform = 'deriv'`,
+             WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)`,
             [nextBal, targetUserId]
           );
         } else {
@@ -1258,6 +1304,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
             'UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2',
             [JSON.stringify(dw), targetUserId]
           );
+          await syncBucketConnectedAccounts(true, bucket, nextBal);
         }
       } else {
         rw[bucket] = nextBal;
@@ -1269,9 +1316,11 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
           await client.query(
             `UPDATE connected_accounts
              SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-             WHERE user_id = $2 AND is_virtual = FALSE AND platform = 'deriv'`,
+             WHERE user_id = $2 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)`,
             [nextBal, targetUserId]
           );
+        } else {
+          await syncBucketConnectedAccounts(false, bucket, nextBal);
         }
       }
 
@@ -1325,6 +1374,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
       derivWs.emitUserEvent(targetUserId, 'balance_updated', {
         virtual_workspace_balance: result.bucket === 'options' ? result.nextBal : undefined,
         demo_wallets: result.dw,
+        demoWallets: result.dw,
       });
     } else {
       derivWs.emitUserEvent(targetUserId, 'balance_updated', {
@@ -1332,6 +1382,7 @@ router.post('/admin/balances/adjust', requireDb, requireAdmin, requirePermission
         realWallets: result.rw,
       });
     }
+    derivWs.emitUserEvent(targetUserId, 'account_updated', { userId: targetUserId });
     invalidateAuthUserCache(targetUserId);
 
     res.json({ ok: true, adjustment: result });
@@ -1494,12 +1545,56 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
       );
       const updated = updatedRes.rows[0];
 
+      const classifyAdminAccBucket = (a: { account_type?: string | null; platform?: string | null }) => {
+        const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+        if (s.includes('gold') || s.includes('swap') || s.includes('ctrader')) return 'mt5_gold';
+        if (s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')) return 'mt5_standard';
+        return 'options';
+      };
+      const syncCfdWalletToConnected = async (isVirt: boolean, bucket: 'mt5_standard' | 'mt5_gold', targetBal: number) => {
+        const accRes = await client.query<{ id: number; account_type: string; platform: string; last_known_balance: number }>(
+          `SELECT id, account_type, platform, last_known_balance
+           FROM connected_accounts
+           WHERE user_id = $1 AND is_virtual = $2 AND status = 'active'
+           ORDER BY id ASC`,
+          [id, isVirt]
+        );
+        const matching = accRes.rows.filter((a) => classifyAdminAccBucket(a) === bucket);
+        if (matching.length === 0) return;
+        const primary =
+          matching.find((a) => String(a.account_type || '').toLowerCase().includes('standard 3')) ||
+          matching.find((a) => Number(a.last_known_balance || 0) > 0) ||
+          matching[matching.length - 1];
+        const othersSum = matching
+          .filter((a) => Number(a.id) !== Number(primary.id))
+          .reduce((s, a) => s + Number(a.last_known_balance || 0), 0);
+        if (targetBal >= othersSum) {
+          const nextPrimary = fromCents(toCents(targetBal - othersSum));
+          await client.query(
+            `UPDATE connected_accounts
+             SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+             WHERE id = $2`,
+            [nextPrimary, primary.id]
+          );
+        } else {
+          for (const a of matching) {
+            const val = Number(a.id) === Number(primary.id) ? targetBal : 0;
+            await client.query(
+              `UPDATE connected_accounts
+               SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
+               WHERE id = $2`,
+              [val, a.id]
+            );
+          }
+        }
+      };
+
       if (nextDemoBal !== null) {
         const deltaCents = toCents(nextDemoBal) - toCents(existing.virtual_workspace_balance);
         await client.query(
           `UPDATE connected_accounts
            SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-           WHERE user_id = $2 AND is_virtual = TRUE`,
+           WHERE user_id = $2 AND is_virtual = TRUE AND (platform = 'deriv' OR platform IS NULL)`,
           [nextDemoBal, id]
         );
         if (deltaCents !== 0) {
@@ -1520,6 +1615,15 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
         }
       }
 
+      if (parsedDemoWallets) {
+        if (parsedDemoWallets.mt5_standard !== undefined) {
+          await syncCfdWalletToConnected(true, 'mt5_standard', fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_standard))));
+        }
+        if (parsedDemoWallets.mt5_gold !== undefined) {
+          await syncCfdWalletToConnected(true, 'mt5_gold', fromCents(Math.max(0, toCents(parsedDemoWallets.mt5_gold))));
+        }
+      }
+
       if (parsedRealWallets) {
         const prevRw = (() => {
           try {
@@ -1533,9 +1637,15 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
         await client.query(
           `UPDATE connected_accounts
            SET balance = $1, last_known_balance = $1, balance_locked_by_admin = TRUE, updated_at = NOW()
-           WHERE user_id = $2 AND is_virtual = FALSE AND platform = 'deriv'`,
+           WHERE user_id = $2 AND is_virtual = FALSE AND (platform = 'deriv' OR platform IS NULL)`,
           [rwOptions, id]
         );
+        if (parsedRealWallets.mt5_standard !== undefined) {
+          await syncCfdWalletToConnected(false, 'mt5_standard', fromCents(Math.max(0, toCents(parsedRealWallets.mt5_standard))));
+        }
+        if (parsedRealWallets.mt5_gold !== undefined) {
+          await syncCfdWalletToConnected(false, 'mt5_gold', fromCents(Math.max(0, toCents(parsedRealWallets.mt5_gold))));
+        }
         if (realDeltaCents !== 0) {
           await client.query(
             `INSERT INTO cashier_transactions
@@ -1576,6 +1686,9 @@ router.patch('/admin/users/:id', requireDb, requireAdmin, requirePermission('use
 
     if (nextDemoBal !== null) {
       derivWs.emitUserEvent(id, 'balance_updated', { virtual_workspace_balance: nextDemoBal });
+    }
+    if (parsedDemoWallets) {
+      derivWs.emitUserEvent(id, 'balance_updated', { demo_wallets: parsedDemoWallets, demoWallets: parsedDemoWallets });
     }
     if (parsedRealWallets) {
       derivWs.emitUserEvent(id, 'balance_updated', { real_wallets: parsedRealWallets, realWallets: parsedRealWallets });
@@ -1933,11 +2046,57 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
       );
       const updated = accRes.rows[0];
 
+      const accTypeLow = `${updated.account_type || ''} ${updated.platform || ''}`.toLowerCase();
+      const accBucket: 'options' | 'mt5_standard' | 'mt5_gold' =
+        accTypeLow.includes('gold') || accTypeLow.includes('swap') || accTypeLow.includes('ctrader')
+          ? 'mt5_gold'
+          : accTypeLow.includes('mt5') || accTypeLow.includes('cfd') || accTypeLow.includes('standard') || accTypeLow.includes('zero') || accTypeLow.includes('fin')
+            ? 'mt5_standard'
+            : 'options';
+
       if (updated.is_virtual) {
-        await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-          balance,
-          updated.user_id,
-        ]);
+        if (accBucket === 'options') {
+          await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+            balance,
+            updated.user_id,
+          ]);
+        } else {
+          const allModeAccs = await client.query<{ account_type: string; platform: string; last_known_balance: number }>(
+            `SELECT account_type, platform, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND status = 'active'`,
+            [updated.user_id]
+          );
+          const bucketSum = Number(
+            allModeAccs.rows
+              .filter((a) => {
+                const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+                const b =
+                  s.includes('gold') || s.includes('swap') || s.includes('ctrader')
+                    ? 'mt5_gold'
+                    : s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')
+                      ? 'mt5_standard'
+                      : 'options';
+                return b === accBucket;
+              })
+              .reduce((s, a) => s + Number(a.last_known_balance || 0), 0)
+              .toFixed(2)
+          );
+          const uRes = await client.query<{ demo_wallets_json: string }>(
+            'SELECT demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+            [updated.user_id]
+          );
+          const dw = (() => {
+            try {
+              return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(uRes.rows[0]?.demo_wallets_json || '{}') };
+            } catch {
+              return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          dw[accBucket] = bucketSum;
+          await client.query('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(dw),
+            updated.user_id,
+          ]);
+        }
       } else {
         const uRes = await client.query<{ real_wallets_json: string }>(
           'SELECT real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
@@ -1950,10 +2109,29 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
             return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
           }
         })();
-        const accTypeLow = `${updated.account_type || ''} ${updated.platform || ''}`.toLowerCase();
-        if (accTypeLow.includes('gold')) rw.mt5_gold = balance;
-        else if (accTypeLow.includes('mt5') || accTypeLow.includes('cfd') || accTypeLow.includes('standard')) rw.mt5_standard = balance;
-        else rw.options = balance;
+        if (accBucket === 'options') {
+          rw.options = balance;
+        } else {
+          const allModeAccs = await client.query<{ account_type: string; platform: string; last_known_balance: number }>(
+            `SELECT account_type, platform, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND status = 'active'`,
+            [updated.user_id]
+          );
+          rw[accBucket] = Number(
+            allModeAccs.rows
+              .filter((a) => {
+                const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+                const b =
+                  s.includes('gold') || s.includes('swap') || s.includes('ctrader')
+                    ? 'mt5_gold'
+                    : s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')
+                      ? 'mt5_standard'
+                      : 'options';
+                return b === accBucket;
+              })
+              .reduce((s, a) => s + Number(a.last_known_balance || 0), 0)
+              .toFixed(2)
+          );
+        }
 
         await client.query('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
           JSON.stringify(rw),
@@ -1996,7 +2174,24 @@ router.patch('/admin/connected-accounts/:id/balance', requireDb, requireAdmin, r
     });
 
     if (account.is_virtual) {
-      derivWs.emitUserEvent(account.user_id, 'balance_updated', { virtual_workspace_balance: balance });
+      const uRow = await queryOne<{ virtual_workspace_balance: number; demo_wallets_json: string }>(
+        'SELECT virtual_workspace_balance, demo_wallets_json FROM users WHERE id = $1',
+        [account.user_id]
+      );
+      if (uRow) {
+        try {
+          const dw = JSON.parse(uRow.demo_wallets_json || '{}');
+          derivWs.emitUserEvent(account.user_id, 'balance_updated', {
+            virtual_workspace_balance: uRow.virtual_workspace_balance,
+            demo_wallets: dw,
+            demoWallets: dw,
+          });
+        } catch {
+          derivWs.emitUserEvent(account.user_id, 'balance_updated', {
+            virtual_workspace_balance: uRow.virtual_workspace_balance,
+          });
+        }
+      }
     } else {
       const uRow = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
         account.user_id,
@@ -2069,11 +2264,57 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePe
 
     if (nextBal !== null) {
       const deltaCents = toCents(nextBal) - toCents(prevBal);
+      const accTypeLow = `${acc.account_type || ''} ${acc.platform || ''}`.toLowerCase();
+      const accBucket: 'options' | 'mt5_standard' | 'mt5_gold' =
+        accTypeLow.includes('gold') || accTypeLow.includes('swap') || accTypeLow.includes('ctrader')
+          ? 'mt5_gold'
+          : accTypeLow.includes('mt5') || accTypeLow.includes('cfd') || accTypeLow.includes('standard') || accTypeLow.includes('zero') || accTypeLow.includes('fin')
+            ? 'mt5_standard'
+            : 'options';
+
       if (acc.is_virtual) {
-        await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
-          nextBal,
-          acc.user_id,
-        ]);
+        if (accBucket === 'options') {
+          await client.query('UPDATE users SET virtual_workspace_balance = $1, updated_at = NOW() WHERE id = $2', [
+            nextBal,
+            acc.user_id,
+          ]);
+        } else {
+          const allModeAccs = await client.query<{ account_type: string; platform: string; last_known_balance: number }>(
+            `SELECT account_type, platform, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = TRUE AND status = 'active'`,
+            [acc.user_id]
+          );
+          const bucketSum = Number(
+            allModeAccs.rows
+              .filter((a) => {
+                const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+                const b =
+                  s.includes('gold') || s.includes('swap') || s.includes('ctrader')
+                    ? 'mt5_gold'
+                    : s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')
+                      ? 'mt5_standard'
+                      : 'options';
+                return b === accBucket;
+              })
+              .reduce((s, a) => s + Number(a.last_known_balance || 0), 0)
+              .toFixed(2)
+          );
+          const uRes = await client.query<{ demo_wallets_json: string }>(
+            'SELECT demo_wallets_json FROM users WHERE id = $1 FOR UPDATE',
+            [acc.user_id]
+          );
+          const dw = (() => {
+            try {
+              return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(uRes.rows[0]?.demo_wallets_json || '{}') };
+            } catch {
+              return { mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          dw[accBucket] = bucketSum;
+          await client.query('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(dw),
+            acc.user_id,
+          ]);
+        }
       } else {
         const uRes = await client.query<{ real_wallets_json: string }>(
           'SELECT real_wallets_json FROM users WHERE id = $1 FOR UPDATE',
@@ -2086,10 +2327,29 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePe
             return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
           }
         })();
-        const accTypeLow = `${acc.account_type || ''} ${acc.platform || ''}`.toLowerCase();
-        if (accTypeLow.includes('gold')) rw.mt5_gold = nextBal;
-        else if (accTypeLow.includes('mt5') || accTypeLow.includes('cfd') || accTypeLow.includes('standard')) rw.mt5_standard = nextBal;
-        else rw.options = nextBal;
+        if (accBucket === 'options') {
+          rw.options = nextBal;
+        } else {
+          const allModeAccs = await client.query<{ account_type: string; platform: string; last_known_balance: number }>(
+            `SELECT account_type, platform, last_known_balance FROM connected_accounts WHERE user_id = $1 AND is_virtual = FALSE AND status = 'active'`,
+            [acc.user_id]
+          );
+          rw[accBucket] = Number(
+            allModeAccs.rows
+              .filter((a) => {
+                const s = `${a.account_type || ''} ${a.platform || ''}`.toLowerCase();
+                const b =
+                  s.includes('gold') || s.includes('swap') || s.includes('ctrader')
+                    ? 'mt5_gold'
+                    : s.includes('mt5') || s.includes('cfd') || s.includes('standard') || s.includes('zero') || s.includes('fin')
+                      ? 'mt5_standard'
+                      : 'options';
+                return b === accBucket;
+              })
+              .reduce((s, a) => s + Number(a.last_known_balance || 0), 0)
+              .toFixed(2)
+          );
+        }
 
         await client.query('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
           JSON.stringify(rw),
@@ -2137,7 +2397,24 @@ router.patch('/admin/connected-accounts/:id', requireDb, requireAdmin, requirePe
 
   if (nextBal !== null && updated) {
     if (updated.is_virtual) {
-      derivWs.emitUserEvent(updated.user_id, 'balance_updated', { virtual_workspace_balance: nextBal });
+      const uRow = await queryOne<{ virtual_workspace_balance: number; demo_wallets_json: string }>(
+        'SELECT virtual_workspace_balance, demo_wallets_json FROM users WHERE id = $1',
+        [updated.user_id]
+      );
+      if (uRow) {
+        try {
+          const dw = JSON.parse(uRow.demo_wallets_json || '{}');
+          derivWs.emitUserEvent(updated.user_id, 'balance_updated', {
+            virtual_workspace_balance: uRow.virtual_workspace_balance,
+            demo_wallets: dw,
+            demoWallets: dw,
+          });
+        } catch {
+          derivWs.emitUserEvent(updated.user_id, 'balance_updated', {
+            virtual_workspace_balance: uRow.virtual_workspace_balance,
+          });
+        }
+      }
     } else {
       const uRow = await queryOne<{ real_wallets_json: string }>('SELECT real_wallets_json FROM users WHERE id = $1', [
         updated.user_id,
