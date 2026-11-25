@@ -571,6 +571,230 @@ export const DxnCandlesGraphic: React.FC = () => (
   </div>
 );
 
+type ContractSvgRenderer = (className: string) => React.ReactNode;
+
+const renderMatchesDiffersSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line x1="10" y1="2.2" x2="10" y2="6.2" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="10" y1="13.8" x2="10" y2="17.8" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="2.2" y1="10" x2="6.2" y2="10" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="13.8" y1="10" x2="17.8" y2="10" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="4.5" y1="4.5" x2="7.3" y2="7.3" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="12.7" y1="12.7" x2="15.5" y2="15.5" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="15.5" y1="4.5" x2="12.7" y2="7.3" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+    <line x1="7.3" y1="12.7" x2="4.5" y2="15.5" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
+  </svg>
+);
+
+const renderEvenOddSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#00A79D" />
+    <rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
+    <rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
+    <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#00A79D" />
+  </svg>
+);
+
+const renderOverSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line
+      x1="2.5"
+      y1="13"
+      x2="16.8"
+      y2="13"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+    />
+    <path
+      d="M4 15.8L15.2 4.6M10 4.6H15.2V9.8"
+      stroke="#FF444F"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderUnderSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line
+      x1="2.5"
+      y1="7"
+      x2="16.8"
+      y2="7"
+      strokeWidth="1.9"
+      strokeLinecap="round"
+      className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+    />
+    <path
+      d="M4 4.2L15.2 15.4M10 15.4H15.2V10.2"
+      stroke="#FF444F"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderHigherSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line
+      x1="2.5"
+      y1="14.5"
+      x2="17.5"
+      y2="14.5"
+      strokeWidth="1.8"
+      strokeDasharray="2.5 2"
+      strokeLinecap="round"
+      className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+    />
+    <path
+      d="M4.5 11.2L14.8 3.8M10 3.8H14.8V8.6"
+      stroke="#FF444F"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderLowerSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line
+      x1="2.5"
+      y1="5.5"
+      x2="17.5"
+      y2="5.5"
+      strokeWidth="1.8"
+      strokeDasharray="2.5 2"
+      strokeLinecap="round"
+      className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+    />
+    <path
+      d="M4.5 8.8L14.8 16.2M10 16.2H14.8V11.4"
+      stroke="#FF444F"
+      strokeWidth="2.1"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderTouchSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line
+      x1="2.5"
+      y1="6"
+      x2="17.5"
+      y2="6"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+    />
+    <path
+      d="M4 15.5L11.5 6.5L16 10.5"
+      stroke="#FF444F"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+    <circle cx="11.5" cy="6.2" r="2" fill="#FF444F" />
+  </svg>
+);
+
+const renderNoTouchSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line
+      x1="2.5"
+      y1="6"
+      x2="17.5"
+      y2="6"
+      strokeWidth="1.8"
+      strokeLinecap="round"
+      className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
+    />
+    <path
+      d="M4 15.5L10 10.5L16 14"
+      stroke="#FF444F"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderRiseSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <path
+      d="M4.5 15L15 5M9.5 5H15V10.5"
+      stroke="#FF444F"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderFallSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <path
+      d="M4.5 5L15 15M15 9.5V15H9.5"
+      stroke="#FF444F"
+      strokeWidth="2.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+const renderAccuSvg: ContractSvgRenderer = (className) => (
+  <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
+    <line x1="3" y1="5" x2="17" y2="5" stroke="#00B5C8" strokeWidth="1.9" strokeLinecap="round" />
+    <line x1="3" y1="15" x2="17" y2="15" stroke="#00B5C8" strokeWidth="1.9" strokeLinecap="round" />
+    <path
+      d="M4 11.2L7.5 8.5L11.5 11.8L16 7.8"
+      stroke="#FF444F"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    />
+  </svg>
+);
+
+export const CONTRACT_TYPE_SVG_MAP: Record<string, ContractSvgRenderer> = {
+  RISE: renderRiseSvg,
+  CALL: renderRiseSvg,
+  CALLE: renderRiseSvg,
+  BUY: renderRiseSvg,
+  MULTUP: renderRiseSvg,
+  FALL: renderFallSvg,
+  PUT: renderFallSvg,
+  PUTE: renderFallSvg,
+  SELL: renderFallSvg,
+  MULTDOWN: renderFallSvg,
+  MATCHES: renderMatchesDiffersSvg,
+  MATCH: renderMatchesDiffersSvg,
+  DIGITMATCH: renderMatchesDiffersSvg,
+  DIFFERS: renderMatchesDiffersSvg,
+  DIFF: renderMatchesDiffersSvg,
+  DIGITDIFF: renderMatchesDiffersSvg,
+  EVEN: renderEvenOddSvg,
+  DIGITEVEN: renderEvenOddSvg,
+  ODD: renderEvenOddSvg,
+  DIGITODD: renderEvenOddSvg,
+  OVER: renderOverSvg,
+  DIGITOVER: renderOverSvg,
+  UNDER: renderUnderSvg,
+  DIGITUNDER: renderUnderSvg,
+  HIGHER: renderHigherSvg,
+  LOWER: renderLowerSvg,
+  TOUCH: renderTouchSvg,
+  ONETOUCH: renderTouchSvg,
+  NOTOUCH: renderNoTouchSvg,
+  ACCU: renderAccuSvg,
+};
+
 export const BotContractTypeIcon: React.FC<{
   contractType?: string | null;
   side?: string | null;
@@ -579,209 +803,22 @@ export const BotContractTypeIcon: React.FC<{
 }> = ({ contractType, side, barrier, className = 'w-4 h-4 shrink-0' }) => {
   const ct = String(contractType || '').toUpperCase().trim();
   const s = String(side || '').toUpperCase().trim();
-  const u = ct || s;
+  const rawKey = ct || s;
   const barrierStr = barrier !== undefined && barrier !== null ? String(barrier).trim() : '';
   const isPriceBarrier = /^[+-]\d+(\.\d+)?$/.test(barrierStr) || /^\d+\.\d+$/.test(barrierStr);
 
-  // Matches / Differs: 8-spoke red radial starburst
-  if (u === 'DIGITMATCH' || u === 'DIGITDIFF' || u === 'MATCH' || u === 'DIFF') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line x1="10" y1="2.2" x2="10" y2="6.2" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="10" y1="13.8" x2="10" y2="17.8" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="2.2" y1="10" x2="6.2" y2="10" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="13.8" y1="10" x2="17.8" y2="10" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="4.5" y1="4.5" x2="7.3" y2="7.3" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="12.7" y1="12.7" x2="15.5" y2="15.5" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="15.5" y1="4.5" x2="12.7" y2="7.3" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-        <line x1="7.3" y1="12.7" x2="4.5" y2="15.5" stroke="#FF444F" strokeWidth="2.1" strokeLinecap="round" />
-      </svg>
-    );
+  let resolvedKey = rawKey;
+  if (s === 'HIGHER' || ((rawKey === 'CALL' || rawKey === 'CALLE') && isPriceBarrier)) {
+    resolvedKey = 'HIGHER';
+  } else if (s === 'LOWER' || ((rawKey === 'PUT' || rawKey === 'PUTE') && isPriceBarrier)) {
+    resolvedKey = 'LOWER';
   }
 
-  // Even / Odd: 2x2 rounded grid (top-left & bottom-right teal #00A79D, top-right & bottom-left red #FF444F)
-  if (u === 'DIGITEVEN' || u === 'DIGITODD' || u === 'EVEN' || u === 'ODD') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#00A79D" />
-        <rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
-        <rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
-        <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#00A79D" />
-      </svg>
-    );
+  const renderer = CONTRACT_TYPE_SVG_MAP[resolvedKey];
+  if (renderer) {
+    return <>{renderer(className)}</>;
   }
 
-  // Over: solid grey horizontal threshold bar across lower third crossed by red diagonal up-right arrow
-  if (u === 'DIGITOVER' || u === 'OVER') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line
-          x1="2.5"
-          y1="13"
-          x2="16.8"
-          y2="13"
-          strokeWidth="1.9"
-          strokeLinecap="round"
-          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
-        />
-        <path
-          d="M4 15.8L15.2 4.6M10 4.6H15.2V9.8"
-          stroke="#FF444F"
-          strokeWidth="2.1"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Under: solid grey horizontal threshold bar across upper third crossed by red diagonal down-right arrow
-  if (u === 'DIGITUNDER' || u === 'UNDER') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line
-          x1="2.5"
-          y1="7"
-          x2="16.8"
-          y2="7"
-          strokeWidth="1.9"
-          strokeLinecap="round"
-          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
-        />
-        <path
-          d="M4 4.2L15.2 15.4M10 15.4H15.2V10.2"
-          stroke="#FF444F"
-          strokeWidth="2.1"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Higher: dashed barrier line with red upward arrow above
-  if (u === 'HIGHER' || s === 'HIGHER' || ((u === 'CALL' || u === 'CALLE') && isPriceBarrier)) {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line
-          x1="2.5"
-          y1="14.5"
-          x2="17.5"
-          y2="14.5"
-          strokeWidth="1.8"
-          strokeDasharray="2.5 2"
-          strokeLinecap="round"
-          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
-        />
-        <path
-          d="M4.5 11.2L14.8 3.8M10 3.8H14.8V8.6"
-          stroke="#FF444F"
-          strokeWidth="2.1"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Lower: dashed barrier line with red downward arrow below
-  if (u === 'LOWER' || s === 'LOWER' || ((u === 'PUT' || u === 'PUTE') && isPriceBarrier)) {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line
-          x1="2.5"
-          y1="5.5"
-          x2="17.5"
-          y2="5.5"
-          strokeWidth="1.8"
-          strokeDasharray="2.5 2"
-          strokeLinecap="round"
-          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
-        />
-        <path
-          d="M4.5 8.8L14.8 16.2M10 16.2H14.8V11.4"
-          stroke="#FF444F"
-          strokeWidth="2.1"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Touch / No Touch
-  if (u === 'ONETOUCH' || u === 'TOUCH' || u === 'NOTOUCH') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line
-          x1="2.5"
-          y1="6"
-          x2="17.5"
-          y2="6"
-          strokeWidth="1.8"
-          strokeLinecap="round"
-          className="stroke-[#4A4D57] dark:stroke-[#CBD5E1]"
-        />
-        <path
-          d={u === 'NOTOUCH' ? 'M4 15.5L10 10.5L16 14' : 'M4 15.5L11.5 6.5L16 10.5'}
-          stroke="#FF444F"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-        {u !== 'NOTOUCH' && <circle cx="11.5" cy="6.2" r="2" fill="#FF444F" />}
-      </svg>
-    );
-  }
-
-  // Fall: clean red diagonal down-right arrow (no baseline)
-  if (u === 'PUT' || u === 'PUTE' || u === 'FALL' || u === 'MULTDOWN') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <path
-          d="M4.5 5L15 15M15 9.5V15H9.5"
-          stroke="#FF444F"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Rise: clean red diagonal up-right arrow (no baseline)
-  if (u === 'CALL' || u === 'CALLE' || u === 'RISE' || u === 'MULTUP') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <path
-          d="M4.5 15L15 5M9.5 5H15V10.5"
-          stroke="#FF444F"
-          strokeWidth="2.2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Accumulators: bounded growth wave
-  if (u === 'ACCU') {
-    return (
-      <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <line x1="3" y1="5" x2="17" y2="5" stroke="#00B5C8" strokeWidth="1.9" strokeLinecap="round" />
-        <line x1="3" y1="15" x2="17" y2="15" stroke="#00B5C8" strokeWidth="1.9" strokeLinecap="round" />
-        <path
-          d="M4 11.2L7.5 8.5L11.5 11.8L16 7.8"
-          stroke="#FF444F"
-          strokeWidth="2"
-          strokeLinecap="round"
-          strokeLinejoin="round"
-        />
-      </svg>
-    );
-  }
-
-  // Neutral fallback icon for unknown/unrecognized contract types
   return (
     <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
       <circle cx="10" cy="10" r="6.5" stroke="#94A3B8" strokeWidth="1.8" />
@@ -789,5 +826,25 @@ export const BotContractTypeIcon: React.FC<{
     </svg>
   );
 };
+
+export const TradeTypeCell: React.FC<{
+  symbol?: string | null;
+  contractType?: string | null;
+  side?: string | null;
+  barrier?: string | number | null;
+  size?: 'sm' | 'md';
+  iconClassName?: string;
+}> = ({ symbol, contractType, side, barrier, size = 'sm', iconClassName = 'w-4 h-4 shrink-0' }) => (
+  <div className="inline-flex items-center gap-2 shrink-0">
+    <BotInstrumentIcon symbol={symbol} size={size} />
+    <BotContractTypeIcon
+      contractType={contractType}
+      side={side}
+      barrier={barrier}
+      className={iconClassName}
+    />
+  </div>
+);
+
 
 

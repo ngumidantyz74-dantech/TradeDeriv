@@ -580,6 +580,20 @@ async function runSchemaAndSeed(): Promise<void> {
 
       CREATE INDEX IF NOT EXISTS idx_quantum_predictions_user_time
         ON quantum_predictions (user_id, generated_at DESC);
+
+      CREATE TABLE IF NOT EXISTS email_verification_codes (
+        id SERIAL PRIMARY KEY,
+        email TEXT NOT NULL,
+        code_hash TEXT NOT NULL,
+        purpose TEXT NOT NULL DEFAULT 'signup',
+        attempts INTEGER NOT NULL DEFAULT 0,
+        expires_at TIMESTAMPTZ NOT NULL,
+        verified_at TIMESTAMPTZ,
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_email_verif_codes_lookup
+        ON email_verification_codes (email, purpose, created_at DESC);
     `);
 
     // Idempotent column migrations for pre-existing tables
@@ -622,6 +636,8 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS ownership_verification_status TEXT NOT NULL DEFAULT 'pending_verification';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code TEXT NOT NULL DEFAULT '';
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_code TEXT NOT NULL DEFAULT '';
     `);
 
     // Backfill separated main_usd / options keys on existing users without overwriting existing wallet buckets

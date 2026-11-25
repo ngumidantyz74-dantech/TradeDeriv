@@ -24,6 +24,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch, sanitizeUiError } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { DepositSheet } from '../components/CashierFlows';
+import { TradeTypeCell } from '../components/DerivBadges';
 import type { CandleData } from '../types';
 
 type TradeGroupId = 'risefall' | 'highlow' | 'touchnotouch' | 'matchesdiffers' | 'evenodd' | 'overunder' | 'accumulators';
@@ -900,6 +901,7 @@ export const SmartTraderPage: React.FC = () => {
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
+                  <th className="text-left px-4 py-2.5 font-medium">Type</th>
                   <th className="text-left px-4 py-2.5 font-medium">Instrument</th>
                   <th className="text-left px-4 py-2.5 font-medium">Contract</th>
                   <th className="text-right px-4 py-2.5 font-medium">Stake</th>
@@ -914,6 +916,15 @@ export const SmartTraderPage: React.FC = () => {
                   const win = live.pnl >= 0;
                   return (
                     <tr key={o.id}>
+                      <td className="px-4 py-2.5">
+                        <TradeTypeCell
+                          symbol={o.symbol}
+                          contractType={o.contract_type}
+                          side={o.side}
+                          barrier={o.barrier}
+                          size="sm"
+                        />
+                      </td>
                       <td className="px-4 py-2.5 font-semibold">{o.symbol}</td>
                       <td className="px-4 py-2.5 font-mono">
                         {o.contract_type}

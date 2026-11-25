@@ -46,7 +46,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances, computeLiveOrderMetrics } from '../lib/balances';
 import { DepositSheet } from '../components/CashierFlows';
-import { BotInstrumentIcon, BotContractTypeIcon } from '../components/DerivBadges';
+import { BotInstrumentIcon, BotContractTypeIcon, TradeTypeCell } from '../components/DerivBadges';
 import { BotBlocklyCanvas } from '../components/BotBlocklyCanvas';
 import {
   createDefaultXmlWorkspaceState,
@@ -1637,15 +1637,13 @@ export const BotBuilderPage: React.FC = () => {
                             />
                           )}
                           <div className="grid grid-cols-3 items-center px-4 py-2.5 text-[11px]">
-                            <div className="flex items-center gap-2">
-                              <BotInstrumentIcon symbol={o.symbol} size="sm" />
-                              <BotContractTypeIcon
-                                contractType={o.contract_type}
-                                side={o.side}
-                                barrier={o.barrier}
-                                className="w-4 h-4 shrink-0"
-                              />
-                            </div>
+                            <TradeTypeCell
+                              symbol={o.symbol}
+                              contractType={o.contract_type}
+                              side={o.side}
+                              barrier={o.barrier}
+                              size="sm"
+                            />
 
                             <div className="flex flex-col items-center font-mono-num tabular-nums space-y-0.5">
                               <div className="flex items-center gap-2">
@@ -1861,15 +1859,13 @@ export const BotBuilderPage: React.FC = () => {
                     key={o.id}
                     className="bg-white dark:bg-[#181C25] rounded-xl border border-slate-200/80 dark:border-white/[0.08] p-4 space-y-3 text-[12px]"
                   >
-                    <div className="flex items-center gap-2.5">
-                      <BotInstrumentIcon symbol={o.symbol} size="sm" />
-                      <BotContractTypeIcon
-                        contractType={o.contract_type}
-                        side={o.side}
-                        barrier={o.barrier}
-                        className="w-4 h-4 shrink-0"
-                      />
-                    </div>
+                    <TradeTypeCell
+                      symbol={o.symbol}
+                      contractType={o.contract_type}
+                      side={o.side}
+                      barrier={o.barrier}
+                      size="sm"
+                    />
                     <div>
                       <p className="font-bold text-[#111319] dark:text-white text-[11px]">Ref. ID</p>
                       <p className="font-mono-num text-[#525866] dark:text-slate-300 mt-0.5">{refId}</p>

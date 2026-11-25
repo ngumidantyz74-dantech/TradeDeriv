@@ -26,6 +26,7 @@ import { useApp } from '../context/AppContext';
 import { apiFetch } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
 import { LightweightEquityChart } from '../components/LightweightEquityChart';
+import { TradeTypeCell } from '../components/DerivBadges';
 import type { JournalEntry, SmartAlert } from '../types';
 
 // 1. Risk Management Centre (Calculator + Server Guardrails)
@@ -1169,6 +1170,7 @@ export const ReportsPage: React.FC = () => {
                 <thead>
                   <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
                     <th className="text-left px-4 py-3">ID</th>
+                    <th className="text-left px-4 py-3">Type</th>
                     <th className="text-left px-4 py-3">Symbol</th>
                     <th className="text-left px-4 py-3">Side / Source</th>
                     <th className="text-right px-4 py-3">Stake</th>
@@ -1181,6 +1183,15 @@ export const ReportsPage: React.FC = () => {
                   {orders.map((o) => (
                     <tr key={o.id}>
                       <td className="px-4 py-3 font-mono tabular-nums">#{o.id}</td>
+                      <td className="px-4 py-3">
+                        <TradeTypeCell
+                          symbol={o.symbol}
+                          contractType={o.contract_type}
+                          side={o.side}
+                          barrier={o.barrier}
+                          size="sm"
+                        />
+                      </td>
                       <td className="px-4 py-3 font-semibold">{o.symbol}</td>
                       <td className="px-4 py-3">
                         {o.side} <span className="text-slate-400">({o.strategy_key || o.source})</span>

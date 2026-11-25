@@ -1,3 +1,5 @@
+import crypto from 'node:crypto';
+import jwt from 'jsonwebtoken';
 import { Router } from 'express';
 import { query, queryOne, execute, requireDb, addNotification, logSecurityEvent, getSetting } from '../db.ts';
 import { config } from '../config.ts';
@@ -9,6 +11,31 @@ import { derivWs } from '../deriv-client.ts';
 import { bindClientToVerifiedRequestDevice } from '../rbac-device.ts';
 
 const router = Router();
+
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+function hashEmailOtp(email: string, code: string, purpose: string): string {
+  return crypto
+    .createHmac('sha256', config.jwtSecret)
+    .update(`${email.trim().toLowerCase()}:${purpose}:${code.trim()}`)
+    .digest('hex');
+}
+
+function safeEqualHex(a: string, b: string): boolean {
+  const bufA = Buffer.from(a, 'utf8');
+  const bufB = Buffer.from(b, 'utf8');
+  if (bufA.length !== bufB.length) return false;
+  return crypto.timingSafeEqual(bufA, bufB);
+}
+
+function escapeEmailHtml(raw: unknown): string {
+  return String(raw ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
 
 router.use((_req, res, next) => {
   res.setHeader('Cache-Control', 'no-store, no-cache, must-revalidate, proxy-revalidate');
@@ -91,6 +118,187 @@ async function getPrimaryTokenForUser(userId: number): Promise<string | null> {
   }
 }
 
+router.post('/auth/send-verification-code', requireDb, async (req, res) => {
+  try {
+    const rawEmail = String(req.body?.email || '').trim().toLowerCase();
+    const purpose = req.body?.purpose === 'password_reset' ? 'password_reset' : 'signup';
+
+    if (!EMAIL_RE.test(rawEmail)) {
+      res.status(400).json({ error: 'Enter a valid email address' });
+      return;
+    }
+
+    if (purpose === 'signup') {
+      const globalSettings = await getSetting<{ allowRegistration?: boolean }>('global', {});
+      if (globalSettings.allowRegistration === false) {
+        res.status(403).json({ error: 'New registrations are currently paused' });
+        return;
+      }
+      const existing = await queryOne<{ id: number }>('SELECT id FROM users WHERE email = $1', [rawEmail]);
+      if (existing) {
+        res.status(409).json({ error: 'An account with this email already exists. Please log in.' });
+        return;
+      }
+    } else {
+      const existing = await queryOne<{ id: number }>('SELECT id FROM users WHERE email = $1', [rawEmail]);
+      if (!existing) {
+        if (!config.brevoApiKey) {
+          res.status(503).json({
+            error: 'Email verification via Brevo is not configured on the server yet (BREVO_API_KEY required).',
+            code: 'BREVO_NOT_CONFIGURED',
+          });
+          return;
+        }
+        res.json({
+          ok: true,
+          message: 'If an account matches this email, a 6-digit verification code has been sent',
+          expiresInSeconds: 600,
+          cooldownSeconds: 60,
+        });
+        return;
+      }
+    }
+
+    const recent = await queryOne<{ id: number; created_at: string }>(
+      `SELECT id, created_at FROM email_verification_codes
+       WHERE email = $1 AND purpose = $2
+       ORDER BY created_at DESC LIMIT 1`,
+      [rawEmail, purpose]
+    );
+    if (recent) {
+      const elapsedSec = Math.floor((Date.now() - new Date(recent.created_at).getTime()) / 1000);
+      if (elapsedSec < 45) {
+        const waitSec = Math.max(1, 45 - elapsedSec);
+        res.status(429).json({
+          error: `Please wait ${waitSec}s before requesting a new code.`,
+          retryAfterSeconds: waitSec,
+        });
+        return;
+      }
+    }
+
+    const code = String(crypto.randomInt(100000, 1000000));
+    const codeHash = hashEmailOtp(rawEmail, code, purpose);
+
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO email_verification_codes (email, code_hash, purpose, expires_at)
+       VALUES ($1, $2, $3, NOW() + INTERVAL '10 minutes')
+       RETURNING id`,
+      [rawEmail, codeHash, purpose]
+    );
+
+    const subject =
+      purpose === 'password_reset'
+        ? 'Your Deriv password reset verification code'
+        : 'Verify your Deriv email address';
+    const htmlContent = `
+      <div style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 28px 24px; background: #ffffff; color: #111319;">
+        <div style="font-size: 24px; font-weight: 800; font-style: italic; color: #FF444F; letter-spacing: -0.03em; margin-bottom: 18px;">deriv</div>
+        <h2 style="margin: 0 0 10px; font-size: 20px; font-weight: 700;">Verify your email</h2>
+        <p style="margin: 0 0 20px; font-size: 14px; color: #4B5563; line-height: 1.5;">
+          Enter this 6-digit verification code to continue ${purpose === 'password_reset' ? 'resetting your password' : 'creating your account'} for <strong>${escapeEmailHtml(rawEmail)}</strong>:
+        </p>
+        <div style="background: #F4F5F7; border-radius: 10px; padding: 18px; text-align: center; font-size: 30px; font-weight: 800; letter-spacing: 8px; color: #111319; margin-bottom: 20px;">
+          ${code}
+        </div>
+        <p style="margin: 0; font-size: 12px; color: #6B7280;">
+          This code expires in 10 minutes. If you did not request this email, you can safely ignore it.
+        </p>
+      </div>
+    `;
+
+    const mailRes = await sendTransactionalEmail({
+      to: rawEmail,
+      toName: rawEmail.split('@')[0],
+      template: purpose === 'password_reset' ? 'password_reset' : 'welcome_verification',
+      subject,
+      htmlContent,
+    });
+
+    if (!mailRes.delivered) {
+      if (inserted?.id) {
+        await execute('DELETE FROM email_verification_codes WHERE id = $1', [inserted.id]).catch(() => {});
+      }
+      if (mailRes.status === 'queued_local') {
+        res.status(503).json({
+          error: 'Email verification via Brevo is not configured on the server yet (BREVO_API_KEY required).',
+          code: 'BREVO_NOT_CONFIGURED',
+        });
+        return;
+      }
+      res.status(502).json({
+        error: 'Unable to send verification code via Brevo right now. Please check your email and try again.',
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      message: '6-digit verification code sent',
+      expiresInSeconds: 600,
+      cooldownSeconds: 60,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Failed to send verification code' });
+  }
+});
+
+router.post('/auth/verify-email-code', requireDb, async (req, res) => {
+  try {
+    const rawEmail = String(req.body?.email || '').trim().toLowerCase();
+    const code = String(req.body?.code || '').replace(/\s+/g, '');
+    const purpose = req.body?.purpose === 'password_reset' ? 'password_reset' : 'signup';
+
+    if (!EMAIL_RE.test(rawEmail) || !/^\d{6}$/.test(code)) {
+      res.status(400).json({ error: 'Enter a valid email address and 6-digit code' });
+      return;
+    }
+
+    const row = await queryOne<{
+      id: number;
+      code_hash: string;
+      attempts: number;
+      expires_at: string;
+      verified_at: string | null;
+    }>(
+      `SELECT id, code_hash, attempts, expires_at, verified_at
+       FROM email_verification_codes
+       WHERE email = $1 AND purpose = $2 AND verified_at IS NULL
+       ORDER BY created_at DESC LIMIT 1`,
+      [rawEmail, purpose]
+    );
+
+    if (!row || new Date(row.expires_at).getTime() <= Date.now()) {
+      res.status(400).json({ error: 'Verification code has expired. Please request a new code.' });
+      return;
+    }
+
+    if (row.attempts >= 5) {
+      res.status(429).json({ error: 'Too many invalid attempts. Please request a new verification code.' });
+      return;
+    }
+
+    const expectedHash = hashEmailOtp(rawEmail, code, purpose);
+    if (!safeEqualHex(expectedHash, row.code_hash)) {
+      await execute('UPDATE email_verification_codes SET attempts = attempts + 1 WHERE id = $1', [row.id]);
+      res.status(400).json({ error: 'Invalid verification code. Please check your inbox and try again.' });
+      return;
+    }
+
+    await execute('UPDATE email_verification_codes SET verified_at = NOW() WHERE id = $1', [row.id]);
+
+    const verificationToken = jwt.sign(
+      { type: 'email_otp_verified', email: rawEmail, purpose, codeId: row.id },
+      config.jwtSecret,
+      { expiresIn: '20m' }
+    );
+
+    res.json({ ok: true, verificationToken });
+  } catch (err) {
+    res.status(500).json({ error: err instanceof Error ? err.message : 'Code verification failed' });
+  }
+});
+
 router.post('/auth/register', requireDb, async (req, res) => {
   try {
     const globalSettings = await getSetting<{ allowRegistration?: boolean; defaultVirtualBalance?: number }>('global', {});
@@ -99,22 +307,64 @@ router.post('/auth/register', requireDb, async (req, res) => {
       return;
     }
 
-    const { email, password, full_name, phone, country } = req.body || {};
+    const { email, password, full_name, phone, country, referral_code, verificationToken } = req.body || {};
     if (!email || !password) {
       res.status(400).json({ error: 'Email and password are required' });
       return;
     }
     const cleanEmail = String(email).trim().toLowerCase();
+    if (!EMAIL_RE.test(cleanEmail)) {
+      res.status(400).json({ error: 'Enter a valid email address' });
+      return;
+    }
+    if (String(password).length < 8) {
+      res.status(400).json({ error: 'Password must be at least 8 characters' });
+      return;
+    }
+
     const existing = await queryOne('SELECT id FROM users WHERE email = $1', [cleanEmail]);
     if (existing) {
       res.status(409).json({ error: 'An account with this email already exists' });
       return;
     }
 
+    let emailVerified = false;
+    if (verificationToken) {
+      try {
+        const decoded = jwt.verify(String(verificationToken), config.jwtSecret) as {
+          type?: string;
+          email?: string;
+          purpose?: string;
+          codeId?: number;
+        };
+        if (decoded?.type !== 'email_otp_verified' || decoded?.email !== cleanEmail || decoded?.purpose !== 'signup') {
+          res.status(400).json({ error: 'Invalid or mismatched email verification proof' });
+          return;
+        }
+        const verifiedCode = await queryOne<{ id: number; verified_at: string | null }>(
+          'SELECT id, verified_at FROM email_verification_codes WHERE id = $1 AND email = $2 AND verified_at IS NOT NULL',
+          [Number(decoded.codeId || 0), cleanEmail]
+        );
+        if (!verifiedCode) {
+          res.status(400).json({ error: 'Email verification code must be confirmed before creating an account' });
+          return;
+        }
+        emailVerified = true;
+      } catch {
+        res.status(400).json({ error: 'Email verification session expired. Please verify your email again.' });
+        return;
+      }
+    } else if (config.brevoApiKey) {
+      res.status(400).json({ error: 'Please verify your email with the 6-digit code sent via Brevo first.' });
+      return;
+    }
+
     const passwordHash = await hashPasswordArgon2id(String(password));
-    const verifyToken = randomId(20);
+    const verifyToken = emailVerified ? null : randomId(20);
     const defaultBalance = Number(globalSettings.defaultVirtualBalance ?? 10000);
     const clientCode = `TD${randomId(4).toUpperCase()}`;
+    const ownReferralCode = `DV${randomId(4).toUpperCase()}`;
+    const cleanReferredBy = String(referral_code || '').trim().slice(0, 64);
 
     const initialDemoWallets = JSON.stringify({
       main_usd: defaultBalance,
@@ -132,20 +382,23 @@ router.post('/auth/register', requireDb, async (req, res) => {
     });
 
     const newUser = await queryOne<any>(
-      `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, email_verification_token, virtual_workspace_balance, real_wallets_json, demo_wallets_json, deriv_client_id)
-       VALUES ($1, $2, $3, $4, $5, 'user', 'active', FALSE, $6, $7, $8, $9, $10)
+      `INSERT INTO users (email, password_hash, full_name, phone, country, role, status, email_verified, email_verification_token, virtual_workspace_balance, real_wallets_json, demo_wallets_json, deriv_client_id, referral_code, referred_by_code)
+       VALUES ($1, $2, $3, $4, $5, 'user', 'active', $6, $7, $8, $9, $10, $11, $12, $13)
        RETURNING ${USER_PUBLIC_COLS}`,
       [
         cleanEmail,
         passwordHash,
-        String(full_name || cleanEmail.split('@')[0]),
-        String(phone || ''),
-        String(country || 'Kenya'),
+        String(full_name || cleanEmail.split('@')[0]).trim().slice(0, 120),
+        String(phone || '').trim().slice(0, 40),
+        String(country || 'Kenya').trim().slice(0, 80),
+        emailVerified,
         verifyToken,
         defaultBalance,
         initialRealWallets,
         initialDemoWallets,
         clientCode,
+        ownReferralCode,
+        cleanReferredBy,
       ]
     );
 
@@ -157,16 +410,26 @@ router.post('/auth/register', requireDb, async (req, res) => {
       'Your trading workspace is active with $10,000.00 virtual funds.',
       'system'
     );
-    await logSecurityEvent(newUser.id, 'register', req.ip, { email: cleanEmail });
+    await logSecurityEvent(newUser.id, 'register', req.ip, { email: cleanEmail, country: newUser.country, emailVerified });
     await bindClientToVerifiedRequestDevice(req, newUser.id, 'email_register').catch(() => {});
 
-    await sendTransactionalEmail({
-      to: cleanEmail,
-      toName: newUser.full_name,
-      template: 'welcome_verification',
-      subject: 'Verify your Deriv account',
-      htmlContent: `<p>Welcome to Deriv, ${newUser.full_name}. Verify your email: <a href="${config.appUrl}/api/auth/verify-email?token=${verifyToken}">Verify Email</a></p>`,
-    });
+    if (!emailVerified) {
+      await sendTransactionalEmail({
+        to: cleanEmail,
+        toName: newUser.full_name,
+        template: 'welcome_verification',
+        subject: 'Verify your Deriv account',
+        htmlContent: `<p>Welcome to Deriv, ${escapeEmailHtml(newUser.full_name)}. Verify your email: <a href="${config.appUrl}/api/auth/verify-email?token=${verifyToken}">Verify Email</a></p>`,
+      });
+    } else {
+      await sendTransactionalEmail({
+        to: cleanEmail,
+        toName: newUser.full_name,
+        template: 'welcome_verification',
+        subject: 'Welcome to Deriv',
+        htmlContent: `<div style="font-family:sans-serif;padding:20px;"><div style="font-size:22px;font-weight:800;font-style:italic;color:#FF444F;">deriv</div><h3>Welcome, ${escapeEmailHtml(newUser.full_name)}!</h3><p>Your account is now verified and active with a $10,000.00 Demo wallet and Real wallet ready in USD.</p></div>`,
+      }).catch(() => {});
+    }
 
     res.status(201).json({ token, user: formatPublicUser(newUser) });
   } catch (err) {
@@ -284,14 +547,48 @@ router.post('/auth/forgot-password', requireDb, async (req, res) => {
 });
 
 router.post('/auth/reset-password', requireDb, async (req, res) => {
-  const { token, password } = req.body || {};
-  if (!token || !password) {
-    res.status(400).json({ error: 'Reset token and new password are required' });
+  const { token, verificationToken, password } = req.body || {};
+  if ((!token && !verificationToken) || !password) {
+    res.status(400).json({ error: 'Verification and new password are required' });
     return;
   }
-  const user = await queryOne<{ id: number }>('SELECT id FROM users WHERE reset_token = $1', [String(token)]);
+  if (String(password).length < 8) {
+    res.status(400).json({ error: 'Password must be at least 8 characters' });
+    return;
+  }
+
+  let user: { id: number } | null = null;
+  if (verificationToken) {
+    try {
+      const decoded = jwt.verify(String(verificationToken), config.jwtSecret) as {
+        type?: string;
+        email?: string;
+        purpose?: string;
+        codeId?: number;
+      };
+      if (decoded?.type !== 'email_otp_verified' || decoded?.purpose !== 'password_reset' || !decoded.email) {
+        res.status(400).json({ error: 'Invalid or expired reset verification proof' });
+        return;
+      }
+      const verifiedCode = await queryOne<{ id: number }>(
+        'SELECT id FROM email_verification_codes WHERE id = $1 AND email = $2 AND verified_at IS NOT NULL',
+        [Number(decoded.codeId || 0), decoded.email]
+      );
+      if (!verifiedCode) {
+        res.status(400).json({ error: 'Reset code must be verified first' });
+        return;
+      }
+      user = await queryOne<{ id: number }>('SELECT id FROM users WHERE email = $1', [decoded.email]);
+    } catch {
+      res.status(400).json({ error: 'Reset session expired. Please request a new code.' });
+      return;
+    }
+  } else {
+    user = await queryOne<{ id: number }>('SELECT id FROM users WHERE reset_token = $1', [String(token)]);
+  }
+
   if (!user) {
-    res.status(400).json({ error: 'Invalid reset token' });
+    res.status(400).json({ error: 'Invalid or expired reset verification' });
     return;
   }
   const hash = await hashPasswordArgon2id(String(password));
