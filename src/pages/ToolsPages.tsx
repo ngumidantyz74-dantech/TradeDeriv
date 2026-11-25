@@ -1362,10 +1362,10 @@ export const LearningHubPage: React.FC = () => {
       cta: 'Open Strategy Lab',
     },
     {
-      title: 'Market Radar, Buy Low/Sell High & Dcircles',
-      desc: 'Filter volatile Deriv markets with ADX/RSI/SMC bias and execute guarded setups or digit contracts.',
-      action: () => setActiveTab('market-analyser'),
-      cta: 'Open Market Intelligence',
+      title: 'Live Multi-Market Charts & Digit Streams',
+      desc: 'Inspect volatility indices, synthetic markets, and price action setups directly in Deriv Trader.',
+      action: () => setActiveTab('mt5-tv'),
+      cta: 'Open Deriv Trader',
     },
   ];
 

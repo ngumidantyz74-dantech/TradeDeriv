@@ -496,17 +496,21 @@ router.get('/bots/strategies', async (_req, res) => {
 router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) => {
   try {
     const b = req.body || {};
+    const sideModeNorm = String(b.contractSideMode || '').trim().toLowerCase() === 'single' ? 'single' : 'both';
     const telemetry = await startBotSession({
       userId: req.user!.id,
       strategyName: String(b.strategyName || 'Deriv Bot'),
       strategyType: String(b.strategyType || 'Martingale'),
       symbol: String(b.symbol || '1HZ100V'),
       contractType: String(b.contractType || 'DIGITOVER'),
-      contractSideMode: b.contractSideMode === 'single' ? 'single' : 'both',
+      contractSideMode: sideModeNorm,
       tradeSide: b.tradeSide ? String(b.tradeSide) : undefined,
-      baseStake: Number(b.baseStake || b.stake || 1.0),
+      baseStake: Number(b.baseStake ?? b.stake ?? 1.0),
       winStep: b.winStep !== undefined ? Number(b.winStep) : undefined,
       maxWinSteps: b.maxWinSteps !== undefined ? Number(b.maxWinSteps) : undefined,
+      maxStake: b.maxStake !== undefined ? Number(b.maxStake) : undefined,
+      sellTickCount: b.sellTickCount !== undefined ? Number(b.sellTickCount) : undefined,
+      maxLosses: b.maxLosses !== undefined ? Number(b.maxLosses) : undefined,
       barrier: b.barrier !== undefined ? String(b.barrier) : '2',
       duration: Number(b.duration || 1),
       durationUnit: String(b.durationUnit || 't'),
@@ -532,17 +536,20 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
 });
 
 router.post('/bots/stop', requireAuth, async (req: AuthRequest, res) => {
-  const telemetry = await stopBotSession(req.user!.id, 'Stopped by trader');
-  res.json({ telemetry: telemetry || getBotStatus(req.user!.id) });
+  const mode = req.body?.accountMode === 'real' ? 'real' : req.body?.accountMode === 'demo' ? 'demo' : undefined;
+  const telemetry = await stopBotSession(req.user!.id, 'Stopped by trader', mode);
+  res.json({ telemetry: telemetry || getBotStatus(req.user!.id, mode || 'demo') });
 });
 
 router.post('/bots/close-all', requireDb, requireAuth, async (req: AuthRequest, res) => {
-  const result = await closeAllBotOrders(req.user!.id);
+  const mode = req.body?.accountMode === 'real' ? 'real' : req.body?.accountMode === 'demo' ? 'demo' : undefined;
+  const result = await closeAllBotOrders(req.user!.id, mode);
   res.json(result);
 });
 
 router.get('/bots/status', requireAuth, (req: AuthRequest, res) => {
-  res.json({ telemetry: getBotStatus(req.user!.id) });
+  const mode = req.query?.accountMode === 'real' ? 'real' : req.query?.accountMode === 'demo' ? 'demo' : undefined;
+  res.json({ telemetry: getBotStatus(req.user!.id, mode) });
 });
 
 export default router;

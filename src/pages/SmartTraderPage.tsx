@@ -13,7 +13,6 @@ import {
   TrendingUp,
   TrendingDown,
   Zap,
-  Sparkles,
   CheckCircle2,
   XCircle,
   ArrowUpRight,
@@ -125,8 +124,6 @@ export const SmartTraderPage: React.FC = () => {
     selectedSymbol,
     setSelectedSymbol,
     ticks,
-    analyserSignal,
-    refreshAnalyserSignal,
     tradePreset,
     setTradePreset,
     orders,
@@ -152,7 +149,6 @@ export const SmartTraderPage: React.FC = () => {
   const [recentDigits, setRecentDigits] = useState<number[]>([2, 7, 4, 8, 1, 5, 9, 3, 6, 4, 0, 7, 2, 8, 5, 3, 6, 1, 9, 4]);
   const [placing, setPlacing] = useState<string | null>(null);
   const [closingId, setClosingId] = useState<number | null>(null);
-  const [analyserSynced, setAnalyserSynced] = useState<boolean>(false);
   const [depositOpen, setDepositOpen] = useState<boolean>(false);
 
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
@@ -192,7 +188,6 @@ export const SmartTraderPage: React.FC = () => {
     if (tradePreset.barrier !== undefined && !Number.isNaN(Number(tradePreset.barrier))) {
       setDigitPrediction(Math.max(0, Math.min(9, Math.floor(Number(tradePreset.barrier)))));
     }
-    if (tradePreset.analyserSync) setAnalyserSynced(true);
 
     const ct = String(tradePreset.contractType || '').toUpperCase();
     if (ct === 'ACCU') setGroupId('accumulators');
@@ -374,31 +369,6 @@ export const SmartTraderPage: React.FC = () => {
     }
   }, [liveTick, hasLiveTick, selectedSymbol, chartType]);
 
-  const applyAnalyserSignal = async () => {
-    const sig = analyserSignal || (await refreshAnalyserSignal(selectedSymbol));
-    if (!sig) return;
-    if (sig.symbol && sig.symbol !== selectedSymbol) setSelectedSymbol(sig.symbol);
-    const ct = sig.contractType.toUpperCase();
-    if (ct === 'ACCU') {
-      setGroupId('accumulators');
-      setGrowthRate(sig.growthRate || 0.02);
-    } else if (ct === 'DIGITOVER' || ct === 'DIGITUNDER') {
-      setGroupId('overunder');
-      setDigitPrediction(Number(sig.barrier || 2));
-    } else if (ct === 'DIGITEVEN' || ct === 'DIGITODD') {
-      setGroupId('evenodd');
-    } else if (ct === 'DIGITMATCH' || ct === 'DIGITDIFF') {
-      setGroupId('matchesdiffers');
-      setDigitPrediction(Number(sig.barrier || sig.lastDigit || 4));
-    } else {
-      setGroupId('risefall');
-    }
-    setDuration(sig.duration || 5);
-    setDurationUnit(sig.durationUnit === 'm' ? 'm' : 't');
-    setAnalyserSynced(true);
-    showToast(`Applied Live Analyser Signal: ${sig.contractType} (${sig.confidence}% conf.)`, 'success');
-  };
-
   const placeContract = async (contractType: string, side: 'BUY' | 'SELL') => {
     setPlacing(contractType);
     try {
@@ -423,8 +393,7 @@ export const SmartTraderPage: React.FC = () => {
           executionMode:
             activeConnectedAccount && !isDbLocked ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || undefined,
-          strategyKey: analyserSynced ? 'analyser_synced_smarttrader' : 'smart_trader',
-          isAnalyserSynced: analyserSynced,
+          strategyKey: 'smart_trader',
         }),
       });
       await Promise.all([refreshOrders(), refreshAll()]);
@@ -514,48 +483,6 @@ export const SmartTraderPage: React.FC = () => {
           </button>
         </div>
       </div>
-
-      {/* Live Analyser Signal Banner */}
-      {analyserSignal && (
-        <div className="rounded-2xl bg-[#151820] text-white border border-[#2A2F3D] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start sm:items-center gap-3 min-w-0">
-            <span className="w-8 h-8 rounded-lg bg-[#00A878]/15 text-[#00A878] flex items-center justify-center shrink-0">
-              <Sparkles className="w-4 h-4" />
-            </span>
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="font-bold text-[#00A878]">Market Analyser Signal</span>
-                <span className="font-mono font-bold text-white">{analyserSignal.displayName}</span>
-                <span className="px-2 py-0.5 rounded bg-white/10 font-mono text-[11px] font-bold">
-                  {analyserSignal.contractType} · {analyserSignal.confidence}% conf.
-                </span>
-                {analyserSynced && (
-                  <span className="px-2 py-0.5 rounded bg-[#00A878]/20 text-[#00A878] text-[10px] font-bold">
-                    SYNC ACTIVE
-                  </span>
-                )}
-              </div>
-              <p className="text-[11px] text-slate-400 truncate mt-0.5">{analyserSignal.reason}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 shrink-0">
-            <button
-              type="button"
-              onClick={applyAnalyserSignal}
-              className="px-3.5 py-1.5 rounded-lg bg-[#00A878] hover:bg-[#00966B] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
-            >
-              Apply Signal
-            </button>
-            <button
-              type="button"
-              onClick={() => setActiveTab('market-analyser')}
-              className="px-3 py-1.5 rounded-lg bg-white/10 hover:bg-white/15 text-xs font-semibold cursor-pointer whitespace-nowrap"
-            >
-              Full Analyser
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Main Split: Contract Ticket + Live Lightweight Chart */}
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-5">

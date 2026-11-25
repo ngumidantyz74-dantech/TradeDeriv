@@ -1005,6 +1005,7 @@ export async function derivRestRequest<T = any>(
       ...(options.headers || {}),
     },
     body: options.body ? JSON.stringify(options.body) : undefined,
+    signal: AbortSignal.timeout(10000),
   });
 
   if (!resp.ok) {

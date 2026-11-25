@@ -294,7 +294,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const pipSize = tick?.pipSize || 0.01;
 
   const lots = Number(Math.max(0.01, Math.min(100, input.lots ?? (input.stake ? input.stake / 100 : 0.02))).toFixed(2));
-  const stake = Number(Math.max(0.5, input.stake ?? lots * 100).toFixed(2));
+  const stake = Number(Math.max(0.35, input.stake ?? lots * 100).toFixed(2));
   const multiplier = Number(input.multiplier || 100);
   const contractType = normalizeContractType(input.side, input.contractType);
   const duration = Number(input.duration || 5);
@@ -1593,12 +1593,18 @@ export async function closeOrderById(orderId: number, userId?: number, isAdmin =
 
 export async function bulkCloseOrders(
   userId: number,
-  filter: 'all' | 'profitable' | 'losing' | 'buy' | 'sell' | 'over' | 'under' | 'bot'
+  filter: 'all' | 'profitable' | 'losing' | 'buy' | 'sell' | 'over' | 'under' | 'bot',
+  accountMode?: 'demo' | 'real'
 ): Promise<{ closedCount: number; closedOrders: any[] }> {
-  const openOrders = await query<any>(
-    `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' LIMIT 200`,
-    [userId]
-  );
+  const openOrders = accountMode
+    ? await query<any>(
+        `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' AND account_mode = $2 LIMIT 200`,
+        [userId, accountMode]
+      )
+    : await query<any>(
+        `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' LIMIT 200`,
+        [userId]
+      );
 
   const targets = openOrders.filter((o) => {
     switch (filter) {

@@ -437,27 +437,29 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                 </div>
                 <div className="border-l-[10px] border-[#0A405C] pb-1">
                   <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit whitespace-nowrap">
-                    <span>Duration:</span>
-                    {renderPillBtn(
-                      'durationUnit',
-                      durationUnitLabel,
-                      state.durationUnit,
-                      DURATION_UNITS,
-                      (v) => onChange((prev) => ({ ...prev, durationUnit: v }))
-                    )}
-                    {renderValuePill(state.duration, (v) =>
-                      onChange((prev) => ({ ...prev, duration: v }))
+                    {!activeSubtypeDef.isAccu && (
+                      <>
+                        <span>Duration:</span>
+                        {renderPillBtn(
+                          'durationUnit',
+                          durationUnitLabel,
+                          state.durationUnit,
+                          DURATION_UNITS,
+                          (v) => onChange((prev) => ({ ...prev, durationUnit: v }))
+                        )}
+                        {renderValuePill(state.duration, (v) =>
+                          onChange((prev) => ({ ...prev, duration: v }))
+                        )}
+                      </>
                     )}
                     <span>Stake: USD</span>
-                    {renderValuePill('Get Next Stake', () =>
-                      openValuePrompt(
-                        state.assignments.find((a) => a.variable === 'initialStake')?.value || '1',
-                        (nextStake) =>
-                          onChange((prev) => ({
-                            ...prev,
-                            assignments: setAssignmentVal(prev.assignments, 'initialStake', nextStake),
-                          }))
-                      )
+                    {renderValuePill(
+                      state.assignments.find((a) => a.variable === 'initialStake')?.value || '1',
+                      (nextStake) =>
+                        onChange((prev) => ({
+                          ...prev,
+                          assignments: setAssignmentVal(prev.assignments, 'initialStake', nextStake),
+                        }))
                     )}
                     {activeSubtypeDef.usesPrediction && (
                       <>
@@ -482,6 +484,17 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                             { value: '0.05', label: '5%' },
                           ],
                           (v) => onChange((prev) => ({ ...prev, growthRate: Number(v) }))
+                        )}
+                        <span>Take Profit:</span>
+                        {renderValuePill(
+                          state.accumulatorTakeProfit ||
+                            state.assignments.find((a) => a.variable === 'profitThreshold')?.value ||
+                            '5',
+                          (nextTp) =>
+                            onChange((prev) => ({
+                              ...prev,
+                              accumulatorTakeProfit: nextTp,
+                            }))
                         )}
                       </>
                     )}
@@ -697,6 +710,52 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
 
             <div className="bg-[#0A405C] h-5 w-[238px] rounded-b-[4px]" />
           </div>
+
+          {/* BLOCK 3: 3. Sell conditions (during_purchase) when active or Accumulators */}
+          {(state.hasSellConditions || activeSubtypeDef.isAccu) && (
+            <div className="relative">
+              <div className="bg-[#0A405C] border-t-[3px] border-t-[#D99B26] text-white rounded-tl-[4px] rounded-tr-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11.5px] font-medium w-[238px] shadow-xs">
+                <ShoppingBasket className="w-3.5 h-3.5 text-white/90 shrink-0" />
+                <span>3. Sell conditions</span>
+              </div>
+              <div className="border-l-[10px] border-[#0A405C] space-y-[2px]">
+                <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] text-[11px] text-[#111319] dark:text-slate-200 w-fit space-y-1.5">
+                  <div className="flex items-center gap-1.5 whitespace-nowrap">
+                    <span>if</span>
+                    <span className="px-2 py-[2px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15">
+                      Sell is available
+                    </span>
+                    <span>&amp;</span>
+                    {renderPillBtn(
+                      'sellMode',
+                      state.sellByCountdown ? 'Count Down' : 'Take Profit',
+                      state.sellByCountdown ? 'countdown' : 'tp',
+                      [
+                        { value: 'tp', label: 'Take Profit' },
+                        { value: 'countdown', label: 'Count Down' },
+                      ],
+                      (v) => onChange((prev) => ({ ...prev, sellByCountdown: v === 'countdown' }))
+                    )}
+                    {state.sellByCountdown && (
+                      <>
+                        <span>Tick Count &gt;</span>
+                        {renderValuePill(state.sellTickCount || '0', (nextTicks) =>
+                          onChange((prev) => ({ ...prev, sellTickCount: nextTicks }))
+                        )}
+                      </>
+                    )}
+                    <span>then</span>
+                  </div>
+                  <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                    <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[3px] px-2.5 py-1 w-fit font-medium">
+                      Sell at market
+                    </div>
+                  </div>
+                </div>
+              </div>
+              <div className="bg-[#0A405C] h-5 w-[238px] rounded-b-[4px]" />
+            </div>
+          )}
         </div>
 
         {/* RIGHT STACK: BLOCK 4 (4. Restart trading conditions - matches Screenshot 210134) */}
@@ -709,7 +768,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
           <div className="border-l-[10px] border-[#0A405C] space-y-[2px]">
             {/* Update Stake And Side On Result with: resultIsWin (Result is [Win ▾]) */}
             <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit whitespace-nowrap">
-              <span>Update Stake And Side On Result with: resultIsWin</span>
+              <span>{state.updateProcedureName || 'Update Stake And Side On Result with: resultIsWin'}</span>
               <span className="px-2 py-[2px] rounded-full bg-[#EAECEF] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15 inline-flex items-center gap-1">
                 <span>Result is</span>
                 {renderPillBtn(

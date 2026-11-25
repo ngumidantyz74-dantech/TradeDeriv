@@ -9,7 +9,6 @@ export type NavTab =
   | 'smart-trader'
   | 'bot-builder'
   | 'trading-bots'
-  | 'market-analyser'
   | 'bulk-trader'
   | 'risk-calc'
   | 'copy-trading'

@@ -338,7 +338,7 @@ export const ProfileHub: React.FC = () => {
             {renderFlatRow({
               icon: MessageSquare,
               label: 'Live chat',
-              onClick: () => setActiveTab('market-analyser'),
+              onClick: () => setActiveTab('learning-hub'),
             })}
           </div>
         </section>

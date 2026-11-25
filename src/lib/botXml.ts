@@ -200,8 +200,13 @@ export const BOT_VARIABLES: string[] = [
   'lossStreak',
   'lossThreshold',
   'maxWinSteps',
+  'maxStake',
+  'Tick Count',
+  'accumulatorTakeProfit',
   'msgInfo',
+  'msgStake',
   'msgProfit',
+  'msgStop',
   'nextStake',
   'profitThreshold',
   'resultIsWin',
@@ -209,6 +214,15 @@ export const BOT_VARIABLES: string[] = [
   'tradeSide',
   'winStep',
   'winStreak',
+  'martingale:initialStake',
+  'martingale:size',
+  'martingale:profitThreshold',
+  'martingale:lossThreshold',
+  'initial_stake',
+  'current_stake',
+  'take_profit',
+  'stop_loss',
+  'max_losses',
 ];
 
 export interface TextJoinPart {
@@ -240,8 +254,15 @@ export interface BotXmlWorkspaceState {
   duration: string;
   prediction: string;
   growthRate: number;
+  accumulatorTakeProfit?: string;
   martingaleFactor: string;
   maxTrades: string;
+  maxStake?: string;
+  sellTickCount?: string;
+  maxLosses?: string;
+  hasSellConditions?: boolean;
+  sellByCountdown?: boolean;
+  updateProcedureName?: string;
   notifyVar: string;
   notifyColor: 'blue' | 'green' | 'yellow' | 'red';
   notifySound: 'Silent' | 'Announcement' | 'Earned money' | 'Job done' | 'Severe error';
@@ -550,6 +571,56 @@ export function serializeBotWorkspaceXml(state: BotXmlWorkspaceState): string {
     )
     .join('\n');
 
+  const isAccu =
+    state.tradeSubtype === 'Accumulators' ||
+    state.contractTypeSelection.toUpperCase() === 'ACCU' ||
+    state.thenPurchase.toUpperCase() === 'ACCU';
+
+  const stakeVal = getAssignmentVal(state.assignments, 'initialStake', '1');
+  const accuTpVal = state.accumulatorTakeProfit || getAssignmentVal(state.assignments, 'profitThreshold', '5');
+  const includeDuring = Boolean(state.hasSellConditions || isAccu);
+
+  const submarketXml = isAccu
+    ? `    <statement name="SUBMARKET">
+      <block type="trade_definition_accumulator">
+        <field name="GROWTHRATE_LIST">${escapeXml(String(state.growthRate || 0.02))}</field>
+        <value name="AMOUNT">
+          <shadow type="math_number_positive"><field name="NUM">${escapeXml(stakeVal)}</field></shadow>
+        </value>
+        <statement name="ACCUMULATOR_PARAMS">
+          <block type="accumulator_take_profit">
+            <value name="AMOUNT">
+              <shadow type="math_number"><field name="NUM">${escapeXml(accuTpVal)}</field></shadow>
+            </value>
+          </block>
+        </statement>
+      </block>
+    </statement>`
+    : `    <statement name="SUBMARKET">
+      <block type="trade_definition_tradeoptions">
+        <field name="DURATIONTYPE_LIST">${escapeXml(state.durationUnit)}</field>
+        <field name="DURATION">${escapeXml(state.duration)}</field>
+        <field name="PREDICTION">${escapeXml(state.prediction)}</field>
+        <field name="AMOUNT">${escapeXml(stakeVal)}</field>
+        <field name="GROWTHRATE">${escapeXml(String(state.growthRate))}</field>
+      </block>
+    </statement>`;
+
+  const duringBlockXml = includeDuring
+    ? `
+  <block type="during_purchase" id="during_purchase_root" x="40" y="760">
+    <statement name="DURING_PURCHASE_STACK">
+      <block type="controls_if">
+        <field name="SELL_BY_COUNTDOWN">${state.sellByCountdown ? 'TRUE' : 'FALSE'}</field>
+        <field name="TICK_COUNT">${escapeXml(state.sellTickCount || '0')}</field>
+        <statement name="DO0">
+          <block type="sell_at_market" />
+        </statement>
+      </block>
+    </statement>
+  </block>`
+    : '';
+
   return `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">
   <variables>
 ${BOT_VARIABLES.map((v) => `    <variable>${escapeXml(v)}</variable>`).join('\n')}
@@ -569,15 +640,7 @@ ${BOT_VARIABLES.map((v) => `    <variable>${escapeXml(v)}</variable>`).join('\n'
     <statement name="INITIALIZATION">
 ${varSetXml}
     </statement>
-    <statement name="SUBMARKET">
-      <block type="trade_definition_tradeoptions">
-        <field name="DURATIONTYPE_LIST">${escapeXml(state.durationUnit)}</field>
-        <field name="DURATION">${escapeXml(state.duration)}</field>
-        <field name="PREDICTION">${escapeXml(state.prediction)}</field>
-        <field name="AMOUNT">${escapeXml(getAssignmentVal(state.assignments, 'initialStake', '1'))}</field>
-        <field name="GROWTHRATE">${escapeXml(String(state.growthRate))}</field>
-      </block>
-    </statement>
+${submarketXml}
   </block>
   <block type="before_purchase" id="before_purchase_root" x="40" y="420">
     <statement name="BEFOREPURCHASE_STACK">
@@ -601,7 +664,7 @@ ${notifyItemsXml}
         <field name="ELSE_PURCHASE">${escapeXml(state.elsePurchase)}</field>
       </block>
     </statement>
-  </block>
+  </block>${duringBlockXml}
   <block type="after_purchase" id="after_purchase_root" x="520" y="20">
     <statement name="AFTERPURCHASE_STACK">
       <block type="update_stake_and_side">
@@ -733,7 +796,10 @@ function normalizeTradeTypeAndCategory(
 }
 
 export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspaceState): Partial<BotXmlWorkspaceState> {
-  const xml = String(xmlText || '');
+  const rawInput = String(xmlText || '').trim();
+  const xml = !rawInput.toLowerCase().startsWith('<xml')
+    ? `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">${rawInput}</xml>`
+    : rawInput;
   const out: Partial<BotXmlWorkspaceState> = {};
 
   const parseWithRegexFallback = (): Partial<BotXmlWorkspaceState> => {
@@ -764,10 +830,16 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
     if (durUnit) res.durationUnit = durUnit;
     const pred = getField('PREDICTION');
     if (pred) res.prediction = pred;
+    const gr = getField('GROWTHRATE_LIST') || getField('GROWTHRATE') || getField('GROWTH_RATE');
+    if (gr && Number.isFinite(Number(gr))) {
+      const n = Number(gr);
+      res.growthRate = n > 0.1 ? Number((n / 100).toFixed(2)) : n;
+    }
     const mart = getField('MARTINGALE');
     if (mart) res.martingaleFactor = mart;
     const candle = normalizeCandleInterval(getField('CANDLEINTERVAL_LIST'));
     if (candle) res.candleInterval = candle;
+    if (/type=["']during_purchase["']/i.test(xml)) res.hasSellConditions = true;
     const qPredMatch = xml.match(/<prediction_id[^>]*>([^<]+)<\/prediction_id>/i);
     if (qPredMatch?.[1]?.trim()) res.quantumPredictionId = qPredMatch[1].trim();
     const qExpMatch = xml.match(/<expires_at[^>]*>([^<]+)<\/expires_at>/i);
@@ -806,32 +878,35 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       return fields;
     };
 
-    const extractValueText = (valEl: Element | null | undefined): string | undefined => {
+    const extractValueLiteral = (valEl: Element | null | undefined): string | undefined => {
       if (!valEl) return undefined;
-      const innerBlock = Array.from(valEl.children).find((c) => {
+      const children = Array.from(valEl.children).filter((c) => {
         const t = c.tagName.toLowerCase();
         return t === 'block' || t === 'shadow';
       });
-      if (!innerBlock) return undefined;
-      const bType = (innerBlock.getAttribute('type') || '').toLowerCase();
-      const fields = getDirectFields(innerBlock);
-      if (bType === 'math_number' || bType === 'math_integer' || bType === 'math_positive_number') {
-        return fields.get('NUM');
+      if (children.length === 0) return undefined;
+      // Prefer explicit block over shadow when literal, else fall back to shadow (e.g. AMOUNT with shadow=1 + callreturn)
+      const ordered = [
+        ...children.filter((c) => c.tagName.toLowerCase() === 'block'),
+        ...children.filter((c) => c.tagName.toLowerCase() === 'shadow'),
+      ];
+      for (const innerBlock of ordered) {
+        const bType = (innerBlock.getAttribute('type') || '').toLowerCase();
+        const fields = getDirectFields(innerBlock);
+        if (bType === 'math_number' || bType === 'math_integer' || bType === 'math_positive_number') {
+          const num = fields.get('NUM');
+          if (num !== undefined && num !== '') return num;
+        }
+        if (bType === 'text') {
+          const txt = fields.get('TEXT');
+          if (txt !== undefined && txt !== '') return txt;
+        }
+        if (bType === 'logic_boolean') {
+          const boolVal = fields.get('BOOL');
+          if (boolVal !== undefined && boolVal !== '') return boolVal;
+        }
       }
-      if (bType === 'text') {
-        return fields.get('TEXT');
-      }
-      if (bType === 'logic_boolean') {
-        return fields.get('BOOL');
-      }
-      if (bType === 'variables_get') {
-        const varField = Array.from(innerBlock.children).find(
-          (c) => c.tagName.toLowerCase() === 'field' && c.getAttribute('name')?.toUpperCase() === 'VAR'
-        );
-        const varId = varField?.getAttribute('id');
-        return (varId && varIdToName.get(varId)) || (varField?.textContent || '').trim() || undefined;
-      }
-      return fields.get('NUM') || fields.get('TEXT') || fields.get('VAR') || fields.get('BOOL');
+      return undefined;
     };
 
     const getDirectValues = (el: Element): Map<string, string> => {
@@ -839,7 +914,7 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       for (const child of Array.from(el.children)) {
         if (child.tagName.toLowerCase() === 'value') {
           const n = child.getAttribute('name');
-          const v = extractValueText(child);
+          const v = extractValueLiteral(child);
           if (n && v !== undefined) vals.set(n.toUpperCase(), v);
         }
       }
@@ -861,11 +936,20 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       return t === 'trade_definition' || t === 'trade';
     });
 
-    // Collect fields across trade_definition & its nested trade_definition_* sub-blocks
+    // Collect fields across trade_definition & its trade_definition_* sub-blocks (excluding accumulator_take_profit)
     const tradeFields = new Map<string, string>();
     const tradeValues = new Map<string, string>();
+    let accumulatorTakeProfitVal: string | undefined;
+
     for (const b of blocks) {
       const bType = (b.getAttribute('type') || '').toLowerCase();
+      if (bType === 'accumulator_take_profit') {
+        const tpAmt = getDirectValues(b).get('AMOUNT') || getDirectFields(b).get('AMOUNT');
+        if (tpAmt && Number.isFinite(Number(tpAmt))) {
+          accumulatorTakeProfitVal = tpAmt;
+        }
+        continue;
+      }
       if (
         bType === 'trade_definition' ||
         bType === 'trade' ||
@@ -940,7 +1024,7 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
         purchaseChoices[1] ||
         subtypeDef.legs.find((l) => l.value !== purchaseChoices[0])?.value ||
         purchaseChoices[0];
-      out.elseEnabled = purchaseChoices.length > 1 || Boolean(out.elsePurchase);
+      out.elseEnabled = purchaseChoices.length > 1 || (Boolean(out.elsePurchase) && out.elsePurchase !== out.thenPurchase);
     } else if (normTypeList && normTypeList !== 'Both') {
       out.thenPurchase = normTypeList;
       out.elsePurchase = subtypeDef.legs.find((l) => l.value !== normTypeList)?.value || normTypeList;
@@ -975,10 +1059,14 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
     const pred = pickTradeParam('PREDICTION');
     if (pred && Number.isFinite(Number(pred))) out.prediction = pred;
 
-    const grRaw = pickTradeParam('GROWTHRATE', 'GROWTH_RATE');
+    const grRaw = pickTradeParam('GROWTHRATE_LIST', 'GROWTHRATE', 'GROWTH_RATE');
     if (grRaw && Number.isFinite(Number(grRaw))) {
       const n = Number(grRaw);
       out.growthRate = n > 0.1 ? Number((n / 100).toFixed(2)) : n;
+    }
+
+    if (accumulatorTakeProfitVal) {
+      out.accumulatorTakeProfit = accumulatorTakeProfitVal;
     }
 
     const mart = pickTradeParam('MARTINGALE');
@@ -988,24 +1076,33 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
     if (maxTr && Number.isFinite(Number(maxTr))) out.maxTrades = maxTr;
 
     // Parse initial variable assignments & initialization blocks
-    let assignments = [...baseState.assignments];
+    let assignments: RunOnceAssignment[] = [];
+    const seenVars = new Set<string>();
+    const pushAssign = (variable: string, value: string) => {
+      seenVars.add(variable);
+      assignments = setAssignmentVal(assignments, variable, value);
+    };
 
-    const amt = pickTradeParam('AMOUNT', 'STAKE');
+    const amt = tradeValues.get('AMOUNT') || tradeFields.get('AMOUNT') || pickTradeParam('STAKE');
     if (amt && Number.isFinite(Number(amt))) {
-      assignments = setAssignmentVal(assignments, 'initialStake', amt);
+      pushAssign('initialStake', amt);
+    }
+    if (accumulatorTakeProfitVal) {
+      pushAssign('profitThreshold', accumulatorTakeProfitVal);
     }
     const tp = pickTradeParam('TAKE_PROFIT');
     if (tp && Number.isFinite(Number(tp))) {
-      assignments = setAssignmentVal(assignments, 'profitThreshold', tp);
+      pushAssign('profitThreshold', tp);
     }
     const sl = pickTradeParam('STOP_LOSS');
     if (sl && Number.isFinite(Number(sl))) {
-      assignments = setAssignmentVal(assignments, 'lossThreshold', sl);
+      pushAssign('lossThreshold', sl);
     }
 
     const varAliasMap: Record<string, string> = {
       initialstake: 'initialStake',
       initial_stake: 'initialStake',
+      'martingale:initialstake': 'initialStake',
       stake: 'initialStake',
       amount: 'initialStake',
       base_stake: 'initialStake',
@@ -1016,20 +1113,25 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       max_win_steps: 'maxWinSteps',
       profitthreshold: 'profitThreshold',
       profit_threshold: 'profitThreshold',
+      'martingale:profitthreshold': 'profitThreshold',
       takeprofit: 'profitThreshold',
       take_profit: 'profitThreshold',
       targetprofit: 'profitThreshold',
       target_profit: 'profitThreshold',
       lossthreshold: 'lossThreshold',
       loss_threshold: 'lossThreshold',
+      'martingale:lossthreshold': 'lossThreshold',
       stoploss: 'lossThreshold',
       stop_loss: 'lossThreshold',
       maxloss: 'lossThreshold',
       max_loss: 'lossThreshold',
       tradeside: 'tradeSide',
       trade_side: 'tradeSide',
-      nextstake: 'nextStake',
-      next_stake: 'nextStake',
+      maxstake: 'maxStake',
+      max_stake: 'maxStake',
+      'tick count': 'Tick Count',
+      tick_count: 'Tick Count',
+      selltickcount: 'Tick Count',
       winstreak: 'winStreak',
       lossstreak: 'lossStreak',
       totalprofit: 'totalProfit',
@@ -1037,8 +1139,19 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       resultiswin: 'resultIsWin',
     };
 
-    const varSetBlocks = blocks.filter((b) => (b.getAttribute('type') || '').toLowerCase() === 'variables_set');
-    for (const vs of varSetBlocks) {
+    // Prioritize INITIALIZATION variables_set blocks first, then other blocks without overwriting explicit INITIALIZATION values
+    const initStatement = blocks
+      .flatMap((b) => Array.from(b.children))
+      .find((c) => c.tagName.toLowerCase() === 'statement' && c.getAttribute('name')?.toUpperCase() === 'INITIALIZATION');
+    const initBlocks = initStatement ? Array.from(initStatement.getElementsByTagName('block')) : [];
+    const otherVarSetBlocks = blocks.filter((b) => (b.getAttribute('type') || '').toLowerCase() === 'variables_set');
+    const orderedVarSetBlocks = [
+      ...initBlocks.filter((b) => (b.getAttribute('type') || '').toLowerCase() === 'variables_set'),
+      ...otherVarSetBlocks.filter((b) => !initBlocks.includes(b)),
+    ];
+
+    for (const vs of orderedVarSetBlocks) {
+      const isInitBlock = initBlocks.includes(vs);
       const varField = Array.from(vs.children).find(
         (c) => c.tagName.toLowerCase() === 'field' && c.getAttribute('name')?.toUpperCase() === 'VAR'
       );
@@ -1049,25 +1162,43 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       const valueChild = Array.from(vs.children).find(
         (c) => c.tagName.toLowerCase() === 'value' && c.getAttribute('name')?.toUpperCase() === 'VALUE'
       );
-      const val = extractValueText(valueChild);
+      const val = extractValueLiteral(valueChild);
       const lowName = rawName.toLowerCase();
 
-      if (lowName === 'martingale' || lowName === 'martingale_factor' || lowName === 'martingalefactor' || lowName === 'multiplier') {
-        if (val && Number.isFinite(Number(val))) out.martingaleFactor = val;
+      if (
+        lowName === 'martingale' ||
+        lowName === 'martingale_factor' ||
+        lowName === 'martingalefactor' ||
+        lowName === 'martingale:size' ||
+        lowName === 'multiplier'
+      ) {
+        if (val && Number.isFinite(Number(val)) && !out.martingaleFactor) out.martingaleFactor = val;
         continue;
       }
       if (lowName === 'max_trades' || lowName === 'maxtrades') {
-        if (val && Number.isFinite(Number(val))) out.maxTrades = val;
+        if (val && Number.isFinite(Number(val)) && !out.maxTrades) out.maxTrades = val;
+        continue;
+      }
+      if (lowName === 'max_losses' || lowName === 'maxlosses') {
+        if (val && Number.isFinite(Number(val)) && !out.maxLosses) out.maxLosses = val;
         continue;
       }
       if (lowName === 'prediction' || lowName === 'barrier') {
         if (val && Number.isFinite(Number(val))) out.prediction = val;
         continue;
       }
+      if (lowName.startsWith("sell by 'count down'") && val) {
+        out.sellByCountdown = val.toUpperCase() === 'TRUE';
+        continue;
+      }
 
       const mappedVar = varAliasMap[lowName] || (BOT_VARIABLES.includes(rawName) ? rawName : undefined);
       if (mappedVar && val !== undefined) {
-        assignments = setAssignmentVal(assignments, mappedVar, val);
+        if (mappedVar === 'maxStake' && Number.isFinite(Number(val))) out.maxStake = val;
+        if (mappedVar === 'Tick Count' && Number.isFinite(Number(val))) out.sellTickCount = val;
+        if (isInitBlock || !seenVars.has(mappedVar)) {
+          pushAssign(mappedVar, val);
+        }
       }
 
       // Check notify text_join mutation inside variables_set if present
@@ -1085,12 +1216,76 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       }
     }
 
-    // Sync tradeSide assignment with chosen thenPurchase if XML did not set tradeSide explicitly
+    // Extract text_join blocks inside before_purchase (as used in Contwin, DiffersScalper, MatchesScalper, DigitScalper, winloss)
+    const beforeBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'before_purchase');
+    if (beforeBlock) {
+      const textJoinBlock = Array.from(beforeBlock.getElementsByTagName('block')).find(
+        (b) => (b.getAttribute('type') || '').toLowerCase() === 'text_join'
+      );
+      if (textJoinBlock) {
+        const varF = Array.from(textJoinBlock.children).find(
+          (c) => c.tagName.toLowerCase() === 'field' && c.getAttribute('name')?.toUpperCase() === 'VARIABLE'
+        );
+        const varId = varF?.getAttribute('id');
+        const vName = (varId && varIdToName.get(varId)) || (varF?.textContent || '').trim();
+        if (vName) out.notifyVar = vName;
+        const textStmts = Array.from(textJoinBlock.getElementsByTagName('block')).filter(
+          (b) => (b.getAttribute('type') || '').toLowerCase() === 'text_statement'
+        );
+        if (textStmts.length > 0) {
+          out.notifyParts = textStmts.map((stmt, idx) => {
+            const valEl = Array.from(stmt.children).find(
+              (c) => c.tagName.toLowerCase() === 'value' && c.getAttribute('name')?.toUpperCase() === 'TEXT'
+            );
+            const inner = valEl ? Array.from(valEl.children).find((c) => ['block', 'shadow'].includes(c.tagName.toLowerCase())) : undefined;
+            const iType = (inner?.getAttribute('type') || '').toLowerCase();
+            if (inner && iType === 'variables_get') {
+              const vf = getDirectFields(inner).get('VAR') || '';
+              return { id: `tj-${idx}`, kind: 'var' as const, value: vf };
+            }
+            if (inner && iType === 'procedures_callreturn') {
+              const mut = Array.from(inner.children).find((c) => c.tagName.toLowerCase() === 'mutation');
+              return { id: `tj-${idx}`, kind: 'fn' as const, value: mut?.getAttribute('name') || 'Get Next Stake' };
+            }
+            const literal = extractValueLiteral(valEl);
+            return { id: `tj-${idx}`, kind: 'text' as const, value: literal ?? 'text' };
+          });
+        }
+      }
+    }
+
+    // Backfill defaults from baseState only for core missing assignments when XML omitted them completely
+    if (!seenVars.has('initialStake')) {
+      pushAssign('initialStake', getAssignmentVal(baseState.assignments, 'initialStake', '1'));
+    }
+    if (!seenVars.has('profitThreshold')) {
+      pushAssign('profitThreshold', accumulatorTakeProfitVal || getAssignmentVal(baseState.assignments, 'profitThreshold', '10'));
+    }
+    if (!seenVars.has('lossThreshold')) {
+      pushAssign('lossThreshold', getAssignmentVal(baseState.assignments, 'lossThreshold', '6'));
+    }
     const explicitSide = assignments.find((a) => a.variable === 'tradeSide')?.value;
     if (out.thenPurchase && (!explicitSide || explicitSide === baseState.thenPurchase)) {
-      assignments = setAssignmentVal(assignments, 'tradeSide', out.thenPurchase);
+      pushAssign('tradeSide', out.thenPurchase);
+    } else if (!explicitSide) {
+      pushAssign('tradeSide', out.thenPurchase || baseState.thenPurchase || 'CALL');
     }
     out.assignments = assignments;
+
+    // Also pull multiplier factor from math_arithmetic MULTIPLY inside strategy.xml (e.g. 1.3) if not already set
+    if (!out.martingaleFactor) {
+      const multBlock = blocks.find(
+        (b) =>
+          (b.getAttribute('type') || '').toLowerCase() === 'math_arithmetic' &&
+          getDirectFields(b).get('OP')?.toUpperCase() === 'MULTIPLY'
+      );
+      if (multBlock) {
+        const bVal = getDirectValues(multBlock).get('B');
+        if (bVal && Number.isFinite(Number(bVal)) && Number(bVal) > 1) {
+          out.martingaleFactor = bVal;
+        }
+      }
+    }
 
     // Parse before_purchase notify / controls_if blocks
     const notifyBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'notify');
@@ -1099,6 +1294,14 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       const nColor = nf.get('NOTIFICATION_TYPE')?.toLowerCase();
       if (nColor === 'blue' || nColor === 'green' || nColor === 'yellow' || nColor === 'red') {
         out.notifyColor = nColor;
+      } else if (nColor === 'info') {
+        out.notifyColor = 'blue';
+      } else if (nColor === 'success') {
+        out.notifyColor = 'green';
+      } else if (nColor === 'warn') {
+        out.notifyColor = 'yellow';
+      } else if (nColor === 'error') {
+        out.notifyColor = 'red';
       }
       const nSound = nf.get('NOTIFICATION_SOUND');
       if (
@@ -1114,7 +1317,6 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       if (msgVar) out.notifyVar = msgVar;
     }
 
-    const beforeBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'before_purchase');
     if (beforeBlock) {
       const bpControlsIf = Array.from(beforeBlock.getElementsByTagName('block')).find(
         (b) => (b.getAttribute('type') || '').toLowerCase() === 'controls_if'
@@ -1133,9 +1335,23 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       }
     }
 
-    // Parse after_purchase restart settings
+    // Parse during_purchase (3. Sell conditions)
+    const duringBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'during_purchase');
+    if (duringBlock) {
+      out.hasSellConditions = true;
+    }
+
+    // Parse after_purchase restart settings & procedure call names
     const afterBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'after_purchase');
     if (afterBlock) {
+      const procNoRet = Array.from(afterBlock.getElementsByTagName('block')).find(
+        (b) => (b.getAttribute('type') || '').toLowerCase() === 'procedures_callnoreturn'
+      );
+      if (procNoRet) {
+        const mut = Array.from(procNoRet.children).find((c) => c.tagName.toLowerCase() === 'mutation');
+        const procName = mut?.getAttribute('name')?.trim();
+        if (procName) out.updateProcedureName = procName;
+      }
       const updBlock = Array.from(afterBlock.getElementsByTagName('block')).find(
         (b) => (b.getAttribute('type') || '').toLowerCase() === 'update_stake_and_side'
       );
@@ -1161,7 +1377,6 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       out.quantumExpiresAt = qExpEl?.textContent?.trim() || null;
     }
 
-    // Ignore unused tradeDefBlock check warning by ensuring parsed ok
     void tradeDefBlock;
     return out;
   } catch {

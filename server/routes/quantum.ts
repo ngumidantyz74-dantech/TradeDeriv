@@ -309,10 +309,15 @@ function parseAndValidateXmlStructure(rawXml: string): {
   }
 
   // Strip XML declaration and comments before structural tag stack verification
-  const cleaned = xml
+  let cleaned = xml
     .replace(/<\?xml[\s\S]*?\?>/gi, '')
     .replace(/<!--[\s\S]*?-->/g, '')
     .trim();
+
+  // Support valid partial Deriv DBot workspace snippets (e.g. Digitiff.xml starting at <statement name="TRADE_OPTIONS">)
+  if (!/^<xml\b/i.test(cleaned) && /^<(?:statement|block|variables)\b/i.test(cleaned)) {
+    cleaned = `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">${cleaned}</xml>`;
+  }
 
   if (!/^<xml\b/i.test(cleaned) || !/<\/xml>\s*$/i.test(cleaned)) {
     return emptyResult('Malformed Deriv Bot XML: root <xml>...</xml> element is missing.');
@@ -352,7 +357,7 @@ function parseAndValidateXmlStructure(rawXml: string): {
     blockTypes.add(match[1].trim().toLowerCase());
   }
 
-  // Extract field values (prioritizing direct fields + variables_set numeric/text shadows)
+  // Extract direct field values
   const fields = new Map<string, string>();
   const fieldRe = /<field\b[^>]*\bname=["']([^"']+)["'][^>]*>([^<]*)<\/field>/gi;
   while ((match = fieldRe.exec(cleaned)) !== null) {
@@ -363,9 +368,20 @@ function parseAndValidateXmlStructure(rawXml: string): {
     }
   }
 
-  // Extract variables_set initialStake / profitThreshold / lossThreshold / tradeSide if present
+  // Extract <value name="DURATION|AMOUNT|PREDICTION|TAKE_PROFIT|STOP_LOSS"><shadow|block><field name="NUM|TEXT">
+  const valueShadowRe =
+    /<value\b[^>]*\bname=["']([^"']+)["'][^>]*>\s*<(?:shadow|block)\b[^>]*>\s*<field\b[^>]*\bname=["'](?:NUM|TEXT)["'][^>]*>([^<]+)<\/field>/gi;
+  while ((match = valueShadowRe.exec(cleaned)) !== null) {
+    const k = match[1].trim().toUpperCase();
+    const v = match[2].trim();
+    if (k && v !== '' && !fields.has(k)) {
+      fields.set(k, v);
+    }
+  }
+
+  // Extract variables_set initialStake / martingale:initialStake / profitThreshold / lossThreshold / tradeSide / maxStake / Tick Count
   const varSetRe =
-    /<block\b[^>]*type=["']variables_set["'][^>]*>\s*<field\b[^>]*name=["']VAR["'][^>]*>([^<]+)<\/field>[\s\S]*?<field\b[^>]*name=["'](?:NUM|TEXT)["'][^>]*>([^<]+)<\/field>/gi;
+    /<block\b[^>]*type=["']variables_set["'][^>]*>\s*<field\b[^>]*name=["']VAR["'][^>]*>([^<]+)<\/field>[\s\S]*?<field\b[^>]*name=["'](?:NUM|TEXT|BOOL)["'][^>]*>([^<]+)<\/field>/gi;
   while ((match = varSetRe.exec(cleaned)) !== null) {
     const varName = match[1].trim().toLowerCase();
     const varVal = match[2].trim();
@@ -388,16 +404,21 @@ function parseAndValidateXmlStructure(rawXml: string): {
   }
 
   const hasTradeDef = blockTypes.has('trade_definition') || blockTypes.has('trade');
-  const hasTradeOpts = blockTypes.has('trade_definition_tradeoptions') || blockTypes.has('tradeoptions');
+  const hasTradeOpts =
+    blockTypes.has('trade_definition_tradeoptions') ||
+    blockTypes.has('trade_definition_accumulator') ||
+    blockTypes.has('tradeoptions');
+  const hasTradeSnippetCore =
+    blockTypes.has('trade_definition_market') && blockTypes.has('trade_definition_contracttype');
   const hasBefore = blockTypes.has('before_purchase');
   const hasAfter = blockTypes.has('after_purchase');
 
-  if (!hasTradeDef || !hasTradeOpts || !hasBefore || !hasAfter) {
+  if (!hasTradeOpts || (!hasTradeSnippetCore && (!hasTradeDef || !hasBefore || !hasAfter))) {
     const missing: string[] = [];
-    if (!hasTradeDef) missing.push('trade_definition');
+    if (!hasTradeDef && !hasTradeSnippetCore) missing.push('trade_definition');
     if (!hasTradeOpts) missing.push('trade_definition_tradeoptions');
-    if (!hasBefore) missing.push('before_purchase');
-    if (!hasAfter) missing.push('after_purchase');
+    if (!hasBefore && !hasTradeSnippetCore) missing.push('before_purchase');
+    if (!hasAfter && !hasTradeSnippetCore) missing.push('after_purchase');
     return {
       ok: false,
       error: `Unsupported or incomplete Deriv Bot XML: missing required block(s) [${missing.join(', ')}].`,
@@ -756,11 +777,19 @@ router.post('/quantum/validate-xml', requireDb, requireAuth, async (req: AuthReq
   const rawPurchase = (parsed.fields.get('PURCHASE_LIST') || parsed.fields.get('THEN_PURCHASE') || '').toUpperCase();
   const varSide = (parsed.fields.get('VAR:tradeside') || '').toUpperCase();
   const resolvedContract =
-    rawPurchase || (rawTypeList && rawTypeList !== 'BOTH' ? rawTypeList : varSide) || '';
-  const stake = Number(parsed.fields.get('AMOUNT') || parsed.fields.get('VAR:initialstake') || 1);
+    rawPurchase ||
+    (rawTypeList && rawTypeList !== 'BOTH' ? rawTypeList : varSide) ||
+    (parsed.blockTypes.has('trade_definition_accumulator') ? 'ACCU' : '');
+  const stake = Number(
+    parsed.fields.get('AMOUNT') ||
+      parsed.fields.get('VAR:initialstake') ||
+      parsed.fields.get('VAR:initial_stake') ||
+      parsed.fields.get('VAR:martingale:initialstake') ||
+      1
+  );
   const duration = Number(parsed.fields.get('DURATION') || 1);
   const durationUnit = (parsed.fields.get('DURATIONTYPE_LIST') || parsed.fields.get('DURATION_TYPE') || 't').toLowerCase();
-  const barrier = parsed.fields.get('PREDICTION') ?? '0';
+  const barrier = parsed.fields.get('PREDICTION') ?? parsed.fields.get('GROWTHRATE_LIST') ?? '0';
 
   if (!symbol || symbol.length > 32) {
     res.status(400).json({ valid: false, error: 'XML is missing a valid market symbol (SYMBOL_LIST).', code: 'INVALID_SYMBOL' });

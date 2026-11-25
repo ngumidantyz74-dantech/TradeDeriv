@@ -172,8 +172,6 @@ export const BotBuilderPage: React.FC = () => {
     setSelectedSymbol,
     tradePreset,
     setTradePreset,
-    analyserSignal,
-    refreshAnalyserSignal,
     ticks,
     orders,
     theme,
@@ -261,7 +259,6 @@ export const BotBuilderPage: React.FC = () => {
   });
   const [undoStack, setUndoStack] = useState<BotXmlWorkspaceState[]>([]);
   const [redoStack, setRedoStack] = useState<BotXmlWorkspaceState[]>([]);
-  const [analyserSync, setAnalyserSync] = useState<boolean>(false);
   const [canvasZoom, setCanvasZoom] = useState<number>(100);
   const [qsStep2Symbol, setQsStep2Symbol] = useState<string>(xmlState.symbol);
   const [qsStep2Stake, setQsStep2Stake] = useState<string>('1');
@@ -337,8 +334,9 @@ export const BotBuilderPage: React.FC = () => {
   const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Reset telemetry anchor cleanly whenever active accountMode changes (never cache across logins)
+  // Reset telemetry cleanly whenever active user or accountMode changes
   useEffect(() => {
+    setTelemetry(null);
     setSessionResetAt(Date.now());
     setDismissedOutcomeKey('');
   }, [user?.id, accountMode]);
@@ -351,7 +349,7 @@ export const BotBuilderPage: React.FC = () => {
 
   const { optionsBal } = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount);
 
-  // Consume tradePreset from OptionsHub or Market Analyser
+  // Consume tradePreset from OptionsHub or Strategy Lab
   useEffect(() => {
     if (!tradePreset) return;
     updateXmlState((prev) => {
@@ -387,13 +385,9 @@ export const BotBuilderPage: React.FC = () => {
       } else {
         next.quantumPredictionId = null;
         next.quantumExpiresAt = null;
-        if (tradePreset.analyserSync) {
-          next.strategyName = `AnalyserSync_${tradePreset.symbol || prev.symbol}`;
-        }
       }
       return next;
     });
-    if (tradePreset.analyserSync) setAnalyserSync(true);
     setBotView('builder');
     setTradePreset(null);
   }, [tradePreset, updateXmlState, setTradePreset]);
@@ -404,50 +398,20 @@ export const BotBuilderPage: React.FC = () => {
     return () => clearInterval(id);
   }, [xmlState.quantumPredictionId, pendingXmlImport?.quantumPrediction]);
 
-  const handleToggleAnalyserSync = async (enable: boolean) => {
-    setAnalyserSync(enable);
-    if (enable) {
-      const sig = analyserSignal || (await refreshAnalyserSignal(symbol));
-      if (sig) {
-        updateXmlState((prev) => {
-          const ct = sig.contractType || 'DIGITOVER';
-          const infCat = inferTradeCategoryFromContract(ct);
-          const sub = resolveSubtypeDef(infCat.tradeCategory, infCat.tradeSubtype);
-          const infMkt = inferMarketFromSymbol(sig.symbol || prev.symbol);
-          return {
-            ...prev,
-            quantumPredictionId: null,
-            quantumExpiresAt: null,
-            strategyName: `AnalyserSync_${sig.symbol || prev.symbol}`,
-            symbol: sig.symbol || prev.symbol,
-            market: infMkt.market,
-            submarket: infMkt.submarket,
-            tradeCategory: infCat.tradeCategory,
-            tradeSubtype: infCat.tradeSubtype,
-            contractTypeSelection: ct,
-            thenPurchase: ct,
-            elsePurchase: sub.legs.find((l) => l.value !== ct)?.value || ct,
-            prediction: sig.barrier ? String(sig.barrier) : prev.prediction,
-            growthRate: sig.growthRate || prev.growthRate,
-            duration: String(sig.duration || 1),
-            durationUnit: sig.durationUnit || 't',
-            assignments: setAssignmentVal(prev.assignments, 'tradeSide', ct),
-          };
-        });
-        showToast(`Synced Bot Builder to Live Market Analyser (${sig.contractType} · ${sig.confidence}%)`, 'success');
-      }
-    }
-  };
-
   const pollStatus = useCallback(async () => {
     try {
-      const res = await apiFetch<{ telemetry: BotTelemetry | null }>('/api/bots/status');
+      const res = await apiFetch<{ telemetry: BotTelemetry | null }>(
+        `/api/bots/status?accountMode=${encodeURIComponent(accountMode)}`
+      );
       const tel = res.telemetry;
+      if (tel && tel.accountMode && tel.accountMode !== accountMode) {
+        return;
+      }
       setTelemetry(tel);
     } catch {
       // ignore
     }
-  }, []);
+  }, [accountMode]);
 
   useEffect(() => {
     pollStatus();
@@ -557,13 +521,13 @@ export const BotBuilderPage: React.FC = () => {
     setXmlState(createDefaultXmlWorkspaceState());
     setUndoStack([]);
     setRedoStack([]);
-    setAnalyserSync(false);
     showToast('Workspace reset to default XML blocks', 'info');
   };
 
   const handleSwitchAccount = (mode: 'demo' | 'real') => {
     setAccountSheetOpen(false);
     if (mode !== accountMode) {
+      setTelemetry(null);
       setBlocklyLoading(true);
       setAccountMode(mode);
       setTimeout(() => setBlocklyLoading(false), 450);
@@ -576,7 +540,7 @@ export const BotBuilderPage: React.FC = () => {
     if (activeQId && xmlState.quantumExpiresAt) {
       const qSecs = Math.floor((new Date(xmlState.quantumExpiresAt).getTime() - Date.now()) / 1000);
       if (qSecs <= 0) {
-        showToast('Quantum prediction expired after 120 seconds. Run a fresh scan in Quantum Analyser.', 'error');
+        showToast('Quantum prediction expired after 120 seconds. Re-scan in standalone Quantum Analyser.', 'error');
         return;
       }
     }
@@ -584,6 +548,10 @@ export const BotBuilderPage: React.FC = () => {
     try {
       // Trade with REAL Deriv account balances (Demo OR Real) when connected & NOT altered/locked by admin
       const isLiveDerivUnlocked = Boolean(activeConnectedAccount) && !isDbLocked;
+
+      const resolvedMaxStake = Number(getAssignmentVal(xmlState.assignments, 'maxStake', xmlState.maxStake || '0')) || undefined;
+      const resolvedSellTicks = Number(getAssignmentVal(xmlState.assignments, 'Tick Count', xmlState.sellTickCount || '0')) || 0;
+      const resolvedMaxLosses = Number(xmlState.maxLosses || '0') || undefined;
 
       const payload = {
         strategyName: overrides?.strategyName ?? xmlState.strategyName,
@@ -600,11 +568,14 @@ export const BotBuilderPage: React.FC = () => {
         durationUnit: overrides?.durationUnit ?? xmlState.durationUnit,
         multiplier: 100,
         martingale: Number(overrides?.martingale ?? xmlState.martingaleFactor) || 2.1,
-        takeProfit: Number(overrides?.takeProfit ?? takeProfit) || 10,
+        takeProfit: Number(overrides?.takeProfit ?? xmlState.accumulatorTakeProfit ?? takeProfit) || 10,
         stopLoss: Number(overrides?.stopLoss ?? stopLoss) || 6,
+        maxStake: resolvedMaxStake,
+        sellTickCount: resolvedSellTicks,
+        maxLosses: resolvedMaxLosses,
         maxTrades: Number(overrides?.maxTrades ?? xmlState.maxTrades) || 50,
         growthRate: overrides?.growthRate ?? xmlState.growthRate,
-        analyserSync: overrides?.analyserSync ?? analyserSync,
+        analyserSync: false,
         quantumPredictionId: activeQId || null,
         accountMode,
         executionSpeed: 'fast',
@@ -628,7 +599,10 @@ export const BotBuilderPage: React.FC = () => {
 
   const handleStopBot = async () => {
     try {
-      const res = await apiFetch<{ telemetry: BotTelemetry | null }>('/api/bots/stop', { method: 'POST' });
+      const res = await apiFetch<{ telemetry: BotTelemetry | null }>('/api/bots/stop', {
+        method: 'POST',
+        body: JSON.stringify({ accountMode }),
+      });
       setTelemetry(res.telemetry);
       await Promise.all([refreshOrders(), refreshAll()]);
     } catch (err) {
@@ -727,7 +701,6 @@ export const BotBuilderPage: React.FC = () => {
     };
 
     updateXmlState(() => nextSnapshot);
-    setAnalyserSync(Boolean(p.isQuantum));
     setXmlImportError(null);
 
     const parsedAssignments = nextSnapshot.assignments || xmlState.assignments;
@@ -1159,23 +1132,8 @@ export const BotBuilderPage: React.FC = () => {
               </button>
             </div>
 
-            {/* Analyser & Strategy Lab Quick Row */}
+            {/* Strategy Lab Quick Row */}
             <div className="flex flex-wrap items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => {
-                  handleToggleAnalyserSync(true);
-                  setBotView('builder');
-                }}
-                className={`px-3 py-1.5 rounded-lg text-[11px] font-semibold border inline-flex items-center gap-1.5 cursor-pointer ${
-                  analyserSync
-                    ? 'bg-[#00A878]/15 border-[#00A878] text-[#00A878]'
-                    : 'bg-[#F8F9FA] dark:bg-[#181C25] border-slate-200 dark:border-white/10 text-[#374151] dark:text-slate-300'
-                }`}
-              >
-                <Sparkles className="w-3.5 h-3.5" />
-                {analyserSync ? 'Analyser Live Sync: ON' : 'Sync Market Analyser'}
-              </button>
               <button
                 type="button"
                 onClick={() => setActiveTab('trading-bots')}
@@ -1344,13 +1302,12 @@ export const BotBuilderPage: React.FC = () => {
               </button>
               <button
                 type="button"
-                onClick={() => handleToggleAnalyserSync(!analyserSync)}
-                title={analyserSync ? 'Analyser Live Sync ON' : 'Align / Sync Blocks'}
-                className={`p-1.5 rounded cursor-pointer ${
-                  analyserSync
-                    ? 'text-[#00A878] bg-[#00A878]/10'
-                    : 'text-[#374151] dark:text-slate-300 hover:text-[#00A878]'
-                }`}
+                onClick={() => {
+                  setCanvasZoom(100);
+                  showToast('Blocks aligned to 100% zoom', 'info');
+                }}
+                title="Clean up blocks"
+                className="p-1.5 rounded cursor-pointer text-[#374151] dark:text-slate-300 hover:text-[#111319] dark:hover:text-white"
               >
                 <SlidersHorizontal className="w-[18px] h-[18px]" />
               </button>
@@ -1583,7 +1540,7 @@ export const BotBuilderPage: React.FC = () => {
                     <span className="text-right">Buy price and P/L</span>
                   </div>
 
-                  {runState === 'buying' && botOrders.length === 0 && (
+                  {telemetry?.running && runState === 'buying' && botOrders.length === 0 && (
                     <div className="px-4 py-3 flex items-center justify-between border-b border-slate-100 dark:border-white/[0.06] animate-pulse">
                       <div className="flex gap-2">
                         <span className="w-5 h-5 rounded bg-slate-200 dark:bg-white/10" />
@@ -2115,16 +2072,9 @@ export const BotBuilderPage: React.FC = () => {
             >
               <span className="truncate font-mono-num">
                 {qValid
-                  ? `Quantum Strategy · ${Math.floor(qRem / 60)}:${String(qRem % 60).padStart(2, '0')} remaining`
-                  : 'Quantum Signal Expired (120s) — Re-scan in Quantum Analyser'}
+                  ? `Quantum Signed XML · ${Math.floor(qRem / 60)}:${String(qRem % 60).padStart(2, '0')} remaining`
+                  : 'Quantum Signal Expired (120s) — Import a fresh Quantum XML'}
               </span>
-              <button
-                type="button"
-                onClick={() => setActiveTab('market-analyser')}
-                className="underline font-bold shrink-0 cursor-pointer"
-              >
-                {qValid ? 'Analyser' : 'Re-scan'}
-              </button>
             </div>
           );
         })()}

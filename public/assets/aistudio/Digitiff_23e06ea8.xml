@@ -1,0 +1,54 @@
+<statement name="TRADE_OPTIONS">
+  <block type="trade_definition_market" id="blk_market" deletable="false" movable="false">
+    <field name="MARKET_LIST">synthetic_index</field>
+    <field name="SUBMARKET_LIST">random_index</field>
+    <field name="SYMBOL_LIST">1HZ100V</field>
+    <next>
+      <block type="trade_definition_tradetype" id="blk_tradetype" deletable="false" movable="false">
+        <field name="TRADETYPECAT_LIST">digits</field>
+        <field name="TRADETYPE_LIST">evenodd</field>
+        <next>
+          <block type="trade_definition_contracttype" id="blk_contracttype" deletable="false" movable="false">
+            <field name="TYPE_LIST">DIGITEVEN</field>
+            <next>
+              <block type="trade_definition_candleinterval" id="blk_candle" deletable="false" movable="false">
+                <field name="CANDLEINTERVAL_LIST">60</field>
+                <next>
+                  <block type="trade_definition_restartbuysell" id="blk_timemachine" deletable="false" movable="false">
+                    <field name="TIME_MACHINE_ENABLED">FALSE</field>
+                    <next>
+                      <block type="trade_definition_restartonerror" id="blk_restart_err" deletable="false" movable="false">
+                        <field name="RESTARTONERROR">TRUE</field>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </next>
+  </block>
+</statement>
+
+<statement name="SUBMARKET">
+  <block type="trade_definition_tradeoptions" id="blk_digit_trade_options">
+    <mutation xmlns="http://www.w3.org/1999/xhtml" has_first_barrier="false" has_second_barrier="false" prediction="false"></mutation>
+    <field name="DURATIONTYPE_LIST">t</field>
+    <value name="DURATION">
+      <shadow type="math_number" id="num_digit_duration">
+        <field name="NUM">1</field>
+      </shadow>
+    </value>
+    <value name="AMOUNT">
+      <shadow type="math_number_positive" id="num_digit_amount_shadow">
+        <field name="NUM">1</field>
+      </shadow>
+      <block type="procedures_callreturn" id="call_get_next_stake">
+        <mutation xmlns="http://www.w3.org/1999/xhtml" name="Get Next Stake"></mutation>
+        <data>proc_get_stake</data>
+      </block>
+    </value>
+  </block>
+</statement>

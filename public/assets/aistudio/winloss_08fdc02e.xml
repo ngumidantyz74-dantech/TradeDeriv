@@ -1,0 +1,494 @@
+<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true" collection="false">
+  <variables>
+    <variable id="var_result_is_win">resultIsWin</variable>
+    <variable id="var_last_profit">lastProfit</variable>
+    <variable id="var_total_profit">totalProfit</variable>
+    <variable id="var_trade_again">tradeAgain</variable>
+    <variable id="var_initial_stake">initialStake</variable>
+    <variable id="var_win_step">winStep</variable>
+    <variable id="var_win_streak">winStreak</variable>
+    <variable id="var_max_win_steps">maxWinSteps</variable>
+    <variable id="var_profit_threshold">profitThreshold</variable>
+    <variable id="var_loss_threshold">lossThreshold</variable>
+    <variable id="var_next_stake">nextStake</variable>
+    <variable id="var_msg_stake">msgStake</variable>
+    <variable id="var_msg_profit">msgProfit</variable>
+    <variable id="var_msg_stop">msgStop</variable>
+  </variables>
+
+  <!-- 1. Trade Definition & Parameters -->
+  <block type="trade_definition" id="blk_trade_def" deletable="false" x="0" y="50">
+    <statement name="TRADE_OPTIONS">
+      <block type="trade_definition_market" id="blk_market" deletable="false" movable="false">
+        <field name="MARKET_LIST">synthetic_index</field>
+        <field name="SUBMARKET_LIST">random_index</field>
+        <field name="SYMBOL_LIST">1HZ100V</field>
+        <next>
+          <block type="trade_definition_tradetype" id="blk_tradetype" deletable="false" movable="false">
+            <field name="TRADETYPECAT_LIST">accumulator</field>
+            <field name="TRADETYPE_LIST">accumulator</field>
+            <next>
+              <block type="trade_definition_contracttype" id="blk_contracttype" deletable="false" movable="false">
+                <field name="TYPE_LIST">ACCU</field>
+                <next>
+                  <block type="trade_definition_candleinterval" id="blk_candle" deletable="false" movable="false">
+                    <field name="CANDLEINTERVAL_LIST">60</field>
+                    <next>
+                      <block type="trade_definition_restartbuysell" id="blk_timemachine" deletable="false" movable="false">
+                        <field name="TIME_MACHINE_ENABLED">FALSE</field>
+                        <next>
+                          <block type="trade_definition_restartonerror" id="blk_restart_err" deletable="false" movable="false">
+                            <field name="RESTARTONERROR">TRUE</field>
+                          </block>
+                        </next>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+
+    <statement name="INITIALIZATION">
+      <!-- Base stake (used on start and after any loss) -->
+      <block type="variables_set" id="set_initial_stake">
+        <field name="VAR" id="var_initial_stake">initialStake</field>
+        <value name="VALUE">
+          <shadow type="math_number" id="num_initial_stake">
+            <field name="NUM">1</field>
+          </shadow>
+        </value>
+        <next>
+          <!-- Amount added to stake after each consecutive win -->
+          <block type="variables_set" id="set_win_step">
+            <field name="VAR" id="var_win_step">winStep</field>
+            <value name="VALUE">
+              <shadow type="math_number" id="num_win_step">
+                <field name="NUM">0.5</field>
+              </shadow>
+            </value>
+            <next>
+              <!-- Cap on how many consecutive win steps can stack before resetting streak -->
+              <block type="variables_set" id="set_max_win_steps">
+                <field name="VAR" id="var_max_win_steps">maxWinSteps</field>
+                <value name="VALUE">
+                  <shadow type="math_number" id="num_max_win_steps">
+                    <field name="NUM">4</field>
+                  </shadow>
+                </value>
+                <next>
+                  <!-- Profit target to stop bot -->
+                  <block type="variables_set" id="set_profit_threshold">
+                    <field name="VAR" id="var_profit_threshold">profitThreshold</field>
+                    <value name="VALUE">
+                      <shadow type="math_number" id="num_profit_threshold">
+                        <field name="NUM">10</field>
+                      </shadow>
+                    </value>
+                    <next>
+                      <!-- Loss limit to stop bot (positive number; checked against -lossThreshold) -->
+                      <block type="variables_set" id="set_loss_threshold">
+                        <field name="VAR" id="var_loss_threshold">lossThreshold</field>
+                        <value name="VALUE">
+                          <shadow type="math_number" id="num_loss_threshold">
+                            <field name="NUM">5</field>
+                          </shadow>
+                        </value>
+                        <next>
+                          <block type="variables_set" id="set_win_streak_init">
+                            <field name="VAR" id="var_win_streak">winStreak</field>
+                            <value name="VALUE">
+                              <shadow type="math_number" id="num_win_streak_init">
+                                <field name="NUM">0</field>
+                              </shadow>
+                            </value>
+                            <next>
+                              <block type="variables_set" id="set_total_profit_init">
+                                <field name="VAR" id="var_total_profit">totalProfit</field>
+                                <value name="VALUE">
+                                  <shadow type="math_number" id="num_total_profit_init">
+                                    <field name="NUM">0</field>
+                                  </shadow>
+                                </value>
+                              </block>
+                            </next>
+                          </block>
+                        </next>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+
+    <statement name="SUBMARKET">
+      <block type="trade_definition_accumulator" id="blk_accu_params">
+        <field name="GROWTHRATE_LIST">0.02</field>
+        <value name="AMOUNT">
+          <shadow type="math_number_positive" id="num_accu_amount">
+            <field name="NUM">1</field>
+          </shadow>
+          <block type="procedures_callreturn" id="call_get_stake_submarket">
+            <mutation xmlns="http://www.w3.org/1999/xhtml" name="Get Next Stake"></mutation>
+            <data>proc_get_stake</data>
+          </block>
+        </value>
+        <statement name="ACCUMULATOR_PARAMS">
+          <block type="accumulator_take_profit" id="blk_accu_tp">
+            <value name="AMOUNT">
+              <shadow type="math_number" id="num_accu_tp">
+                <field name="NUM">3</field>
+              </shadow>
+            </value>
+          </block>
+        </statement>
+      </block>
+    </statement>
+  </block>
+
+  <!-- 2. Before Purchase -->
+  <block type="before_purchase" id="blk_before_purchase" deletable="false" x="0" y="760">
+    <statement name="BEFOREPURCHASE_STACK">
+      <block type="text_join" id="join_msg_stake">
+        <field name="VARIABLE" id="var_msg_stake">msgStake</field>
+        <statement name="STACK">
+          <block type="text_statement" id="txt_stake_prefix">
+            <value name="TEXT">
+              <shadow type="text" id="shd_stake_prefix">
+                <field name="TEXT">Next stake: </field>
+              </shadow>
+            </value>
+            <next>
+              <block type="text_statement" id="txt_stake_val">
+                <value name="TEXT">
+                  <shadow type="text" id="shd_stake_val">
+                    <field name="TEXT"></field>
+                  </shadow>
+                  <block type="procedures_callreturn" id="call_get_stake_notify">
+                    <mutation xmlns="http://www.w3.org/1999/xhtml" name="Get Next Stake"></mutation>
+                    <data>proc_get_stake</data>
+                  </block>
+                </value>
+              </block>
+            </next>
+          </block>
+        </statement>
+        <next>
+          <block type="notify" id="ntf_next_stake">
+            <field name="NOTIFICATION_TYPE">info</field>
+            <field name="NOTIFICATION_SOUND">silent</field>
+            <value name="MESSAGE">
+              <shadow type="text" id="shd_ntf_stake">
+                <field name="TEXT">Next stake</field>
+              </shadow>
+              <block type="variables_get" id="get_msg_stake">
+                <field name="VAR" id="var_msg_stake">msgStake</field>
+              </block>
+            </value>
+            <next>
+              <block type="purchase" id="blk_purchase">
+                <field name="PURCHASE_LIST">ACCU</field>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+  </block>
+
+  <!-- 3. After Purchase -->
+  <block type="after_purchase" id="blk_after_purchase" x="700" y="50">
+    <statement name="AFTERPURCHASE_STACK">
+      <block type="procedures_callnoreturn" id="call_update_streak">
+        <mutation xmlns="http://www.w3.org/1999/xhtml" name="Update Win Streak On Result">
+          <arg name="resultIsWin"></arg>
+        </mutation>
+        <data>proc_update_streak</data>
+        <value name="ARG0">
+          <block type="contract_check_result" id="chk_is_win">
+            <field name="CHECK_RESULT">win</field>
+          </block>
+        </value>
+        <next>
+          <block type="controls_if" id="if_should_trade_again">
+            <value name="IF0">
+              <block type="procedures_callreturn" id="call_check_limits">
+                <mutation xmlns="http://www.w3.org/1999/xhtml" name="Evaluate Profit And Loss Limits">
+                  <arg name="lastProfit"></arg>
+                </mutation>
+                <data>proc_check_limits</data>
+                <value name="ARG0">
+                  <block type="read_details" id="read_contract_profit">
+                    <field name="DETAIL_INDEX">4</field>
+                  </block>
+                </value>
+              </block>
+            </value>
+            <statement name="DO0">
+              <block type="trade_again" id="blk_trade_again"></block>
+            </statement>
+          </block>
+        </next>
+      </block>
+    </statement>
+  </block>
+
+  <!-- Procedure: Calculate Next Stake (initialStake + winStreak * winStep) -->
+  <block type="procedures_defreturn" id="proc_get_stake" collapsed="true" x="700" y="420">
+    <field name="NAME">Get Next Stake</field>
+    <statement name="STACK">
+      <block type="variables_set" id="set_next_stake">
+        <field name="VAR" id="var_next_stake">nextStake</field>
+        <value name="VALUE">
+          <block type="math_arithmetic" id="add_base_and_bonus">
+            <field name="OP">ADD</field>
+            <value name="A">
+              <shadow type="math_number" id="shd_base_a">
+                <field name="NUM">1</field>
+              </shadow>
+              <block type="variables_get" id="get_initial_stake">
+                <field name="VAR" id="var_initial_stake">initialStake</field>
+              </block>
+            </value>
+            <value name="B">
+              <shadow type="math_number" id="shd_bonus_b">
+                <field name="NUM">0</field>
+              </shadow>
+              <block type="math_arithmetic" id="mul_streak_step">
+                <field name="OP">MULTIPLY</field>
+                <value name="A">
+                  <shadow type="math_number" id="shd_streak_a">
+                    <field name="NUM">0</field>
+                  </shadow>
+                  <block type="variables_get" id="get_win_streak">
+                    <field name="VAR" id="var_win_streak">winStreak</field>
+                  </block>
+                </value>
+                <value name="B">
+                  <shadow type="math_number" id="shd_step_b">
+                    <field name="NUM">0.5</field>
+                  </shadow>
+                  <block type="variables_get" id="get_win_step">
+                    <field name="VAR" id="var_win_step">winStep</field>
+                  </block>
+                </value>
+              </block>
+            </value>
+          </block>
+        </value>
+      </block>
+    </statement>
+    <value name="RETURN">
+      <block type="variables_get" id="ret_next_stake">
+        <field name="VAR" id="var_next_stake">nextStake</field>
+      </block>
+    </value>
+  </block>
+
+  <!-- Procedure: Add Step On Win, Reset To 0 On Loss -->
+  <block type="procedures_defnoreturn" id="proc_update_streak" collapsed="true" x="700" y="510">
+    <mutation xmlns="http://www.w3.org/1999/xhtml">
+      <arg name="resultIsWin" varid="var_result_is_win"></arg>
+    </mutation>
+    <field name="NAME">Update Win Streak On Result</field>
+    <statement name="STACK">
+      <block type="controls_if" id="if_win_or_loss">
+        <mutation xmlns="http://www.w3.org/1999/xhtml" else="1"></mutation>
+        <value name="IF0">
+          <block type="variables_get" id="get_result_is_win">
+            <field name="VAR" id="var_result_is_win">resultIsWin</field>
+          </block>
+        </value>
+        <statement name="DO0">
+          <block type="math_change" id="inc_win_streak">
+            <field name="VAR" id="var_win_streak">winStreak</field>
+            <value name="DELTA">
+              <shadow type="math_number" id="num_inc_one">
+                <field name="NUM">1</field>
+              </shadow>
+            </value>
+            <next>
+              <block type="controls_if" id="if_exceed_max_win_steps">
+                <value name="IF0">
+                  <block type="logic_compare" id="cmp_streak_gt_max">
+                    <field name="OP">GT</field>
+                    <value name="A">
+                      <block type="variables_get" id="get_streak_check_max">
+                        <field name="VAR" id="var_win_streak">winStreak</field>
+                      </block>
+                    </value>
+                    <value name="B">
+                      <block type="variables_get" id="get_max_win_steps">
+                        <field name="VAR" id="var_max_win_steps">maxWinSteps</field>
+                      </block>
+                    </value>
+                  </block>
+                </value>
+                <statement name="DO0">
+                  <block type="variables_set" id="reset_streak_at_cap">
+                    <field name="VAR" id="var_win_streak">winStreak</field>
+                    <value name="VALUE">
+                      <shadow type="math_number" id="num_streak_zero_cap">
+                        <field name="NUM">0</field>
+                      </shadow>
+                    </value>
+                  </block>
+                </statement>
+              </block>
+            </next>
+          </block>
+        </statement>
+        <statement name="ELSE">
+          <!-- Loss: reduce/reset stake back to base initialStake -->
+          <block type="variables_set" id="reset_streak_on_loss">
+            <field name="VAR" id="var_win_streak">winStreak</field>
+            <value name="VALUE">
+              <shadow type="math_number" id="num_streak_zero_loss">
+                <field name="NUM">0</field>
+              </shadow>
+            </value>
+          </block>
+        </statement>
+      </block>
+    </statement>
+  </block>
+
+  <!-- Procedure: Track Total Profit & Enforce Profit Target / Loss Limit -->
+  <block type="procedures_defreturn" id="proc_check_limits" collapsed="true" x="700" y="600">
+    <mutation xmlns="http://www.w3.org/1999/xhtml">
+      <arg name="lastProfit" varid="var_last_profit"></arg>
+    </mutation>
+    <field name="NAME">Evaluate Profit And Loss Limits</field>
+    <statement name="STACK">
+      <block type="math_change" id="add_last_profit">
+        <field name="VAR" id="var_total_profit">totalProfit</field>
+        <value name="DELTA">
+          <shadow type="math_number" id="num_delta_profit">
+            <field name="NUM">0</field>
+          </shadow>
+          <block type="variables_get" id="get_last_profit">
+            <field name="VAR" id="var_last_profit">lastProfit</field>
+          </block>
+        </value>
+        <next>
+          <block type="text_join" id="join_msg_profit">
+            <field name="VARIABLE" id="var_msg_profit">msgProfit</field>
+            <statement name="STACK">
+              <block type="text_statement" id="txt_profit_lbl">
+                <value name="TEXT">
+                  <shadow type="text" id="shd_profit_lbl">
+                    <field name="TEXT">Session profit: </field>
+                  </shadow>
+                </value>
+                <next>
+                  <block type="text_statement" id="txt_profit_val">
+                    <value name="TEXT">
+                      <shadow type="text" id="shd_profit_val">
+                        <field name="TEXT"></field>
+                      </shadow>
+                      <block type="variables_get" id="get_total_profit_msg">
+                        <field name="VAR" id="var_total_profit">totalProfit</field>
+                      </block>
+                    </value>
+                  </block>
+                </next>
+              </block>
+            </statement>
+            <next>
+              <block type="notify" id="ntf_session_profit">
+                <field name="NOTIFICATION_TYPE">warn</field>
+                <field name="NOTIFICATION_SOUND">silent</field>
+                <value name="MESSAGE">
+                  <shadow type="text" id="shd_ntf_profit">
+                    <field name="TEXT">Session profit</field>
+                  </shadow>
+                  <block type="variables_get" id="get_msg_profit">
+                    <field name="VAR" id="var_msg_profit">msgProfit</field>
+                  </block>
+                </value>
+                <next>
+                  <block type="variables_set" id="set_trade_again_false">
+                    <field name="VAR" id="var_trade_again">tradeAgain</field>
+                    <value name="VALUE">
+                      <block type="logic_boolean" id="bool_false_default">
+                        <field name="BOOL">FALSE</field>
+                      </block>
+                    </value>
+                    <next>
+                      <block type="controls_if" id="if_under_profit_target">
+                        <value name="IF0">
+                          <block type="logic_compare" id="cmp_profit_lt_target">
+                            <field name="OP">LT</field>
+                            <value name="A">
+                              <block type="variables_get" id="get_total_profit_tp">
+                                <field name="VAR" id="var_total_profit">totalProfit</field>
+                              </block>
+                            </value>
+                            <value name="B">
+                              <block type="variables_get" id="get_profit_threshold">
+                                <field name="VAR" id="var_profit_threshold">profitThreshold</field>
+                              </block>
+                            </value>
+                          </block>
+                        </value>
+                        <statement name="DO0">
+                          <block type="controls_if" id="if_above_loss_limit">
+                            <value name="IF0">
+                              <block type="logic_compare" id="cmp_profit_gt_neg_loss">
+                                <field name="OP">GT</field>
+                                <value name="A">
+                                  <block type="variables_get" id="get_total_profit_sl">
+                                    <field name="VAR" id="var_total_profit">totalProfit</field>
+                                  </block>
+                                </value>
+                                <value name="B">
+                                  <block type="math_single" id="neg_loss_threshold">
+                                    <field name="OP">NEG</field>
+                                    <value name="NUM">
+                                      <shadow type="math_number" id="shd_neg_loss">
+                                        <field name="NUM">5</field>
+                                      </shadow>
+                                      <block type="variables_get" id="get_loss_threshold">
+                                        <field name="VAR" id="var_loss_threshold">lossThreshold</field>
+                                      </block>
+                                    </value>
+                                  </block>
+                                </value>
+                              </block>
+                            </value>
+                            <statement name="DO0">
+                              <block type="variables_set" id="set_trade_again_true">
+                                <field name="VAR" id="var_trade_again">tradeAgain</field>
+                                <value name="VALUE">
+                                  <block type="logic_boolean" id="bool_true_continue">
+                                    <field name="BOOL">TRUE</field>
+                                  </block>
+                                </value>
+                              </block>
+                            </statement>
+                          </block>
+                        </statement>
+                      </block>
+                    </next>
+                  </block>
+                </next>
+              </block>
+            </next>
+          </block>
+        </next>
+      </block>
+    </statement>
+    <value name="RETURN">
+      <block type="variables_get" id="ret_trade_again">
+        <field name="VAR" id="var_trade_again">tradeAgain</field>
+      </block>
+    </value>
+  </block>
+</xml>

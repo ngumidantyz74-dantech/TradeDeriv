@@ -9,7 +9,6 @@ import {
   Sun,
   Moon,
   Bot,
-  Activity,
   Zap,
   Calculator,
   FileText,
@@ -121,7 +120,6 @@ const SIDEBAR_PRO_TOOLS: Array<{ id: NavTab; label: string; icon: React.Componen
   { id: 'mt5-tv', label: 'Deriv Trader', icon: CandlestickChart },
   { id: 'bot-builder', label: 'Deriv Bot', icon: Cpu },
   { id: 'smart-trader', label: 'SmartTrader', icon: Sliders },
-  { id: 'market-analyser', label: 'Market Analyser', icon: Activity },
   { id: 'trading-bots', label: 'Trading Bots', icon: Bot },
   { id: 'bulk-trader', label: 'Bulk Trader', icon: Zap },
   { id: 'risk-calc', label: 'Risk Centre', icon: Calculator },
@@ -303,7 +301,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
           </div>
 
           <div className="flex items-center gap-2.5 shrink-0">
-            <AskAmyPill onClick={() => setActiveTab('market-analyser')} />
+            <AskAmyPill onClick={() => setActiveTab('learning-hub')} />
 
             <div className="px-3 py-1 rounded-full bg-[#F4F5F7] dark:bg-[#1D202A] text-xs font-semibold flex items-center gap-2">
               <span className={accountMode === 'real' ? 'text-[#00A878]' : 'text-amber-400'}>
@@ -434,7 +432,7 @@ export const AppShell: React.FC<{ children: React.ReactNode }> = ({ children }) 
             {/* Center Slot */}
             <div className="flex items-center justify-center">
               {activeTab === 'home' || activeTab === 'portfolio' || activeTab === 'exchange' ? (
-                <AskAmyPill onClick={() => setActiveTab('market-analyser')} />
+                <AskAmyPill onClick={() => setActiveTab('learning-hub')} />
               ) : (
                 <div className="inline-flex items-center bg-[#232732] p-[3px] rounded-full">
                   <button

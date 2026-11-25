@@ -10,7 +10,6 @@ import type {
   PublicSettings,
   WorkspacePreferences,
   ExchangePair,
-  AnalyserSignalResult,
 } from '../types';
 import { apiFetch, getStoredToken, setStoredToken, getClientDerivAppId, setClientDerivAppId } from '../lib/api';
 import {
@@ -67,8 +66,6 @@ interface AppContextValue {
   lastDerivTickAt: number | null;
   instruments: MarketInstrument[];
   exchangePairs: ExchangePair[];
-  analyserSignal: AnalyserSignalResult | null;
-  refreshAnalyserSignal: (symbol?: string) => Promise<AnalyserSignalResult | null>;
   orders: OrderRecord[];
   watchlist: string[];
   notifications: NotificationItem[];
@@ -124,7 +121,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [lastDerivTickAt, setLastDerivTickAt] = useState<number | null>(null);
   const [instruments, setInstruments] = useState<MarketInstrument[]>([]);
   const [exchangePairs, setExchangePairs] = useState<ExchangePair[]>([]);
-  const [analyserSignal, setAnalyserSignal] = useState<AnalyserSignalResult | null>(null);
   const [orders, setOrders] = useState<OrderRecord[]>([]);
   const [watchlist, setWatchlist] = useState<string[]>([]);
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
@@ -302,22 +298,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, []);
 
-  const refreshAnalyserSignal = useCallback(async (symbol?: string): Promise<AnalyserSignalResult | null> => {
-    try {
-      const q = symbol ? `?symbol=${encodeURIComponent(symbol)}` : '';
-      const res = await apiFetch<{ signal: AnalyserSignalResult }>(`/api/intelligence/analyser-signal${q}`, {
-        skipAuth: true,
-      });
-      if (res.signal) {
-        setAnalyserSignal(res.signal);
-        return res.signal;
-      }
-      return null;
-    } catch {
-      return null;
-    }
-  }, []);
-
   const refreshOrders = useCallback(async () => {
     if (!getStoredToken()) return;
     try {
@@ -466,18 +446,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   useEffect(() => {
     fetchPublicData();
     refreshAll();
-    refreshAnalyserSignal();
-  }, [fetchPublicData, refreshAll, refreshAnalyserSignal]);
-
-  // Keep analyser signal live when working in analyser / bot builder / smart trader
-  useEffect(() => {
-    if (!['bot-builder', 'smart-trader', 'market-analyser', 'trading-bots'].includes(activeTab)) return;
-    refreshAnalyserSignal(selectedSymbol);
-    const id = setInterval(() => {
-      refreshAnalyserSignal(selectedSymbol);
-    }, 3500);
-    return () => clearInterval(id);
-  }, [activeTab, selectedSymbol, refreshAnalyserSignal]);
+  }, [fetchPublicData, refreshAll]);
 
   const activeSymbolsSignature = [
     selectedSymbol,
@@ -964,8 +933,6 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         lastDerivTickAt,
         instruments,
         exchangePairs,
-        analyserSignal,
-        refreshAnalyserSignal,
         orders,
         watchlist,
         notifications,

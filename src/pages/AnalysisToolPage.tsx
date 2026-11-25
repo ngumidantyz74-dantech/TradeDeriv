@@ -8,14 +8,12 @@ import {
   Target,
   Clock,
   Sparkles,
-  ArrowUpRight,
   AlertTriangle,
   RefreshCw,
   Send,
   ShieldAlert,
   Search,
   Download,
-  ShieldCheck,
   Cpu,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
@@ -114,14 +112,12 @@ const GRANULARITY_OPTIONS = [
   { label: '4h', value: 14400 },
 ];
 
-export const AnalysisToolPage: React.FC = () => {
+export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalone = true }) => {
+  void standalone;
   const {
     instruments,
     selectedSymbol,
     setSelectedSymbol,
-    setActiveTab,
-    setTradePreset,
-    analyserSignal,
     accountMode,
     activeConnectedAccount,
     isDbLocked,
@@ -130,7 +126,7 @@ export const AnalysisToolPage: React.FC = () => {
     showToast,
   } = useApp();
 
-  const [tab, setTab] = useState<AnalyserTab>('radar');
+  const [tab, setTab] = useState<AnalyserTab>('quantum');
   const [granularity, setGranularity] = useState(900);
   const [tickCount, setTickCount] = useState(100);
   const [prices, setPrices] = useState<number[]>([]);
@@ -354,33 +350,6 @@ export const AnalysisToolPage: React.FC = () => {
     }
   };
 
-  const handleSendQuantumToBot = (pred: QuantumPrediction) => {
-    const secs =
-      pred.validity_status === 'VALID'
-        ? Math.max(0, Math.floor((new Date(pred.expires_at).getTime() - Date.now()) / 1000))
-        : 0;
-    if (secs <= 0) {
-      showToast('Prediction expired after 120 seconds. Run a fresh Quantum scan.', 'error');
-      loadQuantumPredictions();
-      return;
-    }
-    setTradePreset({
-      symbol: pred.instrument,
-      contractType: pred.contract_type,
-      side: pred.contract_type,
-      barrier: pred.barrier,
-      stake: Number(pred.stake),
-      duration: Number(pred.duration || 1),
-      durationUnit: pred.duration_unit || 't',
-      analyserSync: true,
-      strategyType: 'quantum_minimal_loss',
-      quantumPredictionId: pred.prediction_id,
-      quantumExpiresAt: pred.expires_at,
-    });
-    setActiveTab('bot-builder');
-    showToast(`Loaded ${pred.prediction_id} (${secs}s left) into Bot Builder`, 'success');
-  };
-
   useEffect(() => {
     if (tab === 'radar') loadRadar();
     if (tab === 'quantum') loadQuantumPredictions();
@@ -522,10 +491,9 @@ export const AnalysisToolPage: React.FC = () => {
     }
   };
 
-  const openInChart = (sym: string) => {
+  const inspectSymbolLocally = (sym: string) => {
     setSelectedSymbol(sym);
-    setActiveTab('mt5-tv');
-    window.scrollTo({ top: 0, behavior: 'auto' });
+    setTab('smc');
   };
 
   const filteredRadar = useMemo(() => {
@@ -622,65 +590,6 @@ export const AnalysisToolPage: React.FC = () => {
           </div>
         </div>
       </div>
-
-      {/* Live Signal Bridge to Deriv Bot & SmartTrader */}
-      {analyserSignal && (
-        <div className="rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] px-4 py-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          <div className="flex items-start sm:items-center gap-3 min-w-0">
-            <span className="w-9 h-9 rounded-xl bg-[#00A878]/15 text-[#00A878] flex items-center justify-center shrink-0">
-              <Sparkles className="w-4 h-4" />
-            </span>
-            <div className="min-w-0">
-              <div className="flex flex-wrap items-center gap-2 text-xs">
-                <span className="font-bold text-[#00A878]">Live Executable Signal</span>
-                <span className="font-mono font-bold">{analyserSignal.displayName}</span>
-                <span className="px-2 py-0.5 rounded bg-[#F4F5F7] dark:bg-[#111319] font-mono text-[11px] font-bold">
-                  {analyserSignal.contractType} · {analyserSignal.confidence}% conf.
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-500 truncate mt-0.5">{analyserSignal.reason}</p>
-            </div>
-          </div>
-          <div className="flex items-center gap-2 shrink-0 flex-wrap">
-            <button
-              type="button"
-              onClick={() => {
-                setTradePreset({
-                  symbol: analyserSignal.symbol,
-                  contractType: analyserSignal.contractType,
-                  side: analyserSignal.side,
-                  barrier: analyserSignal.barrier,
-                  growthRate: analyserSignal.growthRate,
-                  analyserSync: true,
-                  stake: 1,
-                });
-                setActiveTab('bot-builder');
-              }}
-              className="px-3.5 py-2 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
-            >
-              Sync &amp; Launch in Deriv Bot
-            </button>
-            <button
-              type="button"
-              onClick={() => {
-                setTradePreset({
-                  symbol: analyserSignal.symbol,
-                  contractType: analyserSignal.contractType,
-                  side: analyserSignal.side,
-                  barrier: analyserSignal.barrier,
-                  growthRate: analyserSignal.growthRate,
-                  analyserSync: true,
-                  stake: 1,
-                });
-                setActiveTab('smart-trader');
-              }}
-              className="px-3.5 py-2 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold cursor-pointer whitespace-nowrap"
-            >
-              Send to SmartTrader
-            </button>
-          </div>
-        </div>
-      )}
 
       {/* Sub-Tabs */}
       <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
@@ -817,15 +726,6 @@ export const AnalysisToolPage: React.FC = () => {
                     <button
                       type="button"
                       disabled={!latestValid}
-                      onClick={() => handleSendQuantumToBot(latestPred)}
-                      className="px-4 py-2 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <ShieldCheck className="w-3.5 h-3.5" />
-                      Send to Bot Builder
-                    </button>
-                    <button
-                      type="button"
-                      disabled={!latestValid}
                       onClick={() => handleDownloadQuantumXml(latestPred)}
                       className="px-4 py-2 rounded-xl bg-[#151820] hover:bg-[#242833] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                     >
@@ -893,14 +793,6 @@ export const AnalysisToolPage: React.FC = () => {
                               )}
                             </td>
                             <td className="px-4 py-2.5 text-right space-x-2">
-                              <button
-                                type="button"
-                                disabled={!active}
-                                onClick={() => handleSendQuantumToBot(p)}
-                                className="px-2.5 py-1 rounded-lg bg-[#00A878] text-white font-bold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
-                              >
-                                Run
-                              </button>
                               <button
                                 type="button"
                                 disabled={!active}
@@ -1019,7 +911,7 @@ export const AnalysisToolPage: React.FC = () => {
                         <td className="px-4 py-3">
                           <button
                             type="button"
-                            onClick={() => openInChart(row.symbol)}
+                            onClick={() => inspectSymbolLocally(row.symbol)}
                             className="text-left group cursor-pointer"
                           >
                             <div className="font-bold text-[#0E1117] dark:text-white group-hover:text-[#FF444F] transition-colors">
@@ -1116,10 +1008,10 @@ export const AnalysisToolPage: React.FC = () => {
                         <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5">
                           <button
                             type="button"
-                            onClick={() => openInChart(row.symbol)}
+                            onClick={() => inspectSymbolLocally(row.symbol)}
                             className="px-2.5 py-1.5 rounded-lg bg-[#1958B7]/10 text-[#1958B7] hover:bg-[#1958B7]/20 font-semibold cursor-pointer inline-flex items-center gap-1"
                           >
-                            Chart <ArrowUpRight className="w-3 h-3" />
+                            Inspect SMC
                           </button>
                           {row.topSetup && (
                             <button
@@ -1171,13 +1063,6 @@ export const AnalysisToolPage: React.FC = () => {
                 className="px-3.5 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
               >
                 <RefreshCw className={`w-3.5 h-3.5 ${analyzeLoading ? 'animate-spin' : ''}`} /> Refresh
-              </button>
-              <button
-                type="button"
-                onClick={() => openInChart(selectedSymbol)}
-                className="px-3.5 py-1.5 rounded-xl bg-[#FF444F] text-white text-xs font-semibold flex items-center gap-1 cursor-pointer"
-              >
-                Open Chart Overlay <ArrowUpRight className="w-3.5 h-3.5" />
               </button>
             </div>
           </div>
@@ -1389,13 +1274,6 @@ export const AnalysisToolPage: React.FC = () => {
                 </div>
 
                 <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => openInChart(selectedSymbol)}
-                    className="px-4 py-2 rounded-xl border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold cursor-pointer"
-                  >
-                    Inspect on Chart
-                  </button>
                   {(analyzeData.buyLowSellHigh.action === 'BUY_LOW_CANDIDATE' ||
                     analyzeData.buyLowSellHigh.action === 'SELL_HIGH_CANDIDATE') && (
                     <button

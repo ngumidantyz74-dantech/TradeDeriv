@@ -1,6 +1,6 @@
 import { query, queryOne, execute, addNotification } from './db.ts';
 import { derivWs, type TickData } from './deriv-client.ts';
-import { placeUnifiedOrder, closeOrderById, bulkCloseOrders } from './trade-execution.ts';
+import { placeUnifiedOrder, closeOrderById, bulkCloseOrders, settleVirtualDigitalOrder } from './trade-execution.ts';
 import { computeLiveAnalyserSignal } from './routes/intelligence.ts';
 import { verifyAndConsumeQuantumPrediction } from './routes/quantum.ts';
 
@@ -15,6 +15,9 @@ export interface BotSessionConfig {
   baseStake: number;
   winStep?: number;
   maxWinSteps?: number;
+  maxStake?: number;
+  sellTickCount?: number;
+  maxLosses?: number;
   barrier?: string;
   duration?: number;
   durationUnit?: string;
@@ -89,6 +92,10 @@ interface InternalBotSession extends BotTelemetry {
   lossStreak: number;
   winStep: number;
   maxWinSteps: number;
+  maxStake: number;
+  sellTickCount: number;
+  maxLosses: number;
+  consecutiveErrors: number;
   contractSideMode: 'both' | 'single';
   currentTradeSide: string;
   conditionType: 'any_tick' | 'last_digit_gte' | 'last_digit_lte' | 'rsi_signal';
@@ -120,9 +127,13 @@ function appendJournal(
   if (session.journal.length > 80) session.journal.length = 80;
 }
 
-const activeSessions = new Map<number, InternalBotSession>();
+const activeSessions = new Map<string, InternalBotSession>();
 const closingOrderLocks = new Set<number>();
 const botLastPersistAt = new Map<number, number>();
+
+function sessionKey(userId: number, accountMode: 'real' | 'demo' = 'demo'): string {
+  return `${userId}:${accountMode === 'real' ? 'real' : 'demo'}`;
+}
 
 function getLastDigit(price: number, pipSize = 0.01): number {
   const decimals = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
@@ -264,6 +275,9 @@ function applyProgressionStake(session: InternalBotSession, won: boolean): boole
       session.currentStake = Number(Math.min(base * 16, session.currentStake * factor).toFixed(2));
     }
   }
+  if (session.maxStake > 0 && session.currentStake > session.maxStake) {
+    session.currentStake = Number(Math.max(base, session.maxStake).toFixed(2));
+  }
   return switchedSide;
 }
 
@@ -327,9 +341,9 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   const openBotOrders = await query<any>(
     `SELECT id, user_id, symbol, contract_type, execution_mode, deriv_contract_id, stake, multiplier, entry_price, barrier, sl_usd, tp_usd, opened_at
      FROM virtual_orders
-     WHERE user_id = $1 AND symbol = $2 AND status = 'OPEN' AND source = 'bot'
+     WHERE user_id = $1 AND symbol = $2 AND account_mode = $3 AND status = 'OPEN' AND source = 'bot'
      LIMIT 20`,
-    [session.userId, session.symbol]
+    [session.userId, session.symbol, session.accountMode]
   );
 
   for (const order of openBotOrders) {
@@ -379,7 +393,11 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         pnl: accruedPnl,
       });
 
-      if (elapsedTicks >= 5 || accruedPnl >= Number(order.tp_usd || order.stake * 0.15)) {
+      if (
+        (session.sellTickCount > 0 && elapsedTicks >= session.sellTickCount) ||
+        elapsedTicks >= 5 ||
+        accruedPnl >= Number(order.tp_usd || order.stake * 0.15)
+      ) {
         closingOrderLocks.add(order.id);
         botLastPersistAt.delete(order.id);
         closeOrderById(order.id, session.userId)
@@ -427,15 +445,19 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   }
 
   if (session.takeProfit > 0 && session.realizedPnl >= session.takeProfit) {
-    await stopBotSession(session.userId, `Take Profit target ($${session.takeProfit.toFixed(2)}) reached`);
+    await stopBotSession(session.userId, `Take Profit target ($${session.takeProfit.toFixed(2)}) reached`, session.accountMode);
     return;
   }
   if (session.stopLoss > 0 && session.realizedPnl <= -session.stopLoss) {
-    await stopBotSession(session.userId, `Stop Loss limit (-$${session.stopLoss.toFixed(2)}) reached`);
+    await stopBotSession(session.userId, `Stop Loss limit (-$${session.stopLoss.toFixed(2)}) reached`, session.accountMode);
+    return;
+  }
+  if (session.maxLosses > 0 && session.losses >= session.maxLosses) {
+    await stopBotSession(session.userId, `Reached max ${session.maxLosses} losses cap`, session.accountMode);
     return;
   }
   if (session.maxTrades > 0 && session.tradesPlaced >= session.maxTrades) {
-    await stopBotSession(session.userId, `Completed max ${session.maxTrades} bot trades`);
+    await stopBotSession(session.userId, `Completed max ${session.maxTrades} bot trades`, session.accountMode);
     return;
   }
 
@@ -445,8 +467,8 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   }
   if (openBotOrders.length > 0) return;
   const stillOpen = await queryOne<{ id: number }>(
-    "SELECT id FROM virtual_orders WHERE user_id = $1 AND status = 'OPEN' AND source = 'bot' LIMIT 1",
-    [session.userId]
+    "SELECT id FROM virtual_orders WHERE user_id = $1 AND account_mode = $2 AND status = 'OPEN' AND source = 'bot' LIMIT 1",
+    [session.userId, session.accountMode]
   );
   if (stillOpen) return;
 
@@ -470,7 +492,8 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         appendJournal(session, 'error', qCheck.reason || 'Quantum prediction expired after 120s window.');
         await stopBotSession(
           session.userId,
-          qCheck.reason || 'Quantum 2-minute prediction validity window expired (120s)'
+          qCheck.reason || 'Quantum 2-minute prediction validity window expired (120s)',
+          session.accountMode
         );
         return;
       }
@@ -532,6 +555,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 
     session.lastTradeAt = Date.now();
     session.tradesPlaced += 1;
+    session.consecutiveErrors = 0;
     session.runState = 'bought';
     appendJournal(
       session,
@@ -544,17 +568,30 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     });
 
     if (order.execution_mode === 'deriv' || !['MULTUP', 'MULTDOWN', 'ACCU'].includes(decision.contractType)) {
+      const expectedMs =
+        durationUnit.toLowerCase() === 't'
+          ? Math.max(1200, duration * 1200)
+          : Math.max(2000, duration * (durationUnit === 'm' ? 60000 : durationUnit === 'h' ? 3600000 : 1000));
+      const startedAtMs = Date.now();
+      let attempts = 0;
       const checkInterval = setInterval(async () => {
+        attempts += 1;
         try {
-          const row = await queryOne<{ status: string; pnl: number }>(
-            'SELECT status, pnl FROM virtual_orders WHERE id = $1',
+          const row = await queryOne<{ status: string; pnl: number; execution_mode: string }>(
+            'SELECT status, pnl, execution_mode FROM virtual_orders WHERE id = $1',
             [order.id]
           );
           if (!row || row.status === 'CLOSED') {
             clearInterval(checkInterval);
-            if (row) {
+            if (row && session.running) {
               handleBotTradeSettled(session, Number(row.pnl || 0));
             }
+            return;
+          }
+          if (row.execution_mode === 'virtual' && Date.now() - startedAtMs >= expectedMs + 6000) {
+            await settleVirtualDigitalOrder(Number(order.id)).catch(() => {});
+          } else if (attempts >= 180 || !session.running) {
+            clearInterval(checkInterval);
           }
         } catch {
           clearInterval(checkInterval);
@@ -565,14 +602,30 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     const rawMsg = err instanceof Error ? err.message : 'Execution paused';
     const low = rawMsg.toLowerCase();
     const isInsuff = low.includes('insufficient');
-    const isFatalAuth = low.includes('token') || low.includes('reconnect') || low.includes('suspended');
+    const isFatalAuth =
+      low.includes('token') ||
+      low.includes('reconnect') ||
+      low.includes('suspended') ||
+      low.includes('otp') ||
+      low.includes('unauthorized') ||
+      low.includes('authorization') ||
+      low.includes('invalid') ||
+      low.includes('rejected') ||
+      low.includes('expired') ||
+      low.includes('no active connected') ||
+      low.includes('market is closed') ||
+      low.includes('cannot be purchased');
+    session.consecutiveErrors += 1;
+    if (session.running) {
+      session.runState = 'idle';
+    }
     session.lastSignal = isInsuff
       ? 'Your account balance is insufficient to buy this contract.'
       : rawMsg;
     appendJournal(session, 'error', session.lastSignal);
     derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
-    if (isInsuff || isFatalAuth) {
-      await stopBotSession(session.userId, session.lastSignal);
+    if (isInsuff || isFatalAuth || session.consecutiveErrors >= 3) {
+      await stopBotSession(session.userId, session.lastSignal, session.accountMode);
     }
   } finally {
     session.isExecutingTrade = false;
@@ -643,9 +696,13 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     verifiedQuantum = qCheck.prediction;
   }
 
-  if (activeSessions.has(cfg.userId)) {
-    await stopBotSession(cfg.userId, 'Replaced by new bot run');
+  const targetMode: 'real' | 'demo' = cfg.accountMode === 'real' ? 'real' : 'demo';
+  const sKey = sessionKey(cfg.userId, targetMode);
+  if (activeSessions.has(sKey)) {
+    await stopBotSession(cfg.userId, 'Replaced by new bot run', targetMode);
   }
+  // Settle any orphaned OPEN bot orders in this specific mode from an interrupted run
+  await bulkCloseOrders(cfg.userId, 'bot', targetMode).catch(() => {});
 
   await derivWs.ensureSymbolSubscribed(cfg.symbol);
   const seedPrices = await derivWs.fetchTickHistory(cfg.symbol, 25);
@@ -658,7 +715,6 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     pipSize: 0.01,
   };
 
-  const targetMode: 'real' | 'demo' = cfg.accountMode === 'real' ? 'real' : 'demo';
   const targetIsVirtual = targetMode === 'demo';
   let modeDbLocked = false;
   try {
@@ -701,6 +757,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
 
   const initialTradeSide = String(cfg.tradeSide || cfg.contractType || 'CALL').toUpperCase();
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+  const clampedStake = Number(Math.max(0.35, cfg.baseStake || 1).toFixed(2));
 
   const session: InternalBotSession = {
     userId: cfg.userId,
@@ -710,8 +767,8 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     strategyType: cfg.strategyType || 'Martingale',
     symbol: cfg.symbol,
     contractType: cfg.contractType || 'DIGITOVER',
-    baseStake: Number(Math.max(0.5, cfg.baseStake || 1).toFixed(2)),
-    currentStake: Number(Math.max(0.5, cfg.baseStake || 1).toFixed(2)),
+    baseStake: clampedStake,
+    currentStake: clampedStake,
     martingaleStep: 0,
     martingaleFactor: Number(cfg.martingale || 2.0),
     takeProfit: Number(cfg.takeProfit || 25),
@@ -744,13 +801,17 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     lossStreak: 0,
     winStep: Number(cfg.winStep || 0),
     maxWinSteps: Number(cfg.maxWinSteps || 3),
+    maxStake: Number(cfg.maxStake || 0),
+    sellTickCount: Number(cfg.sellTickCount || 0),
+    maxLosses: Number(cfg.maxLosses || 0),
+    consecutiveErrors: 0,
     contractSideMode: cfg.contractSideMode === 'single' ? 'single' : 'both',
     currentTradeSide: initialTradeSide,
     conditionType: cfg.conditionType || 'any_tick',
     conditionDigit: Number(cfg.conditionDigit ?? 2),
     quantumPredictionId: verifiedQuantum ? String(verifiedQuantum.prediction_id) : null,
     quantumExpiresAt: verifiedQuantum ? new Date(verifiedQuantum.expires_at).toISOString() : null,
-    runState: 'buying',
+    runState: 'idle',
     journal: [],
   };
 
@@ -761,7 +822,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
       ? targetMode === 'real'
         ? `You are using your live Real Deriv account (${resolvedDerivLoginId}).`
         : `You are using your live Demo Deriv account (${resolvedDerivLoginId}).`
-      : 'You are using your USD account.'
+      : `You are using your ${targetMode === 'real' ? 'Real' : 'Demo'} USD account.`
   );
 
   session.unsubscribeTick = derivWs.onTick((tick) => {
@@ -770,7 +831,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     }
   });
 
-  activeSessions.set(cfg.userId, session);
+  activeSessions.set(sKey, session);
   await addNotification(
     cfg.userId,
     'Bot Started',
@@ -778,41 +839,63 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     'bot'
   );
 
-  await evaluateAndExecuteBotTick(session, latestTick);
+  await Promise.race([
+    evaluateAndExecuteBotTick(session, latestTick),
+    new Promise<void>((resolve) => setTimeout(resolve, 2500)),
+  ]);
   derivWs.emitUserEvent(cfg.userId, 'bot_status', serializeTelemetry(session));
   return serializeTelemetry(session);
 }
 
-export async function stopBotSession(userId: number, reason = 'Stopped by trader'): Promise<BotTelemetry | null> {
-  const session = activeSessions.get(userId);
-  if (!session) return null;
-  session.running = false;
-  session.runState = 'idle';
-  session.lastSignal = reason;
-  if (session.unsubscribeTick) {
-    session.unsubscribeTick();
-    session.unsubscribeTick = null;
+export async function stopBotSession(
+  userId: number,
+  reason = 'Stopped by trader',
+  accountMode?: 'real' | 'demo'
+): Promise<BotTelemetry | null> {
+  const keysToStop: string[] = accountMode
+    ? [sessionKey(userId, accountMode)]
+    : [sessionKey(userId, 'demo'), sessionKey(userId, 'real')];
+
+  let lastSnap: BotTelemetry | null = null;
+  for (const key of keysToStop) {
+    const session = activeSessions.get(key);
+    if (!session) continue;
+    session.running = false;
+    session.runState = 'idle';
+    session.lastSignal = reason;
+    if (session.unsubscribeTick) {
+      session.unsubscribeTick();
+      session.unsubscribeTick = null;
+    }
+    const snap = serializeTelemetry(session);
+    activeSessions.delete(key);
+    derivWs.emitUserEvent(userId, 'bot_status', snap);
+    await addNotification(
+      userId,
+      'Bot Stopped',
+      `[${session.accountMode.toUpperCase()}] ${session.strategyName}: ${reason}. Net P/L: $${session.realizedPnl.toFixed(2)}`,
+      'bot'
+    );
+    lastSnap = snap;
   }
-  const snap = serializeTelemetry(session);
-  activeSessions.delete(userId);
   if (botLastPersistAt.size > 500) botLastPersistAt.clear();
-  derivWs.emitUserEvent(userId, 'bot_status', snap);
-  await addNotification(
-    userId,
-    'Bot Stopped',
-    `${session.strategyName}: ${reason}. Net P/L: $${session.realizedPnl.toFixed(2)}`,
-    'bot'
-  );
-  return snap;
+  return lastSnap;
 }
 
-export async function closeAllBotOrders(userId: number) {
-  return bulkCloseOrders(userId, 'bot');
+export async function closeAllBotOrders(userId: number, accountMode?: 'real' | 'demo') {
+  return bulkCloseOrders(userId, 'bot', accountMode);
 }
 
-export function getBotStatus(userId: number): BotTelemetry {
-  const session = activeSessions.get(userId);
-  if (session) return serializeTelemetry(session);
+export function getBotStatus(userId: number, accountMode?: 'real' | 'demo'): BotTelemetry {
+  if (accountMode) {
+    const session = activeSessions.get(sessionKey(userId, accountMode));
+    if (session) return serializeTelemetry(session);
+  } else {
+    const activeReal = activeSessions.get(sessionKey(userId, 'real'));
+    if (activeReal) return serializeTelemetry(activeReal);
+    const activeDemo = activeSessions.get(sessionKey(userId, 'demo'));
+    if (activeDemo) return serializeTelemetry(activeDemo);
+  }
   return {
     running: false,
     runId: '',
@@ -836,7 +919,7 @@ export function getBotStatus(userId: number): BotTelemetry {
     startedAt: '',
     lastSignal: 'Idle',
     recentPrices: [],
-    accountMode: 'demo',
+    accountMode: accountMode === 'real' ? 'real' : 'demo',
     executionSpeed: 'fast',
     analyserSync: false,
     growthRate: 0.02,
