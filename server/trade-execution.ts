@@ -79,6 +79,7 @@ export interface PlaceOrderInput {
   idempotencyKey?: string;
   growthRate?: number;
   isAnalyserSynced?: boolean;
+  quantumPredictionId?: string | null;
 }
 
 const recentOrderLocks = new Map<string, number>();
@@ -94,6 +95,8 @@ function normalizeContractType(side: string, explicitType?: string): string {
   if (['ODD', 'DIGITODD'].includes(s)) return 'DIGITODD';
   if (['MATCH', 'DIGITMATCH'].includes(s)) return 'DIGITMATCH';
   if (['DIFF', 'DIGITDIFF'].includes(s)) return 'DIGITDIFF';
+  if (s === 'HIGHER') return 'HIGHER';
+  if (s === 'LOWER') return 'LOWER';
   if (['RISE', 'CALL', 'CALLE'].includes(s)) return 'CALL';
   if (['FALL', 'PUT', 'PUTE'].includes(s)) return 'PUT';
   if (['ONETOUCH', 'TOUCH'].includes(s)) return 'ONETOUCH';
@@ -166,7 +169,7 @@ export async function getDecryptedAccountToken(
 }
 
 const ORDER_SELECT_COLS =
-  'id, user_id, connected_account_id, deriv_contract_id, execution_mode, source, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, sl_price, tp_price, sl_usd, tp_usd, barrier, duration, duration_unit, payout, pnl, status, strategy_key, timeframe, account_mode, wallet_bucket, notes, opened_at, closed_at';
+  'id, user_id, connected_account_id, deriv_contract_id, execution_mode, source, symbol, side, contract_type, lots, stake, multiplier, entry_price, current_price, exit_price, sl_price, tp_price, sl_usd, tp_usd, barrier, duration, duration_unit, payout, pnl, status, strategy_key, timeframe, account_mode, wallet_bucket, notes, quantum_prediction_id, opened_at, closed_at';
 
 async function checkUserRiskLimits(userId: number, stake: number, source: string): Promise<void> {
   if (source === 'bulk') return;
@@ -445,7 +448,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
         const symbolField = isOAuth2 ? { underlying_symbol: input.symbol } : { symbol: input.symbol };
 
-        let effectiveType = contractType;
+        let effectiveType =
+          contractType === 'HIGHER' ? 'CALL' : contractType === 'LOWER' ? 'PUT' : contractType;
         let effectiveMult = multiplier;
         let effectiveDuration = duration;
         let effectiveDurationUnit = durationUnit;
@@ -821,8 +825,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       symbol, side, contract_type, lots, stake, multiplier,
       entry_price, current_price, sl_price, tp_price, sl_usd, tp_usd,
       barrier, duration, duration_unit, payout, pnl, status,
-      strategy_key, timeframe, account_mode, wallet_bucket, notes
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN', $23, $24, $25, $26, $27)
+      strategy_key, timeframe, account_mode, wallet_bucket, notes, quantum_prediction_id
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, 'OPEN', $23, $24, $25, $26, $27, $28)
     RETURNING ${ORDER_SELECT_COLS}`,
     [
       input.userId,
@@ -852,6 +856,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       accountMode,
       effectiveBucket,
       storedNotes,
+      input.quantumPredictionId || '',
     ]
   );
 
@@ -871,6 +876,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       'PUT',
       'CALLE',
       'PUTE',
+      'HIGHER',
+      'LOWER',
       'ONETOUCH',
       'NOTOUCH',
     ].includes(contractType)
@@ -1068,6 +1075,9 @@ function computeDigitalPayoutMult(contractType: string, barrier: number): number
       return Number((9.5 / Math.max(1, 9 - barrier)).toFixed(2));
     case 'DIGITUNDER':
       return Number((9.5 / Math.max(1, barrier)).toFixed(2));
+    case 'HIGHER':
+    case 'LOWER':
+      return 2.15;
     case 'DIGITEVEN':
     case 'DIGITODD':
     case 'CALL':
@@ -1092,6 +1102,14 @@ function adjustDigitForDesiredOutcome(
   const dec = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
   const step = Math.pow(10, -dec);
 
+  if (contractType === 'HIGHER') {
+    const offset = Number.isFinite(barrier) && Math.abs(barrier) > 0 && Math.abs(barrier) < 20 ? Math.abs(barrier) : step * 18;
+    return Number((price + (shouldWin ? offset + step * 5 : -Math.abs(step * 10))).toFixed(dec));
+  }
+  if (contractType === 'LOWER') {
+    const offset = Number.isFinite(barrier) && Math.abs(barrier) > 0 && Math.abs(barrier) < 20 ? Math.abs(barrier) : step * 18;
+    return Number((price + (shouldWin ? -(offset + step * 5) : Math.abs(step * 10))).toFixed(dec));
+  }
   if (contractType === 'CALL' || contractType === 'CALLE' || contractType === 'ONETOUCH') {
     return Number((price + (shouldWin ? Math.abs(step * 12) : -Math.abs(step * 12))).toFixed(dec));
   }
@@ -1378,7 +1396,9 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
   );
   const shouldWin = Math.random() < calibratedProb;
   const baseForExit =
-    order.contract_type === 'CALL' || order.contract_type === 'PUT' ? Number(order.entry_price || exitPrice) : exitPrice;
+    ['CALL', 'PUT', 'HIGHER', 'LOWER'].includes(order.contract_type)
+      ? Number(order.entry_price || exitPrice)
+      : exitPrice;
   exitPrice = adjustDigitForDesiredOutcome(baseForExit, pipSize, order.contract_type, barrier, shouldWin);
 
   const payoutMult = computeDigitalPayoutMult(order.contract_type, barrier);

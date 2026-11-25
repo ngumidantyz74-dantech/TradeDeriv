@@ -218,6 +218,9 @@ export const BotBuilderPage: React.FC = () => {
   // Load Strategy Modal (Screenshots 152508 & 152544)
   const [loadModalOpen, setLoadModalOpen] = useState<boolean>(false);
   const [loadModalTab, setLoadModalTab] = useState<'local' | 'drive'>('local');
+  const [xmlImportError, setXmlImportError] = useState<string | null>(null);
+  const [validatingXml, setValidatingXml] = useState<boolean>(false);
+  const [quantumNowMs, setQuantumNowMs] = useState<number>(() => Date.now());
   const [pendingXmlImport, setPendingXmlImport] = useState<{
     fileName: string;
     symbol?: string;
@@ -229,6 +232,13 @@ export const BotBuilderPage: React.FC = () => {
     takeProfit?: string;
     stopLoss?: string;
     parsedState?: Partial<BotXmlWorkspaceState>;
+    isQuantum?: boolean;
+    quantumPrediction?: {
+      prediction_id: string;
+      expires_at: string;
+      probability?: number;
+      remainingSeconds?: number;
+    } | null;
   } | null>(null);
 
   // Saved Bots List (Dashboard "Your bots:" - session memory only, zero browser storage caching)
@@ -367,9 +377,19 @@ export const BotBuilderPage: React.FC = () => {
       if (tradePreset.stake && tradePreset.stake > 0) {
         next.assignments = setAssignmentVal(next.assignments, 'initialStake', String(tradePreset.stake));
       }
+      if (tradePreset.duration !== undefined) next.duration = String(tradePreset.duration);
+      if (tradePreset.durationUnit) next.durationUnit = tradePreset.durationUnit;
       if (tradePreset.strategyType) next.strategyType = tradePreset.strategyType;
-      if (tradePreset.analyserSync) {
-        next.strategyName = `AnalyserSync_${tradePreset.symbol || prev.symbol}`;
+      if (tradePreset.quantumPredictionId) {
+        next.quantumPredictionId = tradePreset.quantumPredictionId;
+        next.quantumExpiresAt = tradePreset.quantumExpiresAt || null;
+        next.strategyName = `Quantum_${tradePreset.quantumPredictionId}`;
+      } else {
+        next.quantumPredictionId = null;
+        next.quantumExpiresAt = null;
+        if (tradePreset.analyserSync) {
+          next.strategyName = `AnalyserSync_${tradePreset.symbol || prev.symbol}`;
+        }
       }
       return next;
     });
@@ -377,6 +397,12 @@ export const BotBuilderPage: React.FC = () => {
     setBotView('builder');
     setTradePreset(null);
   }, [tradePreset, updateXmlState, setTradePreset]);
+
+  useEffect(() => {
+    if (!xmlState.quantumPredictionId && !pendingXmlImport?.quantumPrediction) return;
+    const id = setInterval(() => setQuantumNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
+  }, [xmlState.quantumPredictionId, pendingXmlImport?.quantumPrediction]);
 
   const handleToggleAnalyserSync = async (enable: boolean) => {
     setAnalyserSync(enable);
@@ -390,6 +416,8 @@ export const BotBuilderPage: React.FC = () => {
           const infMkt = inferMarketFromSymbol(sig.symbol || prev.symbol);
           return {
             ...prev,
+            quantumPredictionId: null,
+            quantumExpiresAt: null,
             strategyName: `AnalyserSync_${sig.symbol || prev.symbol}`,
             symbol: sig.symbol || prev.symbol,
             market: infMkt.market,
@@ -544,6 +572,14 @@ export const BotBuilderPage: React.FC = () => {
 
   const handleRunBot = async (e?: React.FormEvent, overrides?: Partial<Record<string, any>>) => {
     if (e) e.preventDefault();
+    const activeQId = overrides?.quantumPredictionId !== undefined ? overrides.quantumPredictionId : xmlState.quantumPredictionId;
+    if (activeQId && xmlState.quantumExpiresAt) {
+      const qSecs = Math.floor((new Date(xmlState.quantumExpiresAt).getTime() - Date.now()) / 1000);
+      if (qSecs <= 0) {
+        showToast('Quantum prediction expired after 120 seconds. Run a fresh scan in Quantum Analyser.', 'error');
+        return;
+      }
+    }
     setSubmitting(true);
     try {
       // Trade with REAL Deriv account balances (Demo OR Real) when connected & NOT altered/locked by admin
@@ -569,6 +605,7 @@ export const BotBuilderPage: React.FC = () => {
         maxTrades: Number(overrides?.maxTrades ?? xmlState.maxTrades) || 50,
         growthRate: overrides?.growthRate ?? xmlState.growthRate,
         analyserSync: overrides?.analyserSync ?? analyserSync,
+        quantumPredictionId: activeQId || null,
         accountMode,
         executionSpeed: 'fast',
         executionMode: isLiveDerivUnlocked ? 'deriv' : 'virtual',
@@ -602,24 +639,66 @@ export const BotBuilderPage: React.FC = () => {
   const handleImportXmlFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
+    setXmlImportError(null);
+    setValidatingXml(true);
     const reader = new FileReader();
-    reader.onload = () => {
+    reader.onload = async () => {
       const xml = String(reader.result || '');
-      const parsed = parseBotWorkspaceXml(xml, xmlState);
-      const parsedAssignments = parsed.assignments || xmlState.assignments;
+      try {
+        const validation = await apiFetch<{
+          valid: boolean;
+          isQuantum: boolean;
+          quantumPrediction?: {
+            prediction_id: string;
+            expires_at: string;
+            probability?: number;
+            remainingSeconds?: number;
+          } | null;
+          summary?: {
+            symbol: string;
+            contractType: string;
+            stake: number;
+            duration: number;
+            durationUnit: string;
+            barrier: string;
+          };
+        }>('/api/quantum/validate-xml', {
+          method: 'POST',
+          body: JSON.stringify({ xml }),
+        });
 
-      setPendingXmlImport({
-        fileName: file.name,
-        symbol: parsed.symbol,
-        contractType: parsed.thenPurchase || parsed.contractTypeSelection,
-        stake: getAssignmentVal(parsedAssignments, 'initialStake', baseStake),
-        duration: parsed.duration,
-        barrier: parsed.prediction,
-        martingale: parsed.martingaleFactor,
-        takeProfit: getAssignmentVal(parsedAssignments, 'profitThreshold', takeProfit),
-        stopLoss: getAssignmentVal(parsedAssignments, 'lossThreshold', stopLoss),
-        parsedState: parsed,
-      });
+        const parsed = parseBotWorkspaceXml(xml, xmlState);
+        const parsedAssignments = parsed.assignments || xmlState.assignments;
+        if (validation.quantumPrediction) {
+          parsed.quantumPredictionId = validation.quantumPrediction.prediction_id;
+          parsed.quantumExpiresAt = validation.quantumPrediction.expires_at;
+        } else {
+          parsed.quantumPredictionId = null;
+          parsed.quantumExpiresAt = null;
+        }
+
+        setPendingXmlImport({
+          fileName: file.name,
+          symbol: validation.summary?.symbol || parsed.symbol,
+          contractType: validation.summary?.contractType || parsed.thenPurchase || parsed.contractTypeSelection,
+          stake: validation.summary?.stake ? String(validation.summary.stake) : getAssignmentVal(parsedAssignments, 'initialStake', baseStake),
+          duration: validation.summary?.duration ? String(validation.summary.duration) : parsed.duration,
+          barrier: validation.summary?.barrier ?? parsed.prediction,
+          martingale: parsed.martingaleFactor,
+          takeProfit: getAssignmentVal(parsedAssignments, 'profitThreshold', takeProfit),
+          stopLoss: getAssignmentVal(parsedAssignments, 'lossThreshold', stopLoss),
+          parsedState: parsed,
+          isQuantum: validation.isQuantum,
+          quantumPrediction: validation.quantumPrediction || null,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : 'XML validation failed.';
+        setPendingXmlImport(null);
+        setXmlImportError(msg);
+        showToast(msg, 'error');
+      } finally {
+        setValidatingXml(false);
+      }
     };
     reader.readAsText(file);
     e.target.value = '';
@@ -628,17 +707,28 @@ export const BotBuilderPage: React.FC = () => {
   const confirmOpenPendingXml = () => {
     if (!pendingXmlImport) return;
     const p = pendingXmlImport;
+    if (p.quantumPrediction?.expires_at) {
+      const rem = Math.floor((new Date(p.quantumPrediction.expires_at).getTime() - Date.now()) / 1000);
+      if (rem <= 0) {
+        setXmlImportError('Quantum prediction expired after 120 seconds. Re-scan in Quantum Analyser.');
+        setPendingXmlImport(null);
+        return;
+      }
+    }
     const cleanName = p.fileName.replace(/\.xml$/i, '');
 
     const nextSnapshot: BotXmlWorkspaceState = {
       ...xmlState,
       ...(p.parsedState || {}),
+      quantumPredictionId: p.quantumPrediction?.prediction_id || null,
+      quantumExpiresAt: p.quantumPrediction?.expires_at || null,
       strategyName: cleanName,
-      strategyType: p.parsedState?.strategyType || 'xml_block_flow',
+      strategyType: p.isQuantum ? 'quantum_minimal_loss' : p.parsedState?.strategyType || 'xml_block_flow',
     };
 
     updateXmlState(() => nextSnapshot);
-    setAnalyserSync(false);
+    setAnalyserSync(Boolean(p.isQuantum));
+    setXmlImportError(null);
 
     const parsedAssignments = nextSnapshot.assignments || xmlState.assignments;
     const resolvedContract =
@@ -672,7 +762,7 @@ export const BotBuilderPage: React.FC = () => {
     setPendingXmlImport(null);
     setLoadModalOpen(false);
     setBotView('builder');
-    showToast(`Loaded ${cleanName} XML blocks into Bot Builder`, 'success');
+    showToast(`Verified & loaded ${cleanName} XML blocks into Bot Builder`, 'success');
   };
 
   const handleSaveAndExportXml = () => {
@@ -726,6 +816,8 @@ export const BotBuilderPage: React.FC = () => {
         assignments = setAssignmentVal(assignments, 'tradeSide', b.contractType);
         return {
           ...prev,
+          quantumPredictionId: null,
+          quantumExpiresAt: null,
           strategyName: b.name,
           market: infMkt.market,
           submarket: infMkt.submarket,
@@ -780,6 +872,8 @@ export const BotBuilderPage: React.FC = () => {
       assignments = setAssignmentVal(assignments, 'tradeSide', qsSelected.contractType);
       return {
         ...prev,
+        quantumPredictionId: null,
+        quantumExpiresAt: null,
         strategyName: qsSelected.name,
         strategyType: qsSelected.key,
         market: infMkt.market,
@@ -800,6 +894,7 @@ export const BotBuilderPage: React.FC = () => {
     setBotView('builder');
     if (runNow) {
       handleRunBot(undefined, {
+        quantumPredictionId: null,
         strategyName: qsSelected.name,
         strategyType: qsSelected.key,
         symbol: qsStep2Symbol,
@@ -1870,18 +1965,37 @@ export const BotBuilderPage: React.FC = () => {
               {/* Warm amber notice matching Screenshot 152508 */}
               <div className="rounded-md bg-[#FFF9E6] dark:bg-amber-500/10 border border-[#FDE68A] dark:border-amber-500/30 px-3 py-2.5 flex items-start gap-2.5 text-[12px] text-[#374151] dark:text-amber-100">
                 <Info className="w-4 h-4 text-[#D99B26] shrink-0 mt-0.5" />
-                <span>Importing XML files from Binary Bot and other third-party platforms may take longer.</span>
+                <span>All uploaded Bot XML files undergo server-side structure, contract parameter, and 120s Quantum HMAC validation.</span>
               </div>
+
+              {xmlImportError && (
+                <div className="rounded-md bg-[#FF444F]/10 border border-[#FF444F]/35 px-3 py-2.5 text-[12px] text-[#FF444F] font-semibold">
+                  {xmlImportError}
+                </div>
+              )}
 
               {loadModalTab === 'local' ? (
                 pendingXmlImport ? (
                   <div className="flex-1 flex flex-col justify-between gap-4">
                     <div className="rounded-xl border border-slate-200 dark:border-white/10 p-4 bg-[#F8F9FA] dark:bg-[#181C25] space-y-3">
-                      <div className="flex items-center justify-between">
-                        <span className="font-bold text-sm">{pendingXmlImport.fileName}</span>
-                        <span className="px-2 py-0.5 rounded bg-[#00A878]/15 text-[#00A878] text-[11px] font-bold">
-                          Ready
-                        </span>
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-sm truncate">{pendingXmlImport.fileName}</span>
+                        {pendingXmlImport.quantumPrediction ? (() => {
+                          const remSecs = Math.max(0, Math.floor((new Date(pendingXmlImport.quantumPrediction!.expires_at).getTime() - quantumNowMs) / 1000));
+                          return remSecs > 0 ? (
+                            <span className="px-2 py-0.5 rounded bg-[#00A878]/15 text-[#00A878] text-[11px] font-bold font-mono shrink-0">
+                              Quantum Verified · {Math.floor(remSecs / 60)}:{String(remSecs % 60).padStart(2, '0')}
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded bg-[#FF444F]/15 text-[#FF444F] text-[11px] font-bold shrink-0">
+                              Expired (120s)
+                            </span>
+                          );
+                        })() : (
+                          <span className="px-2 py-0.5 rounded bg-[#00A878]/15 text-[#00A878] text-[11px] font-bold shrink-0">
+                            Verified Ready
+                          </span>
+                        )}
                       </div>
                       <div className="grid grid-cols-2 gap-2 text-xs">
                         <div>
@@ -1909,15 +2023,24 @@ export const BotBuilderPage: React.FC = () => {
                     <div className="grid grid-cols-2 gap-3 pt-2">
                       <button
                         type="button"
-                        onClick={() => setPendingXmlImport(null)}
+                        onClick={() => {
+                          setPendingXmlImport(null);
+                          setXmlImportError(null);
+                        }}
                         className="py-2.5 rounded-[4px] border border-[#111319] dark:border-white/30 text-[13px] font-bold cursor-pointer"
                       >
                         Cancel
                       </button>
                       <button
                         type="button"
+                        disabled={
+                          Boolean(
+                            pendingXmlImport.quantumPrediction &&
+                              new Date(pendingXmlImport.quantumPrediction.expires_at).getTime() <= quantumNowMs
+                          )
+                        }
                         onClick={confirmOpenPendingXml}
-                        className="py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer"
+                        className="py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
                       >
                         Open
                       </button>
@@ -1931,10 +2054,11 @@ export const BotBuilderPage: React.FC = () => {
                     </svg>
                     <button
                       type="button"
+                      disabled={validatingXml}
                       onClick={() => fileRef.current?.click()}
-                      className="px-5 py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer"
+                      className="px-5 py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer disabled:opacity-50"
                     >
-                      Select an XML file from your device
+                      {validatingXml ? 'Validating XML...' : 'Select an XML file from your device'}
                     </button>
                   </div>
                 )
@@ -1981,6 +2105,33 @@ export const BotBuilderPage: React.FC = () => {
             <ChevronUp className="w-4 h-4" />
           </button>
         )}
+
+        {xmlState.quantumPredictionId && xmlState.quantumExpiresAt && (() => {
+          const qRem = Math.max(0, Math.floor((new Date(xmlState.quantumExpiresAt).getTime() - quantumNowMs) / 1000));
+          const qValid = qRem > 0;
+          return (
+            <div
+              className={`px-3 py-1.5 border-b text-[11px] font-semibold flex items-center justify-between gap-2 ${
+                qValid
+                  ? 'bg-[#00A878]/10 border-[#00A878]/25 text-[#008C64] dark:text-[#2A9D8F]'
+                  : 'bg-[#FF444F]/10 border-[#FF444F]/25 text-[#FF444F]'
+              }`}
+            >
+              <span className="truncate font-mono-num">
+                {qValid
+                  ? `Quantum Strategy · ${Math.floor(qRem / 60)}:${String(qRem % 60).padStart(2, '0')} remaining`
+                  : 'Quantum Signal Expired (120s) — Re-scan in Quantum Analyser'}
+              </span>
+              <button
+                type="button"
+                onClick={() => setActiveTab('market-analyser')}
+                className="underline font-bold shrink-0 cursor-pointer"
+              >
+                {qValid ? 'Analyser' : 'Re-scan'}
+              </button>
+            </div>
+          );
+        })()}
 
         <div className="px-3 py-2 flex items-center gap-2">
           {!telemetry?.running ? (

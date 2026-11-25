@@ -2,6 +2,7 @@ import { query, queryOne, execute, addNotification } from './db.ts';
 import { derivWs, type TickData } from './deriv-client.ts';
 import { placeUnifiedOrder, closeOrderById, bulkCloseOrders } from './trade-execution.ts';
 import { computeLiveAnalyserSignal } from './routes/intelligence.ts';
+import { verifyAndConsumeQuantumPrediction } from './routes/quantum.ts';
 
 export interface BotSessionConfig {
   userId: number;
@@ -30,6 +31,7 @@ export interface BotSessionConfig {
   analyserSync?: boolean;
   conditionType?: 'any_tick' | 'last_digit_gte' | 'last_digit_lte' | 'rsi_signal';
   conditionDigit?: number;
+  quantumPredictionId?: string | null;
 }
 
 export interface BotJournalEntry {
@@ -66,6 +68,8 @@ export interface BotTelemetry {
   executionSpeed: 'fast' | 'normal';
   analyserSync: boolean;
   growthRate: number;
+  quantumPredictionId?: string | null;
+  quantumExpiresAt?: string | null;
   journal?: BotJournalEntry[];
 }
 
@@ -89,6 +93,8 @@ interface InternalBotSession extends BotTelemetry {
   currentTradeSide: string;
   conditionType: 'any_tick' | 'last_digit_gte' | 'last_digit_lte' | 'rsi_signal';
   conditionDigit: number;
+  quantumPredictionId: string | null;
+  quantumExpiresAt: string | null;
   runState: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
   journal: BotJournalEntry[];
 }
@@ -296,6 +302,14 @@ function decideBotSide(session: InternalBotSession, latestPrice: number, pipSize
   if (ct === 'CALL' || ct === 'PUT') {
     return { contractType: ct, side: ct, barrier: '', reason: `Block tradeSide ${ct} @ ${latestPrice.toFixed(2)}` };
   }
+  if (ct === 'HIGHER' || ct === 'LOWER') {
+    return {
+      contractType: ct,
+      side: ct,
+      barrier: session.barrier || (ct === 'HIGHER' ? '+0.50' : '-0.50'),
+      reason: `Block barrier ${ct} @ ${latestPrice.toFixed(2)}`,
+    };
+  }
   if (ct === 'MULTUP' || ct === 'MULTDOWN') {
     const bullish = ct === 'MULTUP' ? true : latestPrice >= avg5;
     const chosen = ct === 'MULTUP' || ct === 'MULTDOWN' ? ct : bullish ? 'MULTUP' : 'MULTDOWN';
@@ -445,12 +459,29 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   session.isExecutingTrade = true;
   session.runState = 'buying';
   try {
+    if (session.quantumPredictionId) {
+      const qCheck = await verifyAndConsumeQuantumPrediction(
+        session.userId,
+        session.quantumPredictionId,
+        true
+      );
+      if (!qCheck.valid) {
+        session.isExecutingTrade = false;
+        appendJournal(session, 'error', qCheck.reason || 'Quantum prediction expired after 120s window.');
+        await stopBotSession(
+          session.userId,
+          qCheck.reason || 'Quantum 2-minute prediction validity window expired (120s)'
+        );
+        return;
+      }
+    }
+
     let targetSymbol = session.symbol;
     let decision = decideBotSide(session, tick.quote, tick.pipSize);
     let duration = session.duration;
     let durationUnit = session.durationUnit;
 
-    if (session.analyserSync) {
+    if (session.analyserSync && !session.quantumPredictionId) {
       const sig = await computeLiveAnalyserSignal(session.symbol);
       targetSymbol = sig.symbol;
       session.contractType = sig.contractType;
@@ -493,7 +524,8 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       connectedAccountId: session.connectedAccountId,
       accountMode: session.accountMode,
       strategyKey: session.strategyType,
-      isAnalyserSynced: session.analyserSync,
+      isAnalyserSynced: session.analyserSync || Boolean(session.quantumPredictionId),
+      quantumPredictionId: session.quantumPredictionId,
       notes: `run:${session.runId}`,
       source: 'bot',
     });
@@ -575,6 +607,8 @@ function serializeTelemetry(s: InternalBotSession): BotTelemetry {
     executionSpeed: s.executionSpeed,
     analyserSync: s.analyserSync,
     growthRate: s.growthRate,
+    quantumPredictionId: s.quantumPredictionId,
+    quantumExpiresAt: s.quantumExpiresAt,
     journal: s.journal,
   };
 }
@@ -598,6 +632,15 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   }
   if (userRow.trading_suspended) {
     throw new Error('Trading is currently frozen on your account by Administrator controls.');
+  }
+
+  let verifiedQuantum: any = null;
+  if (cfg.quantumPredictionId) {
+    const qCheck = await verifyAndConsumeQuantumPrediction(cfg.userId, cfg.quantumPredictionId, false);
+    if (!qCheck.valid || !qCheck.prediction) {
+      throw new Error(qCheck.reason || 'Quantum prediction expired after 120 seconds. Generate a fresh scan.');
+    }
+    verifiedQuantum = qCheck.prediction;
   }
 
   if (activeSessions.has(cfg.userId)) {
@@ -705,6 +748,8 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     currentTradeSide: initialTradeSide,
     conditionType: cfg.conditionType || 'any_tick',
     conditionDigit: Number(cfg.conditionDigit ?? 2),
+    quantumPredictionId: verifiedQuantum ? String(verifiedQuantum.prediction_id) : null,
+    quantumExpiresAt: verifiedQuantum ? new Date(verifiedQuantum.expires_at).toISOString() : null,
     runState: 'buying',
     journal: [],
   };

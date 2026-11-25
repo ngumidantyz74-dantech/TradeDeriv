@@ -30,6 +30,10 @@ export interface TradeLaunchPreset {
   analyserSync?: boolean;
   strategyType?: string;
   stake?: number;
+  duration?: number;
+  durationUnit?: string;
+  quantumPredictionId?: string;
+  quantumExpiresAt?: string;
 }
 
 interface AppContextValue {
@@ -236,13 +240,13 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }, 2500);
   }, [resetLogoTaps]);
 
-  // 20-tap Home icon gesture on the lower tabbar within 4s rolling timeout to open Administrator Console
+  // 30-tap Home icon gesture on the lower tabbar within 5s rolling timeout to open Administrator Console
   const registerHomeTap = useCallback(() => {
     if (homeTapTimerRef.current) {
       clearTimeout(homeTapTimerRef.current);
     }
     homeTapCountRef.current += 1;
-    if (homeTapCountRef.current >= 20) {
+    if (homeTapCountRef.current >= 30) {
       resetHomeTaps();
       window.location.hash = '#/admin_console';
       setAdminGateOpen(true);
@@ -251,7 +255,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     homeTapTimerRef.current = setTimeout(() => {
       homeTapCountRef.current = 0;
       homeTapTimerRef.current = null;
-    }, 4000);
+    }, 5000);
   }, [resetHomeTaps]);
 
   const showToast = useCallback((message: string, type: 'success' | 'error' | 'info' = 'info') => {

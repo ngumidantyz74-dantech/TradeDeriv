@@ -347,6 +347,15 @@ router.get('/account/profile-details', requireDb, requireAuth, async (req: AuthR
 });
 
 router.put('/account/profile-details', requireDb, requireAuth, async (req: AuthRequest, res) => {
+  const callerRole = String(req.user?.role || '').toLowerCase();
+  if (!['owner', 'admin'].includes(callerRole)) {
+    res.status(403).json({
+      error: 'Profile settings are locked. Contact Super Admin or an authorized administrator to update profile details.',
+      code: 'PROFILE_LOCKED',
+    });
+    return;
+  }
+
   const {
     full_name,
     phone,

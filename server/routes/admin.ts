@@ -965,7 +965,7 @@ router.get('/admin/users', requireDb, requireAdmin, requirePermission('users.vie
             u.email_verified, u.preferred_currency,
             u.virtual_workspace_balance, u.demo_wallets_json, u.real_wallets_json,
             u.exchange_balances_json, u.real_exchange_balances_json, u.deriv_nickname, u.deriv_client_id,
-            u.originating_device_id, u.assigned_admin_id,
+            u.originating_device_id, u.assigned_admin_id, u.created_by_admin_id,
             COALESCE(u.ownership_verification_status, 'pending_verification') as ownership_verification_status,
             rd.device_uid as originating_device_uid, adm.email as assigned_admin_email,
             COALESCE(u.last_login_at, u.updated_at, u.created_at) as last_login_at, u.created_at
@@ -1107,10 +1107,10 @@ router.post('/admin/users', requireDb, requireAdmin, requirePermission('users.cr
       const uRes = await client.query<any>(
         `INSERT INTO users
           (email, password_hash, full_name, role, status, email_verified, virtual_workspace_balance, real_wallets_json, demo_wallets_json, deriv_client_id,
-           originating_device_id, assigned_admin_id, ownership_verification_status)
-         VALUES ($1, $2, $3, $4, 'active', TRUE, $5, $6, $7, $8, $9, $10, $11)
+           originating_device_id, assigned_admin_id, created_by_admin_id, ownership_verification_status)
+         VALUES ($1, $2, $3, $4, 'active', TRUE, $5, $6, $7, $8, $9, $10, $11, $12)
          RETURNING id, email, full_name, phone, country, role, status, email_verified, preferred_currency,
-                   virtual_workspace_balance, deriv_client_id, originating_device_id, assigned_admin_id,
+                   virtual_workspace_balance, deriv_client_id, originating_device_id, assigned_admin_id, created_by_admin_id,
                    ownership_verification_status, created_at`,
         [
           cleanEmail,
@@ -1123,6 +1123,7 @@ router.post('/admin/users', requireDb, requireAdmin, requirePermission('users.cr
           `TD${randomId(4).toUpperCase()}`,
           targetDeviceId,
           targetAdminId,
+          ctx.userId,
           verificationStatus,
         ]
       );

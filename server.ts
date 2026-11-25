@@ -29,6 +29,7 @@ import marketRoutes from './server/routes/market.ts';
 import ordersRoutes from './server/routes/orders.ts';
 import adminRoutes from './server/routes/admin.ts';
 import intelligenceRoutes, { evaluateSmartAlertsForTick } from './server/routes/intelligence.ts';
+import quantumRoutes from './server/routes/quantum.ts';
 
 async function bootstrapServer() {
   // Non-blocking Neon schema wakeup so Render binds PORT immediately and health checks stay responsive
@@ -137,6 +138,7 @@ async function bootstrapServer() {
   app.use('/api', ordersRoutes);
   app.use('/api', adminRoutes);
   app.use('/api', intelligenceRoutes);
+  app.use('/api', quantumRoutes);
 
   // Root /callback and / OAuth redirect fallback for Deriv OAuth redirect URIs
   app.get(['/callback', '/callback/'], requireDb, handleDerivOAuthCallback);

@@ -599,14 +599,14 @@ export const BotContractTypeIcon: React.FC<{
     );
   }
 
-  // Even / Odd: 2x2 rounded grid (top-left & bottom-right dark, top-right & bottom-left red)
+  // Even / Odd: 2x2 rounded grid (top-left & bottom-right teal #00A79D, top-right & bottom-left red #FF444F)
   if (u === 'DIGITEVEN' || u === 'DIGITODD' || u === 'EVEN' || u === 'ODD') {
     return (
       <svg viewBox="0 0 20 20" className={className} fill="none" aria-hidden="true">
-        <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.2" className="fill-[#4A4D57] dark:fill-[#CBD5E1]" />
+        <rect x="2.5" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#00A79D" />
         <rect x="11.3" y="2.5" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
         <rect x="2.5" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#FF444F" />
-        <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.2" className="fill-[#4A4D57] dark:fill-[#CBD5E1]" />
+        <rect x="11.3" y="11.3" width="6.2" height="6.2" rx="1.2" fill="#00A79D" />
       </svg>
     );
   }

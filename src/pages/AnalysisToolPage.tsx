@@ -14,13 +14,18 @@ import {
   Send,
   ShieldAlert,
   Search,
+  Download,
+  ShieldCheck,
+  Cpu,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { apiFetch, fetchDerivTickHistoryDirect, subscribeDerivTicksDirect, sanitizeUiError } from '../lib/api';
+import { apiFetch, fetchDerivTickHistoryDirect, subscribeDerivTicksDirect, sanitizeUiError, getStoredToken } from '../lib/api';
 import type { SmcAnalysis, BuyLowSellHighResult, StrategySetup } from '../lib/quant-engine';
+import type { QuantumPrediction } from '../types';
 
 type AnalyserTab =
   | 'radar'
+  | 'quantum'
   | 'smc'
   | 'blsh'
   | 'sessions'
@@ -160,6 +165,14 @@ export const AnalysisToolPage: React.FC = () => {
   const [copilotAnswer, setCopilotAnswer] = useState<string | null>(null);
   const [copilotSummary, setCopilotSummary] = useState<any>(null);
 
+  // Quantum Analyser state
+  const [quantumLoading, setQuantumLoading] = useState(false);
+  const [quantumScanning, setQuantumScanning] = useState(false);
+  const [quantumError, setQuantumError] = useState<string | null>(null);
+  const [quantumPredictions, setQuantumPredictions] = useState<QuantumPrediction[]>([]);
+  const [quantumStake, setQuantumStake] = useState('1');
+  const [nowMs, setNowMs] = useState(() => Date.now());
+
   const activeInst = instruments.find((i) => i.symbol === selectedSymbol);
   const decimals = (activeInst?.pip_size ?? 0.01) < 0.0001 ? 5 : (activeInst?.pip_size ?? 0.01) < 0.001 ? 4 : 2;
   const isDigitStreamTab = tab === 'dcircles' || tab === 'signals' || tab === 'over-under' || tab === 'rise-fall';
@@ -188,10 +201,12 @@ export const AnalysisToolPage: React.FC = () => {
     };
   }, [selectedSymbol, tickCount, isDbLocked]);
 
-  // Live UTC clock for Sessions tab
+  // Live UTC clock for Sessions tab & 1s Quantum countdown tick
   useEffect(() => {
     const timer = setInterval(() => {
-      setUtcNow(new Date().toISOString().slice(11, 19));
+      const now = new Date();
+      setUtcNow(now.toISOString().slice(11, 19));
+      setNowMs(now.getTime());
     }, 1000);
     return () => clearInterval(timer);
   }, []);
@@ -270,11 +285,108 @@ export const AnalysisToolPage: React.FC = () => {
     }
   }, []);
 
+  const loadQuantumPredictions = useCallback(async () => {
+    setQuantumLoading(true);
+    setQuantumError(null);
+    try {
+      const res = await apiFetch<{ predictions: QuantumPrediction[] }>('/api/quantum/predictions');
+      setQuantumPredictions(res.predictions || []);
+    } catch (err) {
+      setQuantumError(sanitizeUiError(err, 'Unable to load Quantum predictions right now.'));
+    } finally {
+      setQuantumLoading(false);
+    }
+  }, []);
+
+  const handleRunQuantumScan = async () => {
+    setQuantumScanning(true);
+    setQuantumError(null);
+    try {
+      const cleanStake = Math.max(0.5, Number(quantumStake) || 1);
+      const res = await apiFetch<{ prediction: QuantumPrediction }>('/api/quantum/scan', {
+        method: 'POST',
+        body: JSON.stringify({
+          symbol: selectedSymbol,
+          stake: cleanStake,
+        }),
+      });
+      if (res.prediction) {
+        setQuantumPredictions((prev) => [
+          res.prediction,
+          ...prev.filter((p) => p.prediction_id !== res.prediction.prediction_id),
+        ]);
+        showToast(`Quantum scan ready on ${selectedSymbol} (valid 120s)`, 'success');
+      }
+    } catch (err) {
+      const msg = sanitizeUiError(err, 'Quantum scan failed.');
+      setQuantumError(msg);
+      showToast(msg, 'error');
+    } finally {
+      setQuantumScanning(false);
+    }
+  };
+
+  const handleDownloadQuantumXml = async (pred: QuantumPrediction) => {
+    try {
+      const token = getStoredToken();
+      const resp = await fetch(
+        `/api/quantum/predictions/${encodeURIComponent(pred.prediction_id)}/xml`,
+        {
+          headers: token ? { Authorization: `Bearer ${token}` } : {},
+        }
+      );
+      if (!resp.ok) {
+        const body = await resp.json().catch(() => ({}));
+        throw new Error(body?.error || 'Prediction expired or unavailable');
+      }
+      const xmlText = await resp.text();
+      const blob = new Blob([xmlText], { type: 'application/xml' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `quantum_${pred.prediction_id}.xml`;
+      a.click();
+      URL.revokeObjectURL(url);
+      showToast(`Downloaded signed XML for ${pred.prediction_id}`, 'success');
+    } catch (err) {
+      showToast(err instanceof Error ? err.message : 'Download failed', 'error');
+      loadQuantumPredictions();
+    }
+  };
+
+  const handleSendQuantumToBot = (pred: QuantumPrediction) => {
+    const secs =
+      pred.validity_status === 'VALID'
+        ? Math.max(0, Math.floor((new Date(pred.expires_at).getTime() - Date.now()) / 1000))
+        : 0;
+    if (secs <= 0) {
+      showToast('Prediction expired after 120 seconds. Run a fresh Quantum scan.', 'error');
+      loadQuantumPredictions();
+      return;
+    }
+    setTradePreset({
+      symbol: pred.instrument,
+      contractType: pred.contract_type,
+      side: pred.contract_type,
+      barrier: pred.barrier,
+      stake: Number(pred.stake),
+      duration: Number(pred.duration || 1),
+      durationUnit: pred.duration_unit || 't',
+      analyserSync: true,
+      strategyType: 'quantum_minimal_loss',
+      quantumPredictionId: pred.prediction_id,
+      quantumExpiresAt: pred.expires_at,
+    });
+    setActiveTab('bot-builder');
+    showToast(`Loaded ${pred.prediction_id} (${secs}s left) into Bot Builder`, 'success');
+  };
+
   useEffect(() => {
     if (tab === 'radar') loadRadar();
+    if (tab === 'quantum') loadQuantumPredictions();
     if (tab === 'smc' || tab === 'blsh') loadAnalyze();
     if (tab === 'sessions') loadSessions();
-  }, [tab, loadRadar, loadAnalyze, loadSessions]);
+  }, [tab, loadRadar, loadQuantumPredictions, loadAnalyze, loadSessions]);
 
   const analytics = useMemo(() => {
     const list = prices.length ? prices : [activeInst?.price ?? 0];
@@ -438,6 +550,7 @@ export const AnalysisToolPage: React.FC = () => {
 
   const tabItems: Array<{ id: AnalyserTab; label: string }> = [
     { id: 'radar', label: 'Market Radar' },
+    { id: 'quantum', label: 'Quantum Analyser' },
     { id: 'smc', label: 'SMC & Structure' },
     { id: 'blsh', label: 'Buy Low / Sell High' },
     { id: 'sessions', label: 'Sessions & Schedule' },
@@ -586,6 +699,228 @@ export const AnalysisToolPage: React.FC = () => {
           </button>
         ))}
       </div>
+
+      {/* QUANTUM ANALYSER (120s DB-Backed Minimal-Loss Predictor + Signed Bot XML) */}
+      {tab === 'quantum' && (() => {
+        const latestPred = quantumPredictions[0] || null;
+        const calcRemaining = (p: QuantumPrediction) =>
+          p.validity_status === 'VALID'
+            ? Math.max(0, Math.floor((new Date(p.expires_at).getTime() - nowMs) / 1000))
+            : 0;
+        const latestSecs = latestPred ? calcRemaining(latestPred) : 0;
+        const latestValid = Boolean(latestPred && latestPred.validity_status === 'VALID' && latestSecs > 0);
+
+        return (
+          <div className="space-y-4">
+            <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 space-y-4">
+              <div className="flex flex-wrap items-start justify-between gap-4">
+                <div>
+                  <div className="inline-flex items-center gap-2 text-xs font-bold text-[#00A878] mb-1">
+                    <Cpu className="w-4 h-4" /> Quantum Analyser Engine · 2-Minute (120s) Validity Window
+                  </div>
+                  <h2 className="font-display text-lg font-bold">Minimal-Loss Statistical Predictor &amp; Bot XML Generator</h2>
+                  <p className="text-xs text-slate-500 mt-1 max-w-2xl">
+                    Scans live tick distributions to generate lower-drawdown contract setups signed with HMAC-SHA256.
+                    Statistical estimation only — trading outcomes are never guaranteed.
+                  </p>
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <div>
+                    <label className="block text-[10px] font-semibold text-slate-400 uppercase mb-1">Stake (USD)</label>
+                    <input
+                      type="number"
+                      min="0.5"
+                      step="0.5"
+                      value={quantumStake}
+                      onChange={(e) => setQuantumStake(e.target.value)}
+                      className="w-24 px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] font-mono tabular-nums text-xs font-bold"
+                    />
+                  </div>
+                  <div className="pt-4">
+                    <button
+                      type="button"
+                      disabled={quantumScanning}
+                      onClick={handleRunQuantumScan}
+                      className="px-4 py-2.5 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white text-xs font-bold inline-flex items-center gap-2 cursor-pointer disabled:opacity-50"
+                    >
+                      <RefreshCw className={`w-3.5 h-3.5 ${quantumScanning ? 'animate-spin' : ''}`} />
+                      {quantumScanning ? 'Scanning Ticks...' : `Scan ${selectedSymbol} Strategy`}
+                    </button>
+                  </div>
+                </div>
+              </div>
+
+              {quantumError && (
+                <div className="rounded-xl bg-[#FF444F]/10 border border-[#FF444F]/30 px-3.5 py-2.5 text-xs text-[#FF444F] font-semibold">
+                  {quantumError}
+                </div>
+              )}
+
+              {latestPred && (
+                <div
+                  className={`rounded-2xl border p-4 space-y-3 ${
+                    latestValid
+                      ? 'bg-[#00A878]/5 border-[#00A878]/35'
+                      : 'bg-slate-100/70 dark:bg-[#111319] border-slate-300 dark:border-[#2A2F3D] opacity-85'
+                  }`}
+                >
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="font-mono text-xs font-bold px-2.5 py-1 rounded-lg bg-[#151820] text-white">
+                        {latestPred.prediction_id}
+                      </span>
+                      <span className="font-bold text-sm">
+                        {latestPred.instrument} · {latestPred.contract_type}
+                        {latestPred.barrier !== '' ? ` (Barrier ${latestPred.barrier})` : ''}
+                      </span>
+                      <span className="text-xs font-mono text-slate-500">
+                        {latestPred.duration}{latestPred.duration_unit} · ${Number(latestPred.stake).toFixed(2)} USD
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2">
+                      {latestValid ? (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#00A878]/15 text-[#00A878] text-xs font-mono font-bold tabular-nums">
+                          <Clock className="w-3.5 h-3.5" />
+                          VALID · {Math.floor(latestSecs / 60)}:{String(latestSecs % 60).padStart(2, '0')}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#FF444F]/15 text-[#FF444F] text-xs font-mono font-bold">
+                          <AlertTriangle className="w-3.5 h-3.5" />
+                          INVALID / EXPIRED (120s)
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                    <div className="p-3 rounded-xl bg-white/80 dark:bg-[#181C25] border border-slate-200/70 dark:border-white/10">
+                      <span className="text-slate-400 block">Predicted Condition</span>
+                      <strong className="text-sm">{latestPred.predicted_condition}</strong>
+                    </div>
+                    <div className="p-3 rounded-xl bg-white/80 dark:bg-[#181C25] border border-slate-200/70 dark:border-white/10">
+                      <span className="text-slate-400 block">Estimated Win Probability</span>
+                      <strong className="text-sm font-mono tabular-nums text-[#00A878]">{latestPred.probability}%</strong>
+                    </div>
+                    <div className="p-3 rounded-xl bg-white/80 dark:bg-[#181C25] border border-slate-200/70 dark:border-white/10">
+                      <span className="text-slate-400 block">Minimal-Loss Variance Score</span>
+                      <strong className="text-sm font-mono tabular-nums">{latestPred.loss_risk_score}% risk</strong>
+                    </div>
+                  </div>
+
+                  {latestPred.rationale && (
+                    <p className="text-xs text-slate-600 dark:text-slate-300">{latestPred.rationale}</p>
+                  )}
+
+                  <div className="flex flex-wrap items-center gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      disabled={!latestValid}
+                      onClick={() => handleSendQuantumToBot(latestPred)}
+                      className="px-4 py-2 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <ShieldCheck className="w-3.5 h-3.5" />
+                      Send to Bot Builder
+                    </button>
+                    <button
+                      type="button"
+                      disabled={!latestValid}
+                      onClick={() => handleDownloadQuantumXml(latestPred)}
+                      className="px-4 py-2 rounded-xl bg-[#151820] hover:bg-[#242833] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                    >
+                      <Download className="w-3.5 h-3.5" />
+                      Download Signed Bot XML
+                    </button>
+                    {!latestValid && (
+                      <span className="text-[11px] text-[#FF444F] font-semibold">
+                        This prediction exceeded 120 seconds and can no longer be exported or executed. Scan again to continue.
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden">
+              <div className="px-4 py-3 border-b border-slate-200 dark:border-[#2A2F3D] flex items-center justify-between">
+                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                  Recent Quantum Predictions (Server-Enforced 120s Window)
+                </h3>
+                <button
+                  type="button"
+                  onClick={loadQuantumPredictions}
+                  disabled={quantumLoading}
+                  className="text-xs font-semibold text-[#00A878] hover:underline cursor-pointer"
+                >
+                  {quantumLoading ? 'Refreshing...' : 'Refresh'}
+                </button>
+              </div>
+              {quantumPredictions.length === 0 ? (
+                <p className="p-5 text-xs text-slate-500 text-center">
+                  No Quantum scans recorded yet. Click &ldquo;Scan {selectedSymbol} Strategy&rdquo; above to generate a signed minimal-loss setup.
+                </p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead className="bg-[#F4F5F7] dark:bg-[#111319] text-slate-500 text-left">
+                      <tr>
+                        <th className="px-4 py-2.5">ID</th>
+                        <th className="px-4 py-2.5">Instrument</th>
+                        <th className="px-4 py-2.5">Setup</th>
+                        <th className="px-4 py-2.5">Prob.</th>
+                        <th className="px-4 py-2.5">Status</th>
+                        <th className="px-4 py-2.5 text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-white/5">
+                      {quantumPredictions.map((p) => {
+                        const secs = calcRemaining(p);
+                        const active = p.validity_status === 'VALID' && secs > 0;
+                        return (
+                          <tr key={p.prediction_id}>
+                            <td className="px-4 py-2.5 font-mono font-bold">{p.prediction_id}</td>
+                            <td className="px-4 py-2.5 font-semibold">{p.instrument}</td>
+                            <td className="px-4 py-2.5">{p.predicted_condition}</td>
+                            <td className="px-4 py-2.5 font-mono tabular-nums text-[#00A878] font-bold">{p.probability}%</td>
+                            <td className="px-4 py-2.5 font-mono">
+                              {active ? (
+                                <span className="text-[#00A878] font-bold">
+                                  VALID ({Math.floor(secs / 60)}:{String(secs % 60).padStart(2, '0')})
+                                </span>
+                              ) : (
+                                <span className="text-[#FF444F] font-bold">INVALID</span>
+                              )}
+                            </td>
+                            <td className="px-4 py-2.5 text-right space-x-2">
+                              <button
+                                type="button"
+                                disabled={!active}
+                                onClick={() => handleSendQuantumToBot(p)}
+                                className="px-2.5 py-1 rounded-lg bg-[#00A878] text-white font-bold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                              >
+                                Run
+                              </button>
+                              <button
+                                type="button"
+                                disabled={!active}
+                                onClick={() => handleDownloadQuantumXml(p)}
+                                className="px-2.5 py-1 rounded-lg bg-slate-700 text-white font-bold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                              >
+                                XML
+                              </button>
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })()}
 
       {/* 1. MARKET RADAR */}
       {tab === 'radar' && (

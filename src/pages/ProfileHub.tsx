@@ -99,30 +99,8 @@ export const ProfileHub: React.FC = () => {
     showToast('Client ID copied to clipboard', 'success');
   };
 
-  const handleSaveProfile = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSaving(true);
-    try {
-      await apiFetch('/api/account/profile-details', {
-        method: 'PUT',
-        body: JSON.stringify({
-          full_name: fullName,
-          phone,
-          country,
-          preferred_language: language,
-          address_line_1: addressLine,
-          address_city: addressCity,
-          tax_identification_number: taxId,
-        }),
-      });
-      await Promise.all([refreshAll(), loadDetails()]);
-      setActiveSheet(null);
-      showToast('Profile updated', 'success');
-    } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Update failed', 'error');
-    } finally {
-      setSaving(false);
-    }
+  const handleLockedProfileNotice = () => {
+    showToast('Profile settings are locked. Contact Super Admin or an authorized administrator.', 'info');
   };
 
   const handleCloseAccount = async (e: React.FormEvent) => {
@@ -278,7 +256,8 @@ export const ProfileHub: React.FC = () => {
             {renderFlatRow({
               icon: Lock,
               label: 'Change password',
-              onClick: () => launchDerivOAuth('login'),
+              subtext: 'Managed by administrator',
+              onClick: handleLockedProfileNotice,
             })}
             {renderFlatRow({
               icon: AtSign,
@@ -395,7 +374,14 @@ export const ProfileHub: React.FC = () => {
             </div>
 
             {(activeSheet === 'personal' || activeSheet === 'address' || activeSheet === 'tax' || activeSheet === 'language') && (
-              <form onSubmit={handleSaveProfile} className="space-y-3.5">
+              <div className="space-y-3.5">
+                <div className="rounded-xl bg-amber-500/10 border border-amber-500/30 px-3.5 py-2.5 flex items-start gap-2.5 text-xs text-amber-700 dark:text-amber-300">
+                  <Lock className="w-4 h-4 shrink-0 mt-0.5" />
+                  <span>
+                    Profile editing is locked. Only the Super Admin or an authorized administrator can update your profile details.
+                  </span>
+                </div>
+
                 {activeSheet === 'personal' && (
                   <>
                     <div>
@@ -403,8 +389,19 @@ export const ProfileHub: React.FC = () => {
                       <input
                         type="text"
                         value={fullName}
-                        onChange={(e) => setFullName(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                        readOnly
+                        disabled
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-semibold text-slate-400 mb-1">Email Address</label>
+                      <input
+                        type="text"
+                        value={user?.email || ''}
+                        readOnly
+                        disabled
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                       />
                     </div>
                     <div>
@@ -412,8 +409,9 @@ export const ProfileHub: React.FC = () => {
                       <input
                         type="text"
                         value={phone}
-                        onChange={(e) => setPhone(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                        readOnly
+                        disabled
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                       />
                     </div>
                   </>
@@ -426,8 +424,9 @@ export const ProfileHub: React.FC = () => {
                       <input
                         type="text"
                         value={addressLine}
-                        onChange={(e) => setAddressLine(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                        readOnly
+                        disabled
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                       />
                     </div>
                     <div>
@@ -435,8 +434,9 @@ export const ProfileHub: React.FC = () => {
                       <input
                         type="text"
                         value={addressCity}
-                        onChange={(e) => setAddressCity(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                        readOnly
+                        disabled
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                       />
                     </div>
                     <div>
@@ -444,8 +444,9 @@ export const ProfileHub: React.FC = () => {
                       <input
                         type="text"
                         value={country}
-                        onChange={(e) => setCountry(e.target.value)}
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                        readOnly
+                        disabled
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                       />
                     </div>
                   </>
@@ -457,8 +458,9 @@ export const ProfileHub: React.FC = () => {
                     <input
                       type="text"
                       value={taxId}
-                      onChange={(e) => setTaxId(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                      readOnly
+                      disabled
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                     />
                   </div>
                 )}
@@ -468,8 +470,8 @@ export const ProfileHub: React.FC = () => {
                     <label className="block text-xs font-semibold text-slate-400 mb-1">Preferred Language</label>
                     <select
                       value={language}
-                      onChange={(e) => setLanguage(e.target.value)}
-                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-white/10 text-sm"
+                      disabled
+                      className="w-full px-3.5 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-white/10 text-sm opacity-80 cursor-not-allowed"
                     >
                       <option value="EN">English (EN)</option>
                       <option value="SW">Kiswahili (SW)</option>
@@ -480,13 +482,13 @@ export const ProfileHub: React.FC = () => {
                 )}
 
                 <button
-                  type="submit"
-                  disabled={saving}
-                  className="w-full py-3 rounded-full bg-[#FF444F] hover:bg-[#E63946] text-white font-semibold text-sm cursor-pointer"
+                  type="button"
+                  onClick={() => setActiveSheet(null)}
+                  className="w-full py-3 rounded-full bg-slate-800 dark:bg-[#242833] text-white font-semibold text-sm cursor-pointer"
                 >
-                  {saving ? 'Saving...' : 'Save Changes'}
+                  Close
                 </button>
-              </form>
+              </div>
             )}
 
             {activeSheet === 'kyc' && (

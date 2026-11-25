@@ -550,7 +550,7 @@ export function requirePermission(perm: PermissionKey) {
 
 /**
  * Returns a parameterized SQL WHERE condition restricting trader rows (`userAlias`)
- * strictly to clients inside the administrator's verified device & client ownership scope.
+ * strictly to clients personally created by or explicitly assigned to the administrator.
  * Super Admin (`isSuperAdmin === true`) receives `u.role NOT IN ('owner', 'admin')`.
  */
 export function buildScopedClientCondition(
@@ -567,7 +567,9 @@ export function buildScopedClientCondition(
   return `(
     ${base}
     AND (
-      EXISTS (
+      ${userAlias}.created_by_admin_id = ${pIdx}
+      OR ${userAlias}.assigned_admin_id = ${pIdx}
+      OR EXISTS (
         SELECT 1
         FROM client_admin_assignments caa
         WHERE caa.user_id = ${userAlias}.id
@@ -588,23 +590,6 @@ export function buildScopedClientCondition(
                 AND rd.revoked_at IS NULL
             )
           )
-      )
-      OR (
-        ${userAlias}.assigned_admin_id IS NULL
-        AND EXISTS (
-          SELECT 1
-          FROM client_device_assignments cda
-          JOIN admin_devices ad ON ad.device_id = cda.device_id
-          JOIN registered_devices rd ON rd.id = ad.device_id
-          WHERE cda.user_id = ${userAlias}.id
-            AND cda.is_active = TRUE
-            AND cda.revoked_at IS NULL
-            AND ad.admin_user_id = ${pIdx}
-            AND ad.is_active = TRUE
-            AND ad.revoked_at IS NULL
-            AND rd.is_active = TRUE
-            AND rd.revoked_at IS NULL
-        )
       )
     )
   )`;

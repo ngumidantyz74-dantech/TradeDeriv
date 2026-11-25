@@ -523,6 +523,7 @@ router.post('/bots/run', requireDb, requireAuth, async (req: AuthRequest, res) =
       analyserSync: Boolean(b.analyserSync),
       conditionType: b.conditionType,
       conditionDigit: b.conditionDigit !== undefined ? Number(b.conditionDigit) : undefined,
+      quantumPredictionId: b.quantumPredictionId ? String(b.quantumPredictionId).trim() : null,
     });
     res.json({ telemetry });
   } catch (err) {

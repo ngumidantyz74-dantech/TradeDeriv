@@ -119,6 +119,15 @@ export const TRADE_SUBTYPES: TradeSubtypeDef[] = [
     usesPrediction: false,
   },
   {
+    category: 'Up/Down',
+    subtype: 'Higher/Lower',
+    legs: [
+      { value: 'HIGHER', label: 'Higher' },
+      { value: 'LOWER', label: 'Lower' },
+    ],
+    usesPrediction: true,
+  },
+  {
     category: 'Digits',
     subtype: 'Matches/Differs',
     legs: [
@@ -246,6 +255,8 @@ export interface BotXmlWorkspaceState {
   restartResultCheck: 'win' | 'loss';
   restartDetailField: 'profit' | 'payout' | 'buy_price';
   restartElseEnabled: boolean;
+  quantumPredictionId?: string | null;
+  quantumExpiresAt?: string | null;
 }
 
 export function createDefaultXmlWorkspaceState(): BotXmlWorkspaceState {
@@ -492,6 +503,7 @@ export function inferTradeCategoryFromContract(ct: string): {
   if (u === 'DIGITMATCH' || u === 'DIGITDIFF') return { tradeCategory: 'Digits', tradeSubtype: 'Matches/Differs' };
   if (u === 'DIGITEVEN' || u === 'DIGITODD') return { tradeCategory: 'Digits', tradeSubtype: 'Even/Odd' };
   if (u === 'DIGITOVER' || u === 'DIGITUNDER') return { tradeCategory: 'Digits', tradeSubtype: 'Over/Under' };
+  if (u === 'HIGHER' || u === 'LOWER') return { tradeCategory: 'Up/Down', tradeSubtype: 'Higher/Lower' };
   return { tradeCategory: 'Up/Down', tradeSubtype: 'Rise/Fall' };
 }
 
@@ -706,6 +718,9 @@ function normalizeTradeTypeAndCategory(
   if (sub.includes('mult')) {
     return { tradeCategory: 'Multipliers', tradeSubtype: 'Up/Down' };
   }
+  if (sub.includes('higher') || sub.includes('lower')) {
+    return { tradeCategory: 'Up/Down', tradeSubtype: 'Higher/Lower' };
+  }
   if (sub.includes('rise') || sub.includes('fall') || sub.includes('callput')) {
     return { tradeCategory: 'Up/Down', tradeSubtype: 'Rise/Fall' };
   }
@@ -753,6 +768,10 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
     if (mart) res.martingaleFactor = mart;
     const candle = normalizeCandleInterval(getField('CANDLEINTERVAL_LIST'));
     if (candle) res.candleInterval = candle;
+    const qPredMatch = xml.match(/<prediction_id[^>]*>([^<]+)<\/prediction_id>/i);
+    if (qPredMatch?.[1]?.trim()) res.quantumPredictionId = qPredMatch[1].trim();
+    const qExpMatch = xml.match(/<expires_at[^>]*>([^<]+)<\/expires_at>/i);
+    if (qExpMatch?.[1]?.trim()) res.quantumExpiresAt = qExpMatch[1].trim();
     return res;
   };
 
@@ -1133,6 +1152,13 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
         if (det === 'profit' || det === 'payout' || det === 'buy_price') out.restartDetailField = det;
         if (af.get('ELSE_ENABLED')) out.restartElseEnabled = af.get('ELSE_ENABLED')!.toUpperCase() === 'TRUE';
       }
+    }
+
+    const qPredEl = doc.getElementsByTagName('prediction_id')[0];
+    const qExpEl = doc.getElementsByTagName('expires_at')[0];
+    if (qPredEl?.textContent?.trim()) {
+      out.quantumPredictionId = qPredEl.textContent.trim();
+      out.quantumExpiresAt = qExpEl?.textContent?.trim() || null;
     }
 
     // Ignore unused tradeDefBlock check warning by ensuring parsed ok

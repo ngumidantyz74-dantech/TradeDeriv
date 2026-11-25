@@ -267,7 +267,31 @@ export interface BotTelemetry {
   strategyType?: string;
   growthRate?: number;
   analyserSync?: boolean;
+  quantumPredictionId?: string | null;
+  quantumExpiresAt?: string | null;
   journal?: BotJournalEntry[];
+}
+
+export interface QuantumPrediction {
+  prediction_id: string;
+  user_id?: number;
+  instrument: string;
+  contract_type: string;
+  predicted_condition: string;
+  barrier: string;
+  duration: number;
+  duration_unit: string;
+  stake: number;
+  probability: number;
+  loss_risk_score: number;
+  spot_price: number;
+  generated_at: string;
+  expires_at: string;
+  validity_status: 'VALID' | 'INVALID';
+  executed_count?: number;
+  signature_hmac?: string;
+  rationale?: string;
+  remainingSeconds: number;
 }
 
 export interface AnalyserSignalResult {

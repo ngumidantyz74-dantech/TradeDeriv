@@ -555,6 +555,31 @@ async function runSchemaAndSeed(): Promise<void> {
         details_json TEXT NOT NULL DEFAULT '{}',
         created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
       );
+
+      CREATE TABLE IF NOT EXISTS quantum_predictions (
+        prediction_id TEXT PRIMARY KEY,
+        user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+        instrument TEXT NOT NULL,
+        contract_type TEXT NOT NULL,
+        predicted_condition TEXT NOT NULL,
+        barrier TEXT NOT NULL DEFAULT '',
+        duration INTEGER NOT NULL DEFAULT 1,
+        duration_unit TEXT NOT NULL DEFAULT 't',
+        stake DOUBLE PRECISION NOT NULL DEFAULT 1.0,
+        probability DOUBLE PRECISION NOT NULL DEFAULT 0,
+        loss_risk_score DOUBLE PRECISION NOT NULL DEFAULT 0,
+        spot_price DOUBLE PRECISION NOT NULL DEFAULT 0,
+        generated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        expires_at TIMESTAMPTZ NOT NULL,
+        validity_status TEXT NOT NULL DEFAULT 'VALID',
+        executed_count INTEGER NOT NULL DEFAULT 0,
+        signature_hmac TEXT NOT NULL,
+        rationale TEXT NOT NULL DEFAULT '',
+        created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_quantum_predictions_user_time
+        ON quantum_predictions (user_id, generated_at DESC);
     `);
 
     // Idempotent column migrations for pre-existing tables
@@ -579,6 +604,7 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS account_mode TEXT DEFAULT 'demo';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS wallet_bucket TEXT NOT NULL DEFAULT 'options';
       ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS notes TEXT DEFAULT '';
+      ALTER TABLE virtual_orders ADD COLUMN IF NOT EXISTS quantum_prediction_id TEXT DEFAULT '';
       ALTER TABLE cashier_transactions ADD COLUMN IF NOT EXISTS account_mode TEXT NOT NULL DEFAULT 'demo';
       ALTER TABLE users ADD COLUMN IF NOT EXISTS trading_suspended BOOLEAN NOT NULL DEFAULT FALSE;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS locked_until TIMESTAMPTZ;
@@ -594,6 +620,7 @@ async function runSchemaAndSeed(): Promise<void> {
       ALTER TABLE users ADD COLUMN IF NOT EXISTS deactivated_at TIMESTAMPTZ;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS originating_device_id INTEGER REFERENCES registered_devices(id) ON DELETE SET NULL;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS assigned_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
+      ALTER TABLE users ADD COLUMN IF NOT EXISTS created_by_admin_id INTEGER REFERENCES users(id) ON DELETE SET NULL;
       ALTER TABLE users ADD COLUMN IF NOT EXISTS ownership_verification_status TEXT NOT NULL DEFAULT 'pending_verification';
     `);
 
