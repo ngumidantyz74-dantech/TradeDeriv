@@ -356,7 +356,7 @@ export interface RunOnceAssignment {
 
 export interface AddedVisualBlock {
   id: string;
-  section: 'purchase' | 'restart' | 'canvas';
+  section: 'purchase' | 'sell' | 'restart' | 'canvas';
   kind: 'if' | 'set' | 'purchase' | 'notify' | 'stop';
   label: string;
   left?: string;
@@ -390,6 +390,7 @@ export interface BotXmlWorkspaceState {
   restartBuySellOnError: boolean;
   restartLastTradeOnError: boolean;
   assignments: RunOnceAssignment[];
+  discoveredVariables?: string[];
   durationUnit: string;
   duration: string;
   prediction: string;
@@ -407,6 +408,7 @@ export interface BotXmlWorkspaceState {
   notifyColor: 'blue' | 'green' | 'yellow' | 'red';
   notifySound: 'Silent' | 'Announcement' | 'Earned money' | 'Job done' | 'Severe error';
   notifyParts: TextJoinPart[];
+  beforeHasIf?: boolean;
   ifLeftVar: string;
   ifOperator: 'EQ' | 'NEQ' | 'GT' | 'LT' | 'GTE' | 'LTE';
   ifCompareValue: string;
@@ -784,9 +786,31 @@ export function serializeBotWorkspaceXml(state: BotXmlWorkspaceState): string {
   </block>`
     : '';
 
+  const allDeclaredVars = Array.from(
+    new Set([
+      ...BOT_VARIABLES,
+      ...(state.discoveredVariables || []),
+      ...state.assignments.map((a) => a.variable),
+    ])
+  ).filter(Boolean);
+
+  const beforeActionXml =
+    state.beforeHasIf === false
+      ? `      <block type="purchase">
+        <field name="PURCHASE_LIST">${escapeXml(state.thenPurchase)}</field>
+      </block>`
+      : `      <block type="controls_if">
+        <field name="LEFT_VAR">${escapeXml(state.ifLeftVar)}</field>
+        <field name="OP">${escapeXml(state.ifOperator)}</field>
+        <field name="RIGHT_VAL">${escapeXml(state.ifCompareValue)}</field>
+        <field name="THEN_PURCHASE">${escapeXml(state.thenPurchase)}</field>
+        <field name="ELSE_ENABLED">${state.elseEnabled ? 'TRUE' : 'FALSE'}</field>
+        <field name="ELSE_PURCHASE">${escapeXml(state.elsePurchase)}</field>
+      </block>`;
+
   return `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">
   <variables>
-${BOT_VARIABLES.map((v) => `    <variable>${escapeXml(v)}</variable>`).join('\n')}
+${allDeclaredVars.map((v) => `    <variable>${escapeXml(v)}</variable>`).join('\n')}
   </variables>
   <block type="trade_definition" id="trade_def_root" x="40" y="20">
     <field name="MARKET_LIST">${escapeXml(state.market)}</field>
@@ -818,14 +842,7 @@ ${notifyItemsXml}
         <field name="NOTIFICATION_SOUND">${escapeXml(state.notifySound)}</field>
         <field name="MSG_VAR">${escapeXml(state.notifyVar)}</field>
       </block>
-      <block type="controls_if">
-        <field name="LEFT_VAR">${escapeXml(state.ifLeftVar)}</field>
-        <field name="OP">${escapeXml(state.ifOperator)}</field>
-        <field name="RIGHT_VAL">${escapeXml(state.ifCompareValue)}</field>
-        <field name="THEN_PURCHASE">${escapeXml(state.thenPurchase)}</field>
-        <field name="ELSE_ENABLED">${state.elseEnabled ? 'TRUE' : 'FALSE'}</field>
-        <field name="ELSE_PURCHASE">${escapeXml(state.elsePurchase)}</field>
-      </block>
+${beforeActionXml}
     </statement>
   </block>${duringBlockXml}
   <block type="after_purchase" id="after_purchase_root" x="520" y="20">
@@ -1062,10 +1079,12 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
 
     // Build variable id -> variable name dictionary from <variables>
     const varIdToName = new Map<string, string>();
+    const discoveredVarsSet = new Set<string>();
     const varEls = Array.from(doc.getElementsByTagName('variable'));
     for (const vEl of varEls) {
       const id = vEl.getAttribute('id');
       const name = (vEl.textContent || '').trim();
+      if (name) discoveredVarsSet.add(name);
       if (id && name) varIdToName.set(id, name);
     }
 
@@ -1395,11 +1414,13 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
         continue;
       }
 
-      const mappedVar = varAliasMap[lowName] || (BOT_VARIABLES.includes(rawName) ? rawName : undefined);
+      const mappedVar = varAliasMap[lowName] || rawName;
+      discoveredVarsSet.add(mappedVar);
       if (mappedVar && val !== undefined) {
         if (mappedVar === 'maxStake' && Number.isFinite(Number(val))) out.maxStake = val;
         if (mappedVar === 'Tick Count' && Number.isFinite(Number(val))) out.sellTickCount = val;
-        if (isInitBlock || !seenVars.has(mappedVar)) {
+        // Preserve ALL variables_set inside INITIALIZATION (even custom variables) + aliased vars
+        if (isInitBlock || (!seenVars.has(mappedVar) && (varAliasMap[lowName] || BOT_VARIABLES.includes(rawName)))) {
           pushAssign(mappedVar, val);
         }
       }
@@ -1520,10 +1541,26 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       if (msgVar) out.notifyVar = msgVar;
     }
 
+    if (discoveredVarsSet.size > 0) {
+      out.discoveredVariables = Array.from(discoveredVarsSet);
+    }
+
+    const extraCustomBlocks: AddedVisualBlock[] = [];
+    const describeBlockInline = (blk: Element): string => {
+      const bt = blk.getAttribute('type') || 'block';
+      const bf = Array.from(blk.children)
+        .filter((c) => c.tagName.toLowerCase() === 'field')
+        .map((f) => `${f.getAttribute('name')}: ${(f.textContent || '').trim()}`)
+        .filter(Boolean)
+        .join(', ');
+      return bf ? `${bt} (${bf})` : bt;
+    };
+
     if (beforeBlock) {
       const bpControlsIf = Array.from(beforeBlock.getElementsByTagName('block')).find(
         (b) => (b.getAttribute('type') || '').toLowerCase() === 'controls_if'
       );
+      out.beforeHasIf = Boolean(bpControlsIf);
       if (bpControlsIf) {
         const cf = getDirectFields(bpControlsIf);
         if (cf.get('LEFT_VAR')) out.ifLeftVar = cf.get('LEFT_VAR')!;
@@ -1535,6 +1572,77 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
         if (cf.get('THEN_PURCHASE')) out.thenPurchase = cf.get('THEN_PURCHASE')!.toUpperCase();
         if (cf.get('ELSE_ENABLED')) out.elseEnabled = cf.get('ELSE_ENABLED')!.toUpperCase() === 'TRUE';
         if (cf.get('ELSE_PURCHASE')) out.elsePurchase = cf.get('ELSE_PURCHASE')!.toUpperCase();
+      } else if (purchaseChoices.length > 0) {
+        out.thenPurchase = purchaseChoices[0];
+        out.elseEnabled = false;
+      }
+
+      // Dynamically capture any extra blocks in before_purchase beyond the first text_join, first notify, and main controls_if/purchase
+      const bpBlocks = Array.from(beforeBlock.getElementsByTagName('block'));
+      let skippedTextJoin = false;
+      let skippedNotify = false;
+      let skippedMainAction = false;
+      for (const b of bpBlocks) {
+        const bt = (b.getAttribute('type') || '').toLowerCase();
+        if (bt === 'text_statement' || bt === 'variables_get' || bt === 'procedures_callreturn') continue;
+        if (bt === 'text_join' && !skippedTextJoin) {
+          skippedTextJoin = true;
+          continue;
+        }
+        if (bt === 'notify' && !skippedNotify) {
+          skippedNotify = true;
+          continue;
+        }
+        if (bt === 'controls_if' && b === bpControlsIf && !skippedMainAction) {
+          skippedMainAction = true;
+          continue;
+        }
+        if (bt === 'purchase' && !bpControlsIf && !skippedMainAction) {
+          skippedMainAction = true;
+          continue;
+        }
+        if (bt === 'controls_if') {
+          const cf = getDirectFields(b);
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-bp-${extraCustomBlocks.length}`,
+            section: 'purchase',
+            kind: 'if',
+            label: 'Logic condition',
+            left: cf.get('LEFT_VAR') || 'winStreak',
+            op: ((cf.get('OP')?.toUpperCase() as any) || 'EQ'),
+            right: cf.get('RIGHT_VAL') || '0',
+          });
+        } else if (bt === 'variables_set') {
+          const cf = getDirectFields(b);
+          const vName = cf.get('VAR') || 'nextStake';
+          const vVal = getDirectValues(b).get('VALUE') || '0';
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-bp-${extraCustomBlocks.length}`,
+            section: 'purchase',
+            kind: 'set',
+            label: `set ${vName}`,
+            left: vName,
+            value: vVal,
+          });
+        } else if (bt === 'purchase') {
+          const cf = getDirectFields(b);
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-bp-${extraCustomBlocks.length}`,
+            section: 'purchase',
+            kind: 'purchase',
+            label: 'Purchase contract',
+            contract: cf.get('PURCHASE_LIST')?.toUpperCase() || out.thenPurchase,
+          });
+        } else if (bt === 'notify') {
+          const msg = getDirectValues(b).get('MESSAGE') || describeBlockInline(b);
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-bp-${extraCustomBlocks.length}`,
+            section: 'purchase',
+            kind: 'notify',
+            label: 'Notify',
+            value: msg,
+          });
+        }
       }
     }
 
@@ -1542,9 +1650,29 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
     const duringBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'during_purchase');
     if (duringBlock) {
       out.hasSellConditions = true;
+      const dpBlocks = Array.from(duringBlock.getElementsByTagName('block'));
+      let skippedFirstSell = false;
+      for (const b of dpBlocks) {
+        const bt = (b.getAttribute('type') || '').toLowerCase();
+        if (bt === 'sell_at_market' || bt === 'sell_is_available') continue;
+        if (bt === 'controls_if' && !skippedFirstSell) {
+          skippedFirstSell = true;
+          continue;
+        }
+        if (bt === 'variables_set' || bt === 'notify' || bt === 'controls_if') {
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-dp-${extraCustomBlocks.length}`,
+            section: 'sell',
+            kind: bt === 'variables_set' ? 'set' : bt === 'notify' ? 'notify' : 'if',
+            label: describeBlockInline(b),
+            left: getDirectFields(b).get('VAR') || getDirectFields(b).get('LEFT_VAR') || 'Tick Count',
+            value: getDirectValues(b).get('VALUE') || describeBlockInline(b),
+          });
+        }
+      }
     }
 
-    // Parse after_purchase restart settings & procedure call names
+    // Parse after_purchase restart settings & procedure call names + extra restart blocks
     const afterBlock = blocks.find((b) => (b.getAttribute('type') || '').toLowerCase() === 'after_purchase');
     if (afterBlock) {
       const procNoRet = Array.from(afterBlock.getElementsByTagName('block')).find(
@@ -1571,6 +1699,64 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
         if (det === 'profit' || det === 'payout' || det === 'buy_price') out.restartDetailField = det;
         if (af.get('ELSE_ENABLED')) out.restartElseEnabled = af.get('ELSE_ENABLED')!.toUpperCase() === 'TRUE';
       }
+
+      const apBlocks = Array.from(afterBlock.getElementsByTagName('block'));
+      let skippedUpd = false;
+      let skippedMainIf = false;
+      for (const b of apBlocks) {
+        const bt = (b.getAttribute('type') || '').toLowerCase();
+        if (
+          bt === 'trade_again' ||
+          bt === 'contract_check_result' ||
+          bt === 'read_details' ||
+          bt === 'procedures_callreturn' ||
+          bt === 'variables_get'
+        ) {
+          continue;
+        }
+        if ((bt === 'procedures_callnoreturn' || bt === 'update_stake_and_side') && !skippedUpd) {
+          skippedUpd = true;
+          continue;
+        }
+        if (bt === 'controls_if' && b === apIf && !skippedMainIf) {
+          skippedMainIf = true;
+          continue;
+        }
+        if (bt === 'variables_set') {
+          const cf = getDirectFields(b);
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-ap-${extraCustomBlocks.length}`,
+            section: 'restart',
+            kind: 'set',
+            label: `set ${cf.get('VAR') || 'var'}`,
+            left: cf.get('VAR') || 'tradeAgain',
+            value: getDirectValues(b).get('VALUE') || '0',
+          });
+        } else if (bt === 'notify') {
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-ap-${extraCustomBlocks.length}`,
+            section: 'restart',
+            kind: 'notify',
+            label: 'Notify',
+            value: getDirectValues(b).get('MESSAGE') || describeBlockInline(b),
+          });
+        } else if (bt === 'controls_if') {
+          const cf = getDirectFields(b);
+          extraCustomBlocks.push({
+            id: b.getAttribute('id') || `xml-ap-${extraCustomBlocks.length}`,
+            section: 'restart',
+            kind: 'if',
+            label: 'Logic condition',
+            left: cf.get('LEFT_VAR') || 'totalProfit',
+            op: ((cf.get('OP')?.toUpperCase() as any) || 'LT'),
+            right: cf.get('RIGHT_VAL') || 'profitThreshold',
+          });
+        }
+      }
+    }
+
+    if (extraCustomBlocks.length > 0) {
+      out.customBlocks = extraCustomBlocks;
     }
 
     const qPredEl = doc.getElementsByTagName('prediction_id')[0];
@@ -1580,7 +1766,7 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       out.quantumExpiresAt = qExpEl?.textContent?.trim() || null;
     }
 
-    // Collect top-level procedure blocks & custom strategy blocks so ANY DBot XML visualizes cleanly
+    // Collect ALL top-level procedure blocks & custom strategy blocks (no truncation)
     const importedGroups: ImportedProcedureGroup[] = [];
     const rootTopBlocks = Array.from(doc.documentElement.children).filter(
       (c) => c.tagName.toLowerCase() === 'block'
@@ -1593,16 +1779,8 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
       }
       const procName = getDirectFields(tb).get('NAME') || t;
       const innerStmts = Array.from(tb.getElementsByTagName('block'))
-        .slice(0, 6)
-        .map((subB) => {
-          const st = subB.getAttribute('type') || 'block';
-          const sf = Array.from(subB.children)
-            .filter((c) => c.tagName.toLowerCase() === 'field')
-            .map((f) => `${f.getAttribute('name')}: ${(f.textContent || '').trim()}`)
-            .filter(Boolean)
-            .join(', ');
-          return sf ? `${st} (${sf})` : st;
-        });
+        .map((subB) => describeBlockInline(subB))
+        .filter(Boolean);
       importedGroups.push({
         id: tb.getAttribute('id') || `proc-${importedGroups.length}`,
         title: procName,

@@ -1233,4 +1233,109 @@ router.put('/workspace/preferences', requireDb, requireAuth, async (req: AuthReq
   res.json({ ok: true });
 });
 
+// 11. Ask Amy Support Chat (Claude / Anthropic with mandatory graceful maintenance fallback)
+const AMY_FALLBACK_REPLY = 'Please wait for a response after 30 mins. We are working on our system.';
+
+router.post('/support/amy', requireAuth, async (req: AuthRequest, res) => {
+  const userMessage = String(req.body?.message || '').trim();
+  const displayName = String(req.body?.displayName || req.user?.email?.split('@')[0] || 'Trader').trim();
+  const history = Array.isArray(req.body?.history) ? req.body.history.slice(-8) : [];
+
+  if (!userMessage) {
+    res.json({
+      ok: true,
+      status: 'maintenance_wait',
+      reply: AMY_FALLBACK_REPLY,
+    });
+    return;
+  }
+
+  const anthropicKey = process.env.ANTHROPIC_API_KEY;
+  if (!anthropicKey) {
+    res.json({
+      ok: true,
+      status: 'maintenance_wait',
+      fallback: true,
+      reply: AMY_FALLBACK_REPLY,
+    });
+    return;
+  }
+
+  try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 8000);
+    const messages = [
+      ...history
+        .filter((h: any) => h && typeof h.text === 'string' && (h.sender === 'user' || h.sender === 'amy'))
+        .map((h: any) => ({
+          role: h.sender === 'user' ? 'user' : 'assistant',
+          content: String(h.text).slice(0, 1200),
+        })),
+      { role: 'user', content: userMessage.slice(0, 1500) },
+    ];
+
+    const apiRes = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      signal: controller.signal,
+      headers: {
+        'content-type': 'application/json',
+        'x-api-key': anthropicKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-3-5-sonnet-latest',
+        max_tokens: 400,
+        system: `You are Amy, Deriv customer support assistant helping ${displayName}. Keep replies concise, helpful, and polite.`,
+        messages,
+      }),
+    });
+    clearTimeout(timer);
+
+    if (!apiRes.ok) {
+      await logSystemError('ask-amy-claude', `Anthropic HTTP ${apiRes.status}`, 'warn', { userId: req.user?.id });
+      res.json({
+        ok: true,
+        status: 'maintenance_wait',
+        fallback: true,
+        reply: AMY_FALLBACK_REPLY,
+      });
+      return;
+    }
+
+    const data: any = await apiRes.json().catch(() => null);
+    const text =
+      Array.isArray(data?.content) && data.content[0]?.text ? String(data.content[0].text).trim() : '';
+
+    if (!text) {
+      res.json({
+        ok: true,
+        status: 'maintenance_wait',
+        fallback: true,
+        reply: AMY_FALLBACK_REPLY,
+      });
+      return;
+    }
+
+    res.json({
+      ok: true,
+      status: 'answered',
+      fallback: false,
+      reply: text,
+    });
+  } catch (err) {
+    await logSystemError(
+      'ask-amy-claude',
+      err instanceof Error ? err.message : 'Claude request error',
+      'warn',
+      { userId: req.user?.id }
+    ).catch(() => {});
+    res.json({
+      ok: true,
+      status: 'maintenance_wait',
+      fallback: true,
+      reply: AMY_FALLBACK_REPLY,
+    });
+  }
+});
+
 export default router;

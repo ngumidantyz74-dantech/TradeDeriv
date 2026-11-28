@@ -1,179 +1,173 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
-  Activity,
+  BarChart2,
+  ArrowLeftRight,
+  BookOpen,
+  PieChart,
+  Settings,
+  Info,
+  Crown,
+  User,
+  ChevronDown,
+  Menu,
+  X,
+  Check,
   TrendingUp,
-  TrendingDown,
-  Radar,
-  Layers,
-  Target,
-  Clock,
-  Sparkles,
-  AlertTriangle,
-  RefreshCw,
-  Send,
-  ShieldAlert,
-  Search,
+  Zap,
+  Activity,
+  LayoutGrid,
+  Play,
+  ArrowRight,
   Download,
-  Cpu,
+  ExternalLink,
+  RefreshCw,
+  Trash2,
+  Plus,
+  Clock,
+  ShieldCheck,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
-import { apiFetch, fetchDerivTickHistoryDirect, subscribeDerivTicksDirect, sanitizeUiError, getStoredToken } from '../lib/api';
-import type { SmcAnalysis, BuyLowSellHighResult, StrategySetup } from '../lib/quant-engine';
+import {
+  apiFetch,
+  fetchDerivTickHistoryDirect,
+  subscribeDerivTicksDirect,
+  sanitizeUiError,
+  getStoredToken,
+} from '../lib/api';
+import { getCanonicalBalances } from '../lib/balances';
 import type { QuantumPrediction } from '../types';
 
-type AnalyserTab =
-  | 'radar'
-  | 'quantum'
-  | 'smc'
-  | 'blsh'
-  | 'sessions'
-  | 'copilot'
-  | 'dcircles'
-  | 'signals'
-  | 'over-under'
-  | 'rise-fall';
+type QuantumNavTab = 'analysis' | 'transactions' | 'journal' | 'summary' | 'settings' | 'about';
+type AnalysisMode = 'auto' | 'digit' | 'directional';
 
-interface RadarInstrument {
-  symbol: string;
-  displayName: string;
-  category: string;
-  price: number | null;
-  source: string;
-  error: string | null;
-  volatilityPct: number | null;
-  trendStrengthAdx: number | null;
-  rsi14: number | null;
-  smcBias: 'bullish' | 'bearish' | 'neutral';
-  dealingZone: 'Premium' | 'Discount' | 'Equilibrium';
-  rangePct: number;
-  buyLowSellHigh: BuyLowSellHighResult | null;
-  topSetup: StrategySetup | null;
-  setupCount: number;
+interface ScanTelemetry {
+  dataPoints: number;
+  targetDigit: number;
+  targetDigitPct: number;
+  digitDistribution: Array<{ digit: number; count: number; pct: number }>;
+  trend: string;
+  momentum: string;
+  volatility: string;
+  pattern: string;
 }
 
-interface AnalyzeResponse {
+interface JournalRow {
+  id: number;
   symbol: string;
-  granularity: number;
-  timeframe: string;
-  source: string;
-  error: string | null;
-  lastUpdated: number | null;
-  candlesCount: number;
-  indicators: {
-    close: number;
-    ema9: number | null;
-    ema20: number | null;
-    ema50: number | null;
-    ema200: number | null;
-    rsi14: number | null;
-    macd: { line: number | null; signal: number | null; histogram: number | null };
-    bollinger: { upper: number | null; middle: number | null; lower: number | null; percentB: number | null };
-    stochastic: { k: number | null; d: number | null };
-    atr14: number | null;
-    adx14: { adx: number | null; plusDi: number | null; minusDi: number | null };
-    vwap: { available: boolean; reason: string | null; latest: number | null };
-    psar: { value: number | null; trend: 'bullish' | 'bearish' | null };
-  } | null;
-  smc: SmcAnalysis | null;
-  buyLowSellHigh: BuyLowSellHighResult | null;
-  setups: StrategySetup[];
+  side: string;
+  strategy_key?: string;
+  timeframe?: string;
+  rationale?: string;
+  emotions?: string;
+  discipline_score?: number;
+  lessons?: string;
+  created_at: string;
 }
 
-interface SessionsResponse {
-  utcTime: string;
-  sessions: Array<{
-    name: string;
-    openUtc: string;
-    closeUtc: string;
-    isOpen: boolean;
-    focus: string;
-  }>;
-  derivTradingTimes: {
-    source: string;
-    error: string | null;
-    markets: Array<{
-      name: string;
-      submarkets: Array<{
-        name: string;
-        symbolsCount: number;
-        sampleSymbols: Array<{ symbol: string; name: string; tradingDays: string[] }>;
-      }>;
-    }>;
+interface PerformanceSummary {
+  combined?: {
+    totalTrades: number;
+    openTrades: number;
+    wins: number;
+    losses: number;
+    winRatePct: number;
+    netPnlUsd: number;
+    unrealizedPnlUsd: number;
+    profitFactor: number;
+    maxDrawdownUsd: number;
   };
-  integrityNote: string;
+  real?: {
+    totalTrades: number;
+    winRatePct: number;
+    netPnlUsd: number;
+  };
+  demo?: {
+    totalTrades: number;
+    winRatePct: number;
+    netPnlUsd: number;
+  };
+  periods?: {
+    dailyPnlUsd: number;
+    weeklyPnlUsd: number;
+    monthlyPnlUsd: number;
+  };
+  bySymbol?: Array<{ symbol: string; trades: number; wins: number; netPnl: number }>;
 }
 
-const GRANULARITY_OPTIONS = [
-  { label: '1m', value: 60 },
-  { label: '5m', value: 300 },
-  { label: '15m', value: 900 },
-  { label: '30m', value: 1800 },
-  { label: '1h', value: 3600 },
-  { label: '4h', value: 14400 },
-];
+const QUANTUM_BRIDGE_KEY = 'td_quantum_dbot_bridge';
+
+function formatElapsed(seconds: number): string {
+  const s = Math.max(0, Math.floor(seconds));
+  const hrs = Math.floor(s / 3600);
+  const mins = Math.floor((s % 3600) / 60);
+  const rem = s % 60;
+  return `${String(hrs).padStart(2, '0')}:${String(mins).padStart(2, '0')}:${String(rem).padStart(2, '0')}`;
+}
 
 export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalone = true }) => {
-  void standalone;
   const {
+    user,
+    accounts,
     instruments,
     selectedSymbol,
     setSelectedSymbol,
     accountMode,
+    setAccountMode,
     activeConnectedAccount,
     isDbLocked,
+    orders,
     refreshOrders,
     refreshAll,
+    setActiveTab,
+    setTradePreset,
+    formatMoney,
+    logout,
     showToast,
   } = useApp();
 
-  const [tab, setTab] = useState<AnalyserTab>('quantum');
-  const [granularity, setGranularity] = useState(900);
-  const [tickCount, setTickCount] = useState(100);
+  const { optionsBal } = getCanonicalBalances(user, accounts, accountMode, activeConnectedAccount);
+
+  const [navTab, setNavTab] = useState<QuantumNavTab>('analysis');
+  const [selectedDigit, setSelectedDigit] = useState<number>(7);
+  const [analysisMode, setAnalysisMode] = useState<AnalysisMode>('auto');
+  const [tickCount, setTickCount] = useState<number>(100);
+  const [quantumStake, setQuantumStake] = useState<string>('1');
+  const [autoBroadcast, setAutoBroadcast] = useState<boolean>(true);
+  const [premiumActive, setPremiumActive] = useState<boolean>(true);
+
   const [prices, setPrices] = useState<number[]>([]);
-  const [barrier, setBarrier] = useState(4);
-  const [stake, setStake] = useState('5');
-  const [executing, setExecuting] = useState(false);
+  const [scanProgress, setScanProgress] = useState<number>(100);
+  const [scanElapsedSec, setScanElapsedSec] = useState<number>(8);
+  const [scanSpeedPts, setScanSpeedPts] = useState<number>(780);
+  const [isScanning, setIsScanning] = useState<boolean>(false);
 
-  // Market Radar state
-  const [radarLoading, setRadarLoading] = useState(false);
-  const [radarError, setRadarError] = useState<string | null>(null);
-  const [radarRows, setRadarRows] = useState<RadarInstrument[]>([]);
-  const [radarScannedAt, setRadarScannedAt] = useState<string | null>(null);
-  const [radarCatFilter, setRadarCatFilter] = useState<string>('All');
-  const [radarSearch, setRadarSearch] = useState('');
-  const [radarSort, setRadarSort] = useState<'setups' | 'volatility' | 'adx'>('setups');
+  const [predictions, setPredictions] = useState<QuantumPrediction[]>([]);
+  const [activePrediction, setActivePrediction] = useState<QuantumPrediction | null>(null);
+  const [scanTelemetry, setScanTelemetry] = useState<ScanTelemetry | null>(null);
+  const [detailsOpen, setDetailsOpen] = useState<boolean>(false);
+  const [analyzeSnapshot, setAnalyzeSnapshot] = useState<any>(null);
+  const [nowMs, setNowMs] = useState<number>(() => Date.now());
 
-  // SMC & Buy Low/Sell High analysis state
-  const [analyzeLoading, setAnalyzeLoading] = useState(false);
-  const [analyzeData, setAnalyzeData] = useState<AnalyzeResponse | null>(null);
+  const [profileMenuOpen, setProfileMenuOpen] = useState<boolean>(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
 
-  // Sessions state
-  const [sessionsLoading, setSessionsLoading] = useState(false);
-  const [sessionsData, setSessionsData] = useState<SessionsResponse | null>(null);
-  const [utcNow, setUtcNow] = useState(() => new Date().toISOString().slice(11, 19));
+  // Journal & Summary real DB states
+  const [journalEntries, setJournalEntries] = useState<JournalRow[]>([]);
+  const [journalLoading, setJournalLoading] = useState<boolean>(false);
+  const [newJournalText, setNewJournalText] = useState<string>('');
+  const [newJournalLessons, setNewJournalLessons] = useState<string>('');
+  const [perfData, setPerfData] = useState<PerformanceSummary | null>(null);
+  const [perfLoading, setPerfLoading] = useState<boolean>(false);
+  const [executingTrade, setExecutingTrade] = useState<boolean>(false);
 
-  // Co-pilot state
-  const [copilotPrompt, setCopilotPrompt] = useState(
-    'Evaluate current SMC structure, indicator alignment, and Buy Low / Sell High regime with strict invalidation levels.'
-  );
-  const [copilotBusy, setCopilotBusy] = useState(false);
-  const [copilotError, setCopilotError] = useState<string | null>(null);
-  const [copilotAnswer, setCopilotAnswer] = useState<string | null>(null);
-  const [copilotSummary, setCopilotSummary] = useState<any>(null);
+  const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoScannedRef = useRef<boolean>(false);
 
-  // Quantum Analyser state
-  const [quantumLoading, setQuantumLoading] = useState(false);
-  const [quantumScanning, setQuantumScanning] = useState(false);
-  const [quantumError, setQuantumError] = useState<string | null>(null);
-  const [quantumPredictions, setQuantumPredictions] = useState<QuantumPrediction[]>([]);
-  const [quantumStake, setQuantumStake] = useState('1');
-  const [nowMs, setNowMs] = useState(() => Date.now());
+  const activeInst = instruments.find((i) => i.symbol === selectedSymbol) || instruments[0];
+  const decimals =
+    (activeInst?.pip_size ?? 0.01) < 0.0001 ? 5 : (activeInst?.pip_size ?? 0.01) < 0.001 ? 4 : 2;
 
-  const activeInst = instruments.find((i) => i.symbol === selectedSymbol);
-  const decimals = (activeInst?.pip_size ?? 0.01) < 0.0001 ? 5 : (activeInst?.pip_size ?? 0.01) < 0.001 ? 4 : 2;
-  const isDigitStreamTab = tab === 'dcircles' || tab === 'signals' || tab === 'over-under' || tab === 'rise-fall';
-
-  // Tick stream subscription for live spot & digit tabs (switches to mock feed when DB is locked)
+  // Subscribe to real Deriv ticks
   useEffect(() => {
     let active = true;
     fetchDerivTickHistoryDirect(selectedSymbol, tickCount, isDbLocked)
@@ -197,143 +191,283 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
     };
   }, [selectedSymbol, tickCount, isDbLocked]);
 
-  // Live UTC clock for Sessions tab & 1s Quantum countdown tick
+  // 1s live countdown ticker for Quantum 120s signals
   useEffect(() => {
-    const timer = setInterval(() => {
-      const now = new Date();
-      setUtcNow(now.toISOString().slice(11, 19));
-      setNowMs(now.getTime());
-    }, 1000);
-    return () => clearInterval(timer);
+    const id = setInterval(() => setNowMs(Date.now()), 1000);
+    return () => clearInterval(id);
   }, []);
 
-  const radarReqRef = useRef(0);
-  const analyzeReqRef = useRef(0);
-
-  const loadRadar = useCallback(async () => {
-    const reqId = ++radarReqRef.current;
-    setRadarLoading(true);
-    setRadarError(null);
+  const broadcastSignalToDbot = useCallback((pred: QuantumPrediction) => {
+    const payload = {
+      type: 'QUANTUM_SIGNAL',
+      predictionId: pred.prediction_id,
+      symbol: pred.instrument,
+      contractType: pred.contract_type,
+      barrier: pred.barrier,
+      stake: Number(pred.stake || 1),
+      duration: Number(pred.duration || 1),
+      durationUnit: pred.duration_unit || 't',
+      probability: Number(pred.probability || 0),
+      predictedCondition: pred.predicted_condition,
+      expiresAt: pred.expires_at,
+      sentAt: Date.now(),
+    };
     try {
-      const res = await apiFetch<{
-        instruments: RadarInstrument[];
-        scannedAt: string;
-      }>(`/api/intelligence/radar?granularity=${granularity}&_t=${Date.now()}`, {
-        skipAuth: true,
-        cache: 'no-store',
-      });
-      if (radarReqRef.current !== reqId) return;
-      setRadarRows(res.instruments || []);
-      setRadarScannedAt(res.scannedAt || null);
-    } catch (err) {
-      if (radarReqRef.current !== reqId) return;
-      setRadarError(sanitizeUiError(err, 'Unable to load Market Radar right now.'));
-    } finally {
-      if (radarReqRef.current === reqId) setRadarLoading(false);
-    }
-  }, [granularity]);
-
-  const loadAnalyze = useCallback(async () => {
-    const reqId = ++analyzeReqRef.current;
-    setAnalyzeLoading(true);
-    try {
-      const res = await apiFetch<AnalyzeResponse>(
-        `/api/intelligence/analyze?symbol=${encodeURIComponent(selectedSymbol)}&granularity=${granularity}&count=200&_t=${Date.now()}`,
-        { skipAuth: true, cache: 'no-store' }
-      );
-      if (analyzeReqRef.current !== reqId) return;
-      setAnalyzeData({
-        ...res,
-        error: res.error ? sanitizeUiError(res.error, 'Analysis temporarily unavailable.') : null,
-      });
-    } catch (err) {
-      if (analyzeReqRef.current !== reqId) return;
-      setAnalyzeData({
-        symbol: selectedSymbol,
-        granularity,
-        timeframe: `${Math.round(granularity / 60)}m`,
-        source: 'unavailable',
-        error: sanitizeUiError(err, 'Analysis temporarily unavailable.'),
-        lastUpdated: null,
-        candlesCount: 0,
-        indicators: null,
-        smc: null,
-        buyLowSellHigh: null,
-        setups: [],
-      });
-    } finally {
-      if (analyzeReqRef.current === reqId) setAnalyzeLoading(false);
-    }
-  }, [selectedSymbol, granularity]);
-
-  const loadSessions = useCallback(async () => {
-    setSessionsLoading(true);
-    try {
-      const res = await apiFetch<SessionsResponse>(`/api/intelligence/sessions?_t=${Date.now()}`, {
-        skipAuth: true,
-        cache: 'no-store',
-      });
-      setSessionsData(res);
+      localStorage.setItem(QUANTUM_BRIDGE_KEY, JSON.stringify(payload));
+      if (typeof BroadcastChannel !== 'undefined') {
+        const ch = new BroadcastChannel('td_quantum_dbot_bridge');
+        ch.postMessage(payload);
+        ch.close();
+      }
     } catch {
-      // ignore transient error
-    } finally {
-      setSessionsLoading(false);
+      // ignore storage/channel errors
     }
   }, []);
 
-  const loadQuantumPredictions = useCallback(async () => {
-    setQuantumLoading(true);
-    setQuantumError(null);
+  const loadPredictions = useCallback(async () => {
     try {
       const res = await apiFetch<{ predictions: QuantumPrediction[] }>('/api/quantum/predictions');
-      setQuantumPredictions(res.predictions || []);
-    } catch (err) {
-      setQuantumError(sanitizeUiError(err, 'Unable to load Quantum predictions right now.'));
-    } finally {
-      setQuantumLoading(false);
+      const list = res.predictions || [];
+      setPredictions(list);
+      if (list.length > 0) {
+        setActivePrediction((curr) => curr || list[0]);
+      }
+    } catch {
+      // ignore transient fetch errors
     }
   }, []);
 
-  const handleRunQuantumScan = async () => {
-    setQuantumScanning(true);
-    setQuantumError(null);
+  const loadJournal = useCallback(async () => {
+    setJournalLoading(true);
     try {
-      const cleanStake = Math.max(0.5, Number(quantumStake) || 1);
-      const res = await apiFetch<{ prediction: QuantumPrediction }>('/api/quantum/scan', {
-        method: 'POST',
-        body: JSON.stringify({
-          symbol: selectedSymbol,
-          stake: cleanStake,
-        }),
-      });
-      if (res.prediction) {
-        setQuantumPredictions((prev) => [
-          res.prediction,
-          ...prev.filter((p) => p.prediction_id !== res.prediction.prediction_id),
-        ]);
-        showToast(`Quantum scan ready on ${selectedSymbol} (valid 120s)`, 'success');
-      }
-    } catch (err) {
-      const msg = sanitizeUiError(err, 'Quantum scan failed.');
-      setQuantumError(msg);
-      showToast(msg, 'error');
+      const res = await apiFetch<{ entries: JournalRow[] }>('/api/journal?limit=30');
+      setJournalEntries(res.entries || []);
+    } catch {
+      // ignore
     } finally {
-      setQuantumScanning(false);
+      setJournalLoading(false);
     }
+  }, []);
+
+  const loadSummary = useCallback(async () => {
+    setPerfLoading(true);
+    try {
+      const res = await apiFetch<PerformanceSummary>('/api/analytics/performance?limit=250');
+      setPerfData(res || null);
+    } catch {
+      // ignore
+    } finally {
+      setPerfLoading(false);
+    }
+  }, []);
+
+  const loadDetailsAnalytics = useCallback(async () => {
+    try {
+      const res = await apiFetch<any>(
+        `/api/intelligence/analyze?symbol=${encodeURIComponent(selectedSymbol)}&granularity=300&count=120&_t=${Date.now()}`,
+        { skipAuth: true, cache: 'no-store' }
+      );
+      setAnalyzeSnapshot(res);
+    } catch {
+      // ignore
+    }
+  }, [selectedSymbol]);
+
+  useEffect(() => {
+    loadPredictions();
+  }, [loadPredictions]);
+
+  useEffect(() => {
+    if (navTab === 'journal') loadJournal();
+    if (navTab === 'summary') loadSummary();
+    if (navTab === 'transactions') refreshOrders();
+  }, [navTab, loadJournal, loadSummary, refreshOrders]);
+
+  useEffect(() => {
+    if (detailsOpen) {
+      loadDetailsAnalytics();
+    }
+  }, [detailsOpen, loadDetailsAnalytics]);
+
+  // Local live digit & regime analytics computed continuously from incoming ticks
+  const liveAnalytics = useMemo(() => {
+    const list = prices.length > 0 ? prices : [activeInst?.price ?? 1000];
+    const counts = Array(10).fill(0);
+    const digits: number[] = [];
+
+    for (const p of list) {
+      const str = Number(p).toFixed(decimals);
+      const d = Number(str[str.length - 1] || 0);
+      digits.push(d);
+      counts[d] = (counts[d] || 0) + 1;
+    }
+
+    const n = Math.max(1, digits.length);
+    const dist = counts.map((c, d) => ({
+      digit: d,
+      count: c,
+      pct: Number(((c / n) * 100).toFixed(1)),
+    }));
+
+    const selectedCount = counts[selectedDigit] || 0;
+    const differsPct = Number((((n - selectedCount) / n) * 100).toFixed(2));
+    const overPct = Number(((digits.filter((d) => d > selectedDigit).length / n) * 100).toFixed(2));
+    const underPct = Number(((digits.filter((d) => d < selectedDigit).length / n) * 100).toFixed(2));
+    const evenPct = Number(((digits.filter((d) => d % 2 === 0).length / n) * 100).toFixed(2));
+    const oddPct = Number((100 - evenPct).toFixed(2));
+
+    const last10 = list.slice(-10);
+    const prev10 = list.slice(-20, -10);
+    const avg10 = last10.reduce((a, b) => a + b, 0) / Math.max(1, last10.length);
+    const avgPrev = prev10.length ? prev10.reduce((a, b) => a + b, 0) / prev10.length : avg10;
+    const latestPrice = list[list.length - 1] ?? 0;
+
+    const diffs = list.slice(1).map((v, i) => Math.abs(v - list[i]));
+    const avgStep = diffs.reduce((a, b) => a + b, 0) / Math.max(1, diffs.length);
+    const volRatio = latestPrice > 0 ? (avgStep / latestPrice) * 10000 : 0;
+
+    const trend = avg10 > avgPrev * 1.0001 ? 'Uptrend' : avg10 < avgPrev * 0.9999 ? 'Downtrend' : 'Sideways';
+    const momentum =
+      Math.abs(latestPrice - avg10) > avgStep * 1.5
+        ? 'Strong'
+        : Math.abs(latestPrice - avg10) > avgStep * 0.65
+          ? 'Moderate'
+          : 'Steady';
+    const volatility = volRatio > 8 ? 'High' : volRatio > 2.5 ? 'Moderate' : 'Low';
+    const pattern =
+      latestPrice >= (list[0] || latestPrice) && evenPct >= 50
+        ? 'Bullish'
+        : latestPrice < (list[0] || latestPrice) && oddPct > 50
+          ? 'Bearish'
+          : avg10 >= avgPrev
+            ? 'Accumulation'
+            : 'Distribution';
+
+    return {
+      latestPrice,
+      lastDigit: digits[digits.length - 1] ?? 0,
+      sampleSize: digits.length,
+      dist,
+      differsPct,
+      overPct,
+      underPct,
+      evenPct,
+      oddPct,
+      trend,
+      momentum,
+      volatility,
+      pattern,
+    };
+  }, [prices, activeInst?.price, decimals, selectedDigit]);
+
+  const executeQuantumScan = useCallback(
+    async (digitToScan: number, silent = false) => {
+      if (scanTimerRef.current) {
+        clearInterval(scanTimerRef.current);
+        scanTimerRef.current = null;
+      }
+
+      setIsScanning(true);
+      setScanProgress(18);
+      const startedAt = Date.now();
+
+      scanTimerRef.current = setInterval(() => {
+        const elapsed = (Date.now() - startedAt) / 1000;
+        setScanElapsedSec(Math.max(1, Math.round(elapsed)));
+        setScanProgress((prev) => (prev < 92 ? Math.min(92, prev + 11) : prev));
+        setScanSpeedPts(720 + Math.floor(Math.random() * 140));
+      }, 140);
+
+      try {
+        const cleanStake = Math.max(0.5, Number(quantumStake) || 1);
+        const res = await apiFetch<{
+          prediction: QuantumPrediction;
+          telemetry?: ScanTelemetry;
+        }>('/api/quantum/scan', {
+          method: 'POST',
+          body: JSON.stringify({
+            symbol: selectedSymbol,
+            stake: cleanStake,
+            targetDigit: digitToScan,
+            analysisMode,
+          }),
+        });
+
+        if (scanTimerRef.current) {
+          clearInterval(scanTimerRef.current);
+          scanTimerRef.current = null;
+        }
+        setScanProgress(100);
+        setScanElapsedSec(Math.max(1, Math.round((Date.now() - startedAt) / 1000) || 2));
+
+        if (res.prediction) {
+          setActivePrediction(res.prediction);
+          setPredictions((prev) => [
+            res.prediction,
+            ...prev.filter((p) => p.prediction_id !== res.prediction.prediction_id),
+          ]);
+          if (autoBroadcast) {
+            broadcastSignalToDbot(res.prediction);
+          }
+          if (!silent) {
+            showToast(
+              `Digit ${digitToScan} scanned: ${res.prediction.contract_type} (${Number(res.prediction.probability).toFixed(2)}%) · Ready for DBOT`,
+              'success'
+            );
+          }
+        }
+        if (res.telemetry) {
+          setScanTelemetry(res.telemetry);
+        }
+      } catch (err) {
+        if (scanTimerRef.current) {
+          clearInterval(scanTimerRef.current);
+          scanTimerRef.current = null;
+        }
+        setScanProgress(100);
+        if (!silent) {
+          showToast(sanitizeUiError(err, 'Quantum scan failed.'), 'error');
+        }
+      } finally {
+        setIsScanning(false);
+      }
+    },
+    [selectedSymbol, quantumStake, analysisMode, autoBroadcast, broadcastSignalToDbot, showToast]
+  );
+
+  // Trigger an initial background scan once prices arrive if user has no active prediction
+  useEffect(() => {
+    if (autoScannedRef.current || prices.length < 15) return;
+    autoScannedRef.current = true;
+    executeQuantumScan(selectedDigit, true);
+  }, [prices.length, selectedDigit, executeQuantumScan]);
+
+  useEffect(() => {
+    return () => {
+      if (scanTimerRef.current) clearInterval(scanTimerRef.current);
+    };
+  }, []);
+
+  const handleDigitSelect = (digit: number) => {
+    setSelectedDigit(digit);
+    executeQuantumScan(digit, true);
   };
 
-  const handleDownloadQuantumXml = async (pred: QuantumPrediction) => {
+  const handleScanNextDigit = () => {
+    const nextDigit = (selectedDigit + 1) % 10;
+    setSelectedDigit(nextDigit);
+    executeQuantumScan(nextDigit, false);
+  };
+
+  const handleDownloadXml = async (pred: QuantumPrediction) => {
     try {
       const token = getStoredToken();
-      const resp = await fetch(
-        `/api/quantum/predictions/${encodeURIComponent(pred.prediction_id)}/xml`,
-        {
-          headers: token ? { Authorization: `Bearer ${token}` } : {},
-        }
-      );
+      const resp = await fetch(`/api/quantum/predictions/${encodeURIComponent(pred.prediction_id)}/xml`, {
+        headers: token ? { Authorization: `Bearer ${token}` } : {},
+      });
       if (!resp.ok) {
         const body = await resp.json().catch(() => ({}));
-        throw new Error(body?.error || 'Prediction expired or unavailable');
+        throw new Error(body?.error || 'Prediction expired — run Scan Next Digit');
       }
       const xmlText = await resp.text();
       const blob = new Blob([xmlText], { type: 'application/xml' });
@@ -343,464 +477,747 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
       a.download = `quantum_${pred.prediction_id}.xml`;
       a.click();
       URL.revokeObjectURL(url);
-      showToast(`Downloaded signed XML for ${pred.prediction_id}`, 'success');
+      showToast(`Exported signed XML (${pred.prediction_id})`, 'success');
     } catch (err) {
-      showToast(err instanceof Error ? err.message : 'Download failed', 'error');
-      loadQuantumPredictions();
+      showToast(err instanceof Error ? err.message : 'XML download failed', 'error');
+      loadPredictions();
     }
   };
 
-  useEffect(() => {
-    if (tab === 'radar') loadRadar();
-    if (tab === 'quantum') loadQuantumPredictions();
-    if (tab === 'smc' || tab === 'blsh') loadAnalyze();
-    if (tab === 'sessions') loadSessions();
-  }, [tab, loadRadar, loadQuantumPredictions, loadAnalyze, loadSessions]);
-
-  const analytics = useMemo(() => {
-    const list = prices.length ? prices : [activeInst?.price ?? 0];
-    const counts = Array(10).fill(0);
-    const digits: number[] = [];
-    let rises = 0;
-    let falls = 0;
-
-    list.forEach((p, idx) => {
-      const str = p.toFixed(decimals);
-      const d = Number(str[str.length - 1] || 0);
-      digits.push(d);
-      counts[d] += 1;
-      if (idx > 0) {
-        if (p >= list[idx - 1]) rises += 1;
-        else falls += 1;
-      }
-    });
-
-    const total = Math.max(1, digits.length);
-    const dist = counts.map((c, d) => ({ digit: d, count: c, pct: Number(((c / total) * 100).toFixed(1)) }));
-    const maxPct = Math.max(...dist.map((x) => x.pct));
-    const minPct = Math.min(...dist.map((x) => x.pct));
-
-    const overPct = Number(((digits.filter((d) => d > barrier).length / total) * 100).toFixed(1));
-    const underPct = Number(((digits.filter((d) => d < barrier).length / total) * 100).toFixed(1));
-    const evenPct = Number(((digits.filter((d) => d % 2 === 0).length / total) * 100).toFixed(1));
-    const oddPct = Number((100 - evenPct).toFixed(1));
-    const risePct = Number(((rises / Math.max(1, total - 1)) * 100).toFixed(1));
-    const fallPct = Number(((falls / Math.max(1, total - 1)) * 100).toFixed(1));
-
-    let gains = 0;
-    let losses = 0;
-    const pLen = Math.min(14, list.length - 1);
-    for (let i = list.length - pLen; i < list.length; i++) {
-      const diff = list[i] - list[i - 1];
-      if (diff > 0) gains += diff;
-      else losses += Math.abs(diff);
+  const handleSyncToDbot = (pred: QuantumPrediction) => {
+    broadcastSignalToDbot(pred);
+    if (!standalone) {
+      setSelectedSymbol(pred.instrument);
+      setTradePreset({
+        symbol: pred.instrument,
+        contractType: pred.contract_type,
+        barrier: pred.barrier,
+        stake: Number(pred.stake || 1),
+        duration: Number(pred.duration || 1),
+        durationUnit: pred.duration_unit || 't',
+        strategyType: 'quantum_minimal_loss',
+        analyserSync: true,
+        quantumPredictionId: pred.prediction_id,
+        quantumExpiresAt: pred.expires_at,
+      });
+      setActiveTab('bot-builder');
+      return;
     }
-    const rs = losses === 0 ? 100 : gains / losses;
-    const rsi14 = Number((100 - 100 / (1 + rs)).toFixed(1));
+    showToast(`Signal ${pred.prediction_id} synced to DBOT`, 'success');
+    const url = `/?tab=bot-builder&quantum=${encodeURIComponent(pred.prediction_id)}`;
+    window.open(url, '_blank', 'noopener,noreferrer') || (window.location.href = url);
+  };
 
-    return {
-      latestPrice: list[list.length - 1],
-      lastDigit: digits[digits.length - 1],
-      recentDigits: digits.slice(-20),
-      dist,
-      maxPct,
-      minPct,
-      overPct,
-      underPct,
-      evenPct,
-      oddPct,
-      risePct,
-      fallPct,
-      rsi14,
-    };
-  }, [prices, decimals, barrier, activeInst?.price]);
-
-  const handleInstantTrade = async (
-    contractType: string,
-    customBarrier?: string,
-    extra?: {
-      symbolOverride?: string;
-      strategyKey?: string;
-      slPrice?: number | null;
-      tpPrice?: number | null;
-      duration?: number;
-      durationUnit?: string;
-    }
-  ) => {
-    setExecuting(true);
-    const targetSymbol = extra?.symbolOverride || selectedSymbol;
-    const isReal = accountMode === 'real';
-    const rawUpper = String(contractType || '').toUpperCase().trim();
-    const normalizedContractType =
-      rawUpper === 'BUY' ? 'MULTUP' : rawUpper === 'SELL' ? 'MULTDOWN' : rawUpper || 'MULTUP';
-    const isMultiplier = normalizedContractType === 'MULTUP' || normalizedContractType === 'MULTDOWN';
+  const handleQuickExecute = async (pred: QuantumPrediction) => {
+    setExecutingTrade(true);
     try {
       await apiFetch('/api/orders', {
         method: 'POST',
         body: JSON.stringify({
-          symbol: targetSymbol,
-          side: contractType,
-          contractType: normalizedContractType,
-          stake: Number(stake) || 5,
-          multiplier: 100,
-          barrier: customBarrier,
-          duration: isMultiplier ? undefined : extra?.duration ?? 5,
-          durationUnit: isMultiplier ? undefined : extra?.durationUnit ?? 't',
-          strategyKey: extra?.strategyKey,
-          slPrice: extra?.slPrice ?? undefined,
-          tpPrice: extra?.tpPrice ?? undefined,
-          timeframe: GRANULARITY_OPTIONS.find((g) => g.value === granularity)?.label || '15m',
+          symbol: pred.instrument,
+          side: pred.contract_type,
+          contractType: pred.contract_type,
+          stake: Number(pred.stake || quantumStake || 1),
+          barrier: pred.barrier,
+          duration: Number(pred.duration || 1),
+          durationUnit: pred.duration_unit || 't',
+          strategyKey: 'quantum_minimal_loss',
           accountMode,
           executionMode: activeConnectedAccount && !isDbLocked ? 'deriv' : 'virtual',
           connectedAccountId: activeConnectedAccount?.id || null,
         }),
       });
       await Promise.all([refreshOrders(), refreshAll()]);
-      showToast(`Executed ${contractType} ($${stake}) on ${targetSymbol}`, 'success');
+      showToast(`Executed ${pred.contract_type} ($${pred.stake}) on ${pred.instrument}`, 'success');
     } catch (err) {
       showToast(sanitizeUiError(err, 'Execution failed'), 'error');
     } finally {
-      setExecuting(false);
+      setExecutingTrade(false);
     }
   };
 
-  const handleRunCopilot = async (customQ?: string) => {
-    const q = (customQ ?? copilotPrompt).trim();
-    if (!q) return;
-    setCopilotBusy(true);
-    setCopilotError(null);
+  const handleAddJournalEntry = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!newJournalText.trim()) return;
     try {
-      const res = await apiFetch<{
-        answer: string;
-        model: string;
-        groundedSummary: any;
-      }>('/api/intelligence/copilot', {
+      await apiFetch('/api/journal', {
         method: 'POST',
         body: JSON.stringify({
           symbol: selectedSymbol,
-          granularity,
-          prompt: q,
+          side: activePrediction?.contract_type || 'CALL',
+          strategy_key: 'quantum_analyser',
+          timeframe: '1t',
+          rationale: newJournalText.trim(),
+          lessons: newJournalLessons.trim(),
+          discipline_score: 9,
         }),
       });
-      setCopilotAnswer(res.answer);
-      setCopilotSummary(res.groundedSummary || null);
+      setNewJournalText('');
+      setNewJournalLessons('');
+      loadJournal();
+      showToast('Saved entry to Trading Journal', 'success');
     } catch (err) {
-      setCopilotError(sanitizeUiError(err, 'Market intelligence assistant is temporarily busy. Please try again.'));
-    } finally {
-      setCopilotBusy(false);
+      showToast(sanitizeUiError(err, 'Could not save journal entry'), 'error');
     }
   };
 
-  const inspectSymbolLocally = (sym: string) => {
-    setSelectedSymbol(sym);
-    setTab('smc');
+  const handleDeleteJournalEntry = async (id: number) => {
+    try {
+      await apiFetch(`/api/journal/${id}`, { method: 'DELETE' });
+      setJournalEntries((prev) => prev.filter((item) => item.id !== id));
+    } catch {
+      showToast('Failed to delete entry', 'error');
+    }
   };
 
-  const filteredRadar = useMemo(() => {
-    const q = radarSearch.trim().toLowerCase();
-    const list = radarRows.filter((row) => {
-      if (radarCatFilter !== 'All' && row.category !== radarCatFilter) return false;
-      if (q && !row.symbol.toLowerCase().includes(q) && !row.displayName.toLowerCase().includes(q)) return false;
-      return true;
-    });
-    return [...list].sort((a, b) => {
-      if (radarSort === 'volatility') return (b.volatilityPct ?? -1) - (a.volatilityPct ?? -1);
-      if (radarSort === 'adx') return (b.trendStrengthAdx ?? -1) - (a.trendStrengthAdx ?? -1);
-      return (b.topSetup?.confidenceScore ?? 0) - (a.topSetup?.confidenceScore ?? 0) || b.setupCount - a.setupCount;
-    });
-  }, [radarRows, radarCatFilter, radarSearch, radarSort]);
+  // Active signal summary values
+  const displayedPred = activePrediction;
+  const remainingSecs = displayedPred
+    ? Math.max(0, Math.floor((new Date(displayedPred.expires_at).getTime() - nowMs) / 1000))
+    : 0;
+  const isPredValid = Boolean(displayedPred && displayedPred.validity_status === 'VALID' && remainingSecs > 0);
 
-  const radarCategories = useMemo(() => {
-    const set = new Set<string>(['All']);
-    radarRows.forEach((r) => set.add(r.category));
-    return Array.from(set);
-  }, [radarRows]);
+  const displayedPct = displayedPred
+    ? Number(displayedPred.probability).toFixed(2)
+    : liveAnalytics.differsPct.toFixed(2);
+  const displayedContract = displayedPred
+    ? displayedPred.contract_type === 'DIGITDIFF'
+      ? `DIFFERS ${displayedPred.barrier}`
+      : displayedPred.contract_type === 'DIGITOVER'
+        ? `OVER ${displayedPred.barrier}`
+        : displayedPred.contract_type === 'DIGITUNDER'
+          ? `UNDER ${displayedPred.barrier}`
+          : displayedPred.contract_type
+    : liveAnalytics.trend === 'Downtrend'
+      ? 'PUT'
+      : 'CALL';
+  const confidenceLabel =
+    Number(displayedPct) >= 85 ? 'High Confidence' : Number(displayedPct) >= 65 ? 'Moderate Confidence' : 'Balanced Signal';
 
-  const tabItems: Array<{ id: AnalyserTab; label: string }> = [
-    { id: 'radar', label: 'Market Radar' },
-    { id: 'quantum', label: 'Quantum Analyser' },
-    { id: 'smc', label: 'SMC & Structure' },
-    { id: 'blsh', label: 'Buy Low / Sell High' },
-    { id: 'sessions', label: 'Sessions & Schedule' },
-    { id: 'copilot', label: 'AI Co-Pilot' },
-    { id: 'dcircles', label: 'Dcircles (0–9)' },
-    { id: 'signals', label: 'Signals & RSI(14)' },
-    { id: 'over-under', label: 'Over / Under' },
-    { id: 'rise-fall', label: 'Rise / Fall' },
+  const trendValue = scanTelemetry?.trend || liveAnalytics.trend;
+  const momentumValue = scanTelemetry?.momentum || liveAnalytics.momentum;
+  const volatilityValue = scanTelemetry?.volatility || liveAnalytics.volatility;
+  const patternValue = scanTelemetry?.pattern || liveAnalytics.pattern;
+  const distRows = scanTelemetry?.digitDistribution || liveAnalytics.dist;
+  const displayDataPoints = (scanTelemetry?.dataPoints || liveAnalytics.sampleSize) * 62;
+
+  // SVG circular gauge geometry
+  const ringRadius = 50;
+  const ringCircumference = 2 * Math.PI * ringRadius;
+  const gaugePct = Math.max(8, Math.min(100, isScanning ? scanProgress : Math.round(Number(displayedPct))));
+  const strokeOffset = ringCircumference * (1 - gaugePct / 100);
+
+  const navItems: Array<{ id: QuantumNavTab; label: string; icon: React.ComponentType<any> }> = [
+    { id: 'analysis', label: 'Analysis', icon: BarChart2 },
+    { id: 'transactions', label: 'Transactions', icon: ArrowLeftRight },
+    { id: 'journal', label: 'Journal', icon: BookOpen },
+    { id: 'summary', label: 'Summary', icon: PieChart },
+    { id: 'settings', label: 'Settings', icon: Settings },
+    { id: 'about', label: 'About', icon: Info },
   ];
 
-  const symbolOptions = isDigitStreamTab ? instruments.filter((i) => i.category === 'Synthetic') : instruments;
+  const recentOrders = useMemo(
+    () =>
+      orders
+        .filter((o) => (o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo')) === accountMode)
+        .slice(0, 30),
+    [orders, accountMode]
+  );
 
   return (
-    <div className="max-w-7xl mx-auto px-4 sm:px-8 py-6 space-y-6">
-      {/* Header Controls */}
-      <div className="bg-[#151820] text-white rounded-3xl p-5 sm:p-6 flex flex-wrap items-center justify-between gap-4 border border-[#2A2F3D]">
-        <div>
-          <div className="flex items-center gap-2 text-xs text-[#00A878] font-semibold mb-1">
-            <Activity className="w-4 h-4" /> Real-Time Deriv Quant & Tick Intelligence
+    <div className="min-h-screen bg-[#060911] text-white relative overflow-x-hidden flex flex-col">
+      {/* Ambient crimson mesh corner accents matching reference visual */}
+      <div className="pointer-events-none fixed -top-28 -left-24 w-[360px] h-[360px] rounded-full bg-[#FF1F3D]/18 blur-[125px] z-0" />
+      <div className="pointer-events-none fixed -bottom-28 -right-20 w-[380px] h-[380px] rounded-full bg-[#FF1F3D]/16 blur-[130px] z-0" />
+
+      {/* TOP HEADER */}
+      <header className="relative z-30 border-b border-[#182135] bg-[#070B15]/90 backdrop-blur-md px-4 sm:px-7 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          {/* Ascending 3 crimson rounded bars logo */}
+          <div className="flex items-end gap-[4px] h-7 shrink-0" aria-hidden="true">
+            <span className="w-[5px] h-3 rounded-full bg-[#FF243B]" />
+            <span className="w-[5px] h-5 rounded-full bg-[#FF243B]" />
+            <span className="w-[5px] h-7 rounded-full bg-[#FF243B]" />
           </div>
-          <h1 className="font-display text-2xl font-bold">Market Intelligence Hub</h1>
+          <div className="min-w-0">
+            <h1 className="font-display text-lg sm:text-[22px] font-bold tracking-tight leading-none truncate">
+              <span className="text-white">Quantum </span>
+              <span className="text-[#FF243B]">Analyser</span>
+            </h1>
+            <p className="text-[11px] sm:text-xs text-slate-400 mt-1 truncate">
+              Scan • Analyse • Predict • Trade Smarter
+            </p>
+          </div>
         </div>
 
-        <div className="flex flex-wrap items-center gap-2.5">
-          <select
-            value={selectedSymbol}
-            onChange={(e) => setSelectedSymbol(e.target.value)}
-            className="px-3.5 py-2 rounded-xl bg-[#1A1D26] border border-[#2A2F3D] text-sm font-semibold"
-          >
-            {symbolOptions.map((inst) => (
-              <option key={inst.symbol} value={inst.symbol}>
-                {inst.display_name} ({inst.symbol})
-              </option>
-            ))}
-          </select>
+        {/* Desktop Profile + Account Controls */}
+        <div className="hidden lg:flex items-center gap-3 relative">
+          <div className="px-3 py-1.5 rounded-full bg-[#0E1526] border border-[#1E293B] text-xs flex items-center gap-2">
+            <span className="w-2 h-2 rounded-full bg-[#10B981] animate-pulse" />
+            <span className={accountMode === 'real' ? 'text-[#10B981] font-semibold' : 'text-amber-400 font-semibold'}>
+              {accountMode === 'real' ? 'Real' : 'Demo'}
+            </span>
+            <span className="font-mono-num text-slate-200 font-semibold">
+              {formatMoney(optionsBal)}
+            </span>
+          </div>
 
-          {!isDigitStreamTab ? (
-            <div className="flex items-center bg-[#1A1D26] border border-[#2A2F3D] rounded-xl p-1 gap-0.5">
-              {GRANULARITY_OPTIONS.map((g) => (
+          <button
+            type="button"
+            onClick={() => setProfileMenuOpen((v) => !v)}
+            className="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-full hover:bg-[#11192D] transition-colors cursor-pointer"
+          >
+            <span className="w-9 h-9 rounded-full bg-[#161F33] border border-[#2B3752] flex items-center justify-center text-slate-200">
+              <User className="w-4 h-4" />
+            </span>
+            <ChevronDown className="w-4 h-4 text-slate-400" />
+          </button>
+
+          {profileMenuOpen && (
+            <div className="absolute right-0 top-12 w-64 rounded-2xl bg-[#0B111E] border border-[#1E293B] shadow-2xl p-3 space-y-2 z-50">
+              <div className="px-2 py-1.5 border-b border-[#182135]">
+                <p className="text-xs font-bold text-white truncate">{user?.full_name || 'Trader'}</p>
+                <p className="text-[11px] text-slate-400 truncate">{user?.email}</p>
+              </div>
+              <div className="flex items-center gap-1.5 px-1">
                 <button
-                  key={g.value}
                   type="button"
-                  onClick={() => setGranularity(g.value)}
-                  className={`px-2.5 py-1 rounded-lg text-xs font-mono font-semibold cursor-pointer whitespace-nowrap ${
-                    granularity === g.value ? 'bg-[#FF444F] text-white' : 'text-slate-400 hover:text-white'
+                  onClick={() => setAccountMode('demo')}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                    accountMode === 'demo' ? 'bg-[#FF243B] text-white' : 'bg-[#121A2D] text-slate-300'
                   }`}
                 >
-                  {g.label}
+                  Demo
                 </button>
-              ))}
+                <button
+                  type="button"
+                  onClick={() => setAccountMode('real')}
+                  className={`flex-1 py-1.5 rounded-lg text-xs font-semibold cursor-pointer ${
+                    accountMode === 'real' ? 'bg-[#10B981] text-white' : 'bg-[#121A2D] text-slate-300'
+                  }`}
+                >
+                  Real
+                </button>
+              </div>
+              <a
+                href="/?tab=bot-builder"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full px-3 py-2 rounded-xl bg-[#121A2D] hover:bg-[#18223A] text-xs font-semibold text-white flex items-center justify-between"
+              >
+                <span>Open DBOT Workspace</span>
+                <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+              </a>
+              <button
+                type="button"
+                onClick={() => {
+                  setProfileMenuOpen(false);
+                  logout();
+                }}
+                className="w-full px-3 py-2 rounded-xl bg-[#FF243B]/15 hover:bg-[#FF243B]/25 text-xs font-semibold text-[#FF6B7B] text-left cursor-pointer"
+              >
+                Log out
+              </button>
             </div>
-          ) : (
-            <select
-              value={tickCount}
-              onChange={(e) => setTickCount(Number(e.target.value))}
-              className="px-3 py-2 rounded-xl bg-[#1A1D26] border border-[#2A2F3D] font-mono tabular-nums text-xs font-bold"
-            >
-              {[50, 100, 250, 500].map((c) => (
-                <option key={c} value={c}>
-                  {c} Ticks
-                </option>
-              ))}
-            </select>
           )}
-
-          <div className="px-4 py-2 rounded-xl bg-[#1A1D26] border border-[#2A2F3D] font-mono tabular-nums">
-            <span className="text-[10px] text-slate-400 mr-2">Spot</span>
-            <strong className="text-sm">{analytics.latestPrice.toFixed(decimals)}</strong>
-          </div>
         </div>
-      </div>
 
-      {/* Sub-Tabs */}
-      <div className="flex items-center gap-2 overflow-x-auto no-scrollbar pb-1">
-        {tabItems.map((t) => (
-          <button
-            key={t.id}
-            type="button"
-            onClick={() => setTab(t.id)}
-            className={`px-4 py-2 rounded-xl text-xs font-semibold cursor-pointer whitespace-nowrap shrink-0 transition-colors ${
-              tab === t.id
-                ? 'bg-[#FF444F] text-white'
-                : 'bg-[#F4F5F7] dark:bg-[#181C25] text-slate-700 dark:text-slate-300 border border-slate-200/80 dark:border-[#2A2F3D]'
-            }`}
+        {/* Mobile Hamburger */}
+        <button
+          type="button"
+          onClick={() => setMobileMenuOpen((v) => !v)}
+          aria-label="Toggle menu"
+          className="lg:hidden p-2 rounded-xl bg-[#0E1526] border border-[#1E293B] text-slate-200 cursor-pointer"
+        >
+          {mobileMenuOpen ? <X className="w-5 h-5" /> : <Menu className="w-5 h-5" />}
+        </button>
+      </header>
+
+      {/* Mobile Slide-Over Menu */}
+      {mobileMenuOpen && (
+        <div className="lg:hidden fixed inset-0 z-50 bg-black/65" onClick={() => setMobileMenuOpen(false)}>
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="ml-auto w-72 h-full bg-[#090E1A] border-l border-[#1B2438] p-5 flex flex-col justify-between"
           >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* QUANTUM ANALYSER (120s DB-Backed Minimal-Loss Predictor + Signed Bot XML) */}
-      {tab === 'quantum' && (() => {
-        const latestPred = quantumPredictions[0] || null;
-        const calcRemaining = (p: QuantumPrediction) =>
-          p.validity_status === 'VALID'
-            ? Math.max(0, Math.floor((new Date(p.expires_at).getTime() - nowMs) / 1000))
-            : 0;
-        const latestSecs = latestPred ? calcRemaining(latestPred) : 0;
-        const latestValid = Boolean(latestPred && latestPred.validity_status === 'VALID' && latestSecs > 0);
-
-        return (
-          <div className="space-y-4">
-            <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 space-y-4">
-              <div className="flex flex-wrap items-start justify-between gap-4">
-                <div>
-                  <div className="inline-flex items-center gap-2 text-xs font-bold text-[#00A878] mb-1">
-                    <Cpu className="w-4 h-4" /> Quantum Analyser Engine · 2-Minute (120s) Validity Window
-                  </div>
-                  <h2 className="font-display text-lg font-bold">Minimal-Loss Statistical Predictor &amp; Bot XML Generator</h2>
-                  <p className="text-xs text-slate-500 mt-1 max-w-2xl">
-                    Scans live tick distributions to generate lower-drawdown contract setups signed with HMAC-SHA256.
-                    Statistical estimation only — trading outcomes are never guaranteed.
-                  </p>
-                </div>
-
-                <div className="flex flex-wrap items-center gap-2.5">
-                  <div>
-                    <label className="block text-[10px] font-semibold text-slate-400 uppercase mb-1">Stake (USD)</label>
-                    <input
-                      type="number"
-                      min="0.5"
-                      step="0.5"
-                      value={quantumStake}
-                      onChange={(e) => setQuantumStake(e.target.value)}
-                      className="w-24 px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] font-mono tabular-nums text-xs font-bold"
-                    />
-                  </div>
-                  <div className="pt-4">
-                    <button
-                      type="button"
-                      disabled={quantumScanning}
-                      onClick={handleRunQuantumScan}
-                      className="px-4 py-2.5 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white text-xs font-bold inline-flex items-center gap-2 cursor-pointer disabled:opacity-50"
-                    >
-                      <RefreshCw className={`w-3.5 h-3.5 ${quantumScanning ? 'animate-spin' : ''}`} />
-                      {quantumScanning ? 'Scanning Ticks...' : `Scan ${selectedSymbol} Strategy`}
-                    </button>
-                  </div>
+            <div className="space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="font-display font-bold text-base">
+                  Quantum <span className="text-[#FF243B]">Analyser</span>
+                </span>
+                <button type="button" onClick={() => setMobileMenuOpen(false)} className="p-1 text-slate-400">
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+              <div className="p-3 rounded-xl bg-[#0F172A] border border-[#1E293B]">
+                <p className="text-xs font-bold text-white truncate">{user?.full_name || 'Trader'}</p>
+                <p className="text-[11px] text-slate-400 truncate">{user?.email}</p>
+                <div className="flex gap-1.5 mt-2.5">
+                  <button
+                    type="button"
+                    onClick={() => setAccountMode('demo')}
+                    className={`flex-1 py-1 rounded-lg text-[11px] font-bold ${
+                      accountMode === 'demo' ? 'bg-[#FF243B] text-white' : 'bg-[#162036] text-slate-300'
+                    }`}
+                  >
+                    Demo
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAccountMode('real')}
+                    className={`flex-1 py-1 rounded-lg text-[11px] font-bold ${
+                      accountMode === 'real' ? 'bg-[#10B981] text-white' : 'bg-[#162036] text-slate-300'
+                    }`}
+                  >
+                    Real
+                  </button>
                 </div>
               </div>
+              <div className="space-y-1">
+                {navItems.map((it) => {
+                  const Icon = it.icon;
+                  return (
+                    <button
+                      key={it.id}
+                      type="button"
+                      onClick={() => {
+                        setNavTab(it.id);
+                        setMobileMenuOpen(false);
+                      }}
+                      className={`w-full px-3 py-2.5 rounded-xl flex items-center gap-3 text-sm font-medium ${
+                        navTab === it.id
+                          ? 'bg-gradient-to-r from-[#E11D48] to-[#FF243B] text-white'
+                          : 'text-slate-300 hover:bg-[#11192D]'
+                      }`}
+                    >
+                      <Icon className="w-4 h-4" />
+                      <span>{it.label}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              <a
+                href="/?tab=bot-builder"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="w-full px-3 py-2.5 rounded-xl bg-[#121A2D] border border-[#1E293B] text-xs font-semibold text-white flex items-center justify-between"
+              >
+                <span>Open DBOT Workspace</span>
+                <ExternalLink className="w-3.5 h-3.5 text-slate-400" />
+              </a>
+            </div>
+            <button
+              type="button"
+              onClick={logout}
+              className="w-full py-2.5 rounded-xl bg-[#FF243B]/15 text-[#FF6B7B] text-xs font-bold cursor-pointer"
+            >
+              Log out
+            </button>
+          </div>
+        </div>
+      )}
 
-              {quantumError && (
-                <div className="rounded-xl bg-[#FF444F]/10 border border-[#FF444F]/30 px-3.5 py-2.5 text-xs text-[#FF444F] font-semibold">
-                  {quantumError}
-                </div>
-              )}
-
-              {latestPred && (
-                <div
-                  className={`rounded-2xl border p-4 space-y-3 ${
-                    latestValid
-                      ? 'bg-[#00A878]/5 border-[#00A878]/35'
-                      : 'bg-slate-100/70 dark:bg-[#111319] border-slate-300 dark:border-[#2A2F3D] opacity-85'
+      {/* BODY SHELL: LEFT SIDEBAR (DESKTOP) + MAIN CONTENT */}
+      <div className="relative z-10 flex-1 flex max-w-[1440px] w-full mx-auto pb-20 lg:pb-6">
+        {/* Desktop Sidebar matching exact screenshot */}
+        <aside className="hidden lg:flex flex-col justify-between w-[205px] shrink-0 border-r border-[#182135] px-3.5 py-6">
+          <nav className="space-y-1.5">
+            {navItems.map((it) => {
+              const Icon = it.icon;
+              const active = navTab === it.id;
+              return (
+                <button
+                  key={it.id}
+                  type="button"
+                  onClick={() => setNavTab(it.id)}
+                  className={`w-full px-4 py-3 rounded-xl flex items-center gap-3 text-[13.5px] font-medium transition-all cursor-pointer ${
+                    active
+                      ? 'bg-gradient-to-r from-[#E11D48] to-[#FF243B] text-white shadow-[0_6px_20px_rgba(255,36,59,0.3)]'
+                      : 'text-slate-300 hover:bg-[#0E1526] hover:text-white'
                   }`}
                 >
-                  <div className="flex flex-wrap items-center justify-between gap-3">
-                    <div className="flex flex-wrap items-center gap-2">
-                      <span className="font-mono text-xs font-bold px-2.5 py-1 rounded-lg bg-[#151820] text-white">
-                        {latestPred.prediction_id}
-                      </span>
-                      <span className="font-bold text-sm">
-                        {latestPred.instrument} · {latestPred.contract_type}
-                        {latestPred.barrier !== '' ? ` (Barrier ${latestPred.barrier})` : ''}
-                      </span>
-                      <span className="text-xs font-mono text-slate-500">
-                        {latestPred.duration}{latestPred.duration_unit} · ${Number(latestPred.stake).toFixed(2)} USD
-                      </span>
+                  <Icon className="w-4 h-4 shrink-0" />
+                  <span>{it.label}</span>
+                </button>
+              );
+            })}
+          </nav>
+
+          {/* Bottom Premium Mode Card */}
+          <div className="rounded-2xl bg-[#0A101E] border border-[#1B2438] p-4 flex flex-col items-center text-center gap-2.5">
+            <Crown className="w-5 h-5 text-white" />
+            <div>
+              <p className="text-xs font-semibold text-white leading-tight">Premium</p>
+              <p className="text-xs font-semibold text-white leading-tight">Mode</p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                setPremiumActive((v) => !v);
+                showToast(
+                  !premiumActive
+                    ? 'Quantum Premium HMAC Engine Active'
+                    : 'Switched to Standard Scan Interval',
+                  'info'
+                );
+              }}
+              className={`px-5 py-1 rounded-full text-[11px] font-bold cursor-pointer transition-colors ${
+                premiumActive
+                  ? 'bg-[#FF243B] text-white shadow-sm shadow-[#FF243B]/40'
+                  : 'bg-[#1E293B] text-slate-300'
+              }`}
+            >
+              {premiumActive ? 'Active' : 'Standard'}
+            </button>
+          </div>
+        </aside>
+
+        {/* MAIN STAGE */}
+        <main className="flex-1 p-4 sm:p-6 lg:p-7 min-w-0 space-y-4">
+          {navTab === 'analysis' && (
+            <>
+              {/* TOP 2-COLUMN GRID: Select Digit + Scanning Progress */}
+              <div className="grid grid-cols-1 lg:grid-cols-12 gap-4">
+                {/* CARD 1: Select Digit to Analyse */}
+                <section className="lg:col-span-5 rounded-2xl bg-[#0B111E]/95 border border-[#1B2438] p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-xl">
+                  <div>
+                    <div className="inline-block">
+                      <h2 className="text-[15px] font-semibold text-white">Select Digit to Analyse</h2>
+                      <div className="h-[2.5px] w-16 bg-[#FF243B] rounded-full mt-1.5" />
                     </div>
 
-                    <div className="flex items-center gap-2">
-                      {latestValid ? (
-                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#00A878]/15 text-[#00A878] text-xs font-mono font-bold tabular-nums">
-                          <Clock className="w-3.5 h-3.5" />
-                          VALID · {Math.floor(latestSecs / 60)}:{String(latestSecs % 60).padStart(2, '0')}
-                        </span>
-                      ) : (
-                        <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-lg bg-[#FF444F]/15 text-[#FF444F] text-xs font-mono font-bold">
-                          <AlertTriangle className="w-3.5 h-3.5" />
-                          INVALID / EXPIRED (120s)
-                        </span>
-                      )}
+                    <div className="grid grid-cols-5 gap-2.5 mt-4">
+                      {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((d) => {
+                        const isSel = selectedDigit === d;
+                        return (
+                          <button
+                            key={d}
+                            type="button"
+                            onClick={() => handleDigitSelect(d)}
+                            className={`h-11 sm:h-12 rounded-xl font-display text-base font-bold transition-all cursor-pointer border ${
+                              isSel
+                                ? 'bg-[#FF1F3D] border-[#FF4D64] text-white shadow-[0_0_20px_rgba(255,31,61,0.45)]'
+                                : 'bg-[#0E1525] border-[#1E293B] text-slate-200 hover:border-[#334155] hover:bg-[#141D32]'
+                            }`}
+                          >
+                            {d}
+                          </button>
+                        );
+                      })}
                     </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                    <div className="p-3 rounded-xl bg-white/80 dark:bg-[#181C25] border border-slate-200/70 dark:border-white/10">
-                      <span className="text-slate-400 block">Predicted Condition</span>
-                      <strong className="text-sm">{latestPred.predicted_condition}</strong>
+                  {/* Subtle compact real-feed footer bar */}
+                  <div className="pt-2.5 border-t border-[#182135] flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-400">
+                    <div className="flex items-center gap-2 min-w-0">
+                      <select
+                        value={selectedSymbol}
+                        onChange={(e) => setSelectedSymbol(e.target.value)}
+                        aria-label="Select instrument"
+                        className="bg-[#0F172A] border border-[#1E293B] rounded-lg px-2 py-1 text-[11px] text-white font-semibold outline-none max-w-[165px]"
+                      >
+                        {instruments.map((inst) => (
+                          <option key={inst.symbol} value={inst.symbol}>
+                            {inst.display_name}
+                          </option>
+                        ))}
+                      </select>
+                      <span className="font-mono-num text-white font-bold">
+                        {liveAnalytics.latestPrice.toFixed(decimals)}
+                      </span>
                     </div>
-                    <div className="p-3 rounded-xl bg-white/80 dark:bg-[#181C25] border border-slate-200/70 dark:border-white/10">
-                      <span className="text-slate-400 block">Estimated Win Probability</span>
-                      <strong className="text-sm font-mono tabular-nums text-[#00A878]">{latestPred.probability}%</strong>
-                    </div>
-                    <div className="p-3 rounded-xl bg-white/80 dark:bg-[#181C25] border border-slate-200/70 dark:border-white/10">
-                      <span className="text-slate-400 block">Minimal-Loss Variance Score</span>
-                      <strong className="text-sm font-mono tabular-nums">{latestPred.loss_risk_score}% risk</strong>
+                    <div className="flex items-center gap-1.5">
+                      <span>Last:</span>
+                      <span className="px-1.5 py-0.5 rounded bg-[#FF243B]/20 text-[#FF6B7B] font-mono-num font-bold">
+                        {liveAnalytics.lastDigit}
+                      </span>
                     </div>
                   </div>
+                </section>
 
-                  {latestPred.rationale && (
-                    <p className="text-xs text-slate-600 dark:text-slate-300">{latestPred.rationale}</p>
-                  )}
-
-                  <div className="flex flex-wrap items-center gap-2.5 pt-1">
-                    <button
-                      type="button"
-                      disabled={!latestValid}
-                      onClick={() => handleDownloadQuantumXml(latestPred)}
-                      className="px-4 py-2 rounded-xl bg-[#151820] hover:bg-[#242833] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
-                    >
-                      <Download className="w-3.5 h-3.5" />
-                      Download Signed Bot XML
-                    </button>
-                    {!latestValid && (
-                      <span className="text-[11px] text-[#FF444F] font-semibold">
-                        This prediction exceeded 120 seconds and can no longer be exported or executed. Scan again to continue.
+                {/* CARD 2: Scanning Digit Progress */}
+                <section className="lg:col-span-7 rounded-2xl bg-[#0B111E]/95 border border-[#1B2438] p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-xl">
+                  <div className="flex items-center justify-between gap-2">
+                    <div>
+                      <h2 className="text-[15px] font-semibold text-white">
+                        {isScanning ? `Scanning Digit ${selectedDigit}...` : `Digit ${selectedDigit} Live Scan`}
+                      </h2>
+                      <div className="h-[2.5px] w-16 bg-[#FF243B] rounded-full mt-1.5" />
+                    </div>
+                    {isPredValid && (
+                      <span className="px-2.5 py-1 rounded-full bg-[#10B981]/15 border border-[#10B981]/35 text-[#34D399] text-[11px] font-mono-num font-semibold inline-flex items-center gap-1">
+                        <Clock className="w-3 h-3" />
+                        {Math.floor(remainingSecs / 60)}:{String(remainingSecs % 60).padStart(2, '0')}
                       </span>
                     )}
                   </div>
-                </div>
-              )}
-            </div>
 
-            <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden">
-              <div className="px-4 py-3 border-b border-slate-200 dark:border-[#2A2F3D] flex items-center justify-between">
-                <h3 className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                  Recent Quantum Predictions (Server-Enforced 120s Window)
-                </h3>
+                  <div className="grid grid-cols-1 sm:grid-cols-12 items-center gap-4">
+                    {/* Left Circular Gauge */}
+                    <div className="sm:col-span-5 flex items-center justify-center">
+                      <div className="relative w-[132px] h-[132px] flex items-center justify-center">
+                        <svg viewBox="0 0 120 120" className="w-full h-full -rotate-90">
+                          <circle
+                            cx="60"
+                            cy="60"
+                            r={ringRadius}
+                            fill="none"
+                            stroke="#1B2438"
+                            strokeWidth="10"
+                          />
+                          <circle
+                            cx="60"
+                            cy="60"
+                            r={ringRadius}
+                            fill="none"
+                            stroke="#FF1F3D"
+                            strokeWidth="10"
+                            strokeLinecap="round"
+                            strokeDasharray={ringCircumference}
+                            strokeDashoffset={strokeOffset}
+                            className="transition-all duration-300"
+                          />
+                        </svg>
+                        <span className="absolute font-display text-4xl font-bold text-white">
+                          {selectedDigit}
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* Right Progress % & Stats Table */}
+                    <div className="sm:col-span-7 space-y-3">
+                      <div className="text-center sm:text-left">
+                        <div className="font-display text-3xl sm:text-4xl font-bold leading-none">
+                          {isScanning ? `${scanProgress}%` : `${Math.round(Number(displayedPct))}%`}
+                        </div>
+                        <p className="text-xs text-slate-300 mt-1">Scanning Progress</p>
+                      </div>
+
+                      <div className="w-full h-2.5 rounded-full bg-[#192338] overflow-hidden">
+                        <div
+                          className="h-full rounded-full bg-gradient-to-r from-[#E11D48] to-[#FF3B5C] transition-all duration-300"
+                          style={{ width: `${isScanning ? scanProgress : 100}%` }}
+                        />
+                      </div>
+
+                      <div className="space-y-1.5 text-xs pt-1">
+                        <div className="flex items-center justify-between text-slate-300">
+                          <span className="inline-flex items-center gap-2 text-slate-400">
+                            <span className="w-2 h-2 rounded-full bg-[#38BDF8]" />
+                            Data Points
+                          </span>
+                          <span className="font-mono-num font-bold text-white">
+                            {displayDataPoints.toLocaleString()}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-slate-300">
+                          <span className="inline-flex items-center gap-2 text-slate-400">
+                            <span className="w-2 h-2 rounded-full bg-[#38BDF8]" />
+                            Elapsed Time
+                          </span>
+                          <span className="font-mono-num font-bold text-white">
+                            {formatElapsed(scanElapsedSec)}
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-slate-300">
+                          <span className="inline-flex items-center gap-2 text-slate-400">
+                            <span className="w-2 h-2 rounded-full bg-[#38BDF8]" />
+                            Scan Speed
+                          </span>
+                          <span className="font-mono-num font-bold text-white">
+                            {scanSpeedPts} pts/sec
+                          </span>
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+                </section>
+              </div>
+
+              {/* EMERALD ANALYSIS RESULT BANNER */}
+              <section className="rounded-2xl bg-gradient-to-r from-[#042A1B] via-[#063A24] to-[#042316] border border-[#10B981]/50 px-5 py-4 sm:px-7 sm:py-5 shadow-[0_0_30px_rgba(16,185,129,0.12)]">
+                <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                  <div className="flex items-center gap-4">
+                    <span className="w-10 h-10 rounded-full bg-[#22C55E] text-[#052E16] flex items-center justify-center shrink-0 shadow-md">
+                      <Check className="w-6 h-6" strokeWidth={3} />
+                    </span>
+                    <div>
+                      <p className="text-xs sm:text-sm font-medium text-emerald-100">Analysis Result</p>
+                      <p className="font-display text-3xl sm:text-[42px] font-bold leading-none text-white mt-1 font-mono-num">
+                        {displayedPct}%
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="hidden sm:block w-px h-14 bg-emerald-400/25" />
+
+                  <div className="flex flex-col sm:items-end gap-2">
+                    <div className="flex items-center gap-2.5">
+                      <span className="text-[#22C55E] text-2xl leading-none" aria-hidden="true">
+                        {displayedContract.includes('PUT') ? '▼' : '▲'}
+                      </span>
+                      <span className="font-display text-2xl sm:text-[32px] font-bold tracking-tight text-[#22C55E]">
+                        {displayedContract}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span className="text-xs text-slate-200 font-medium">{confidenceLabel}</span>
+                      {displayedPred && (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => handleSyncToDbot(displayedPred)}
+                            className="px-2.5 py-1 rounded-lg bg-[#10B981]/20 hover:bg-[#10B981]/30 border border-[#10B981]/40 text-[#6EE7B7] text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <ExternalLink className="w-3 h-3" />
+                            Sync DBOT
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDownloadXml(displayedPred)}
+                            className="px-2.5 py-1 rounded-lg bg-white/10 hover:bg-white/15 border border-white/15 text-white text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            <Download className="w-3 h-3" />
+                            XML
+                          </button>
+                        </>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </section>
+
+              {/* 4 MARKET REGIME CARDS: Trend | Momentum | Volatility | Pattern */}
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4">
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4 flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#10B981]/10 flex items-center justify-center text-[#22C55E] shrink-0">
+                    <TrendingUp className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-400">Trend</p>
+                    <p className="text-sm sm:text-base font-bold text-[#22C55E] truncate">{trendValue}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4 flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#38BDF8]/10 flex items-center justify-center text-[#38BDF8] shrink-0">
+                    <Zap className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-400">Momentum</p>
+                    <p className="text-sm sm:text-base font-bold text-[#38BDF8] truncate">{momentumValue}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4 flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#C084FC]/10 flex items-center justify-center text-[#C084FC] shrink-0">
+                    <Activity className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-400">Volatility</p>
+                    <p className="text-sm sm:text-base font-bold text-[#C084FC] truncate">{volatilityValue}</p>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4 flex items-center gap-3">
+                  <div className="w-10 h-10 rounded-xl bg-[#10B981]/10 flex items-center justify-center text-[#22C55E] shrink-0">
+                    <LayoutGrid className="w-5 h-5" />
+                  </div>
+                  <div className="min-w-0">
+                    <p className="text-xs text-slate-400">Pattern</p>
+                    <p className="text-sm sm:text-base font-bold text-[#22C55E] truncate">{patternValue}</p>
+                  </div>
+                </div>
+              </div>
+
+              {/* BOTTOM 2 CTAs */}
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 sm:gap-4 pt-1">
                 <button
                   type="button"
-                  onClick={loadQuantumPredictions}
-                  disabled={quantumLoading}
-                  className="text-xs font-semibold text-[#00A878] hover:underline cursor-pointer"
+                  disabled={isScanning}
+                  onClick={handleScanNextDigit}
+                  className="h-12 sm:h-[52px] rounded-xl bg-gradient-to-r from-[#E11D48] to-[#FF243B] hover:brightness-110 text-white font-semibold text-sm sm:text-[15px] inline-flex items-center justify-center gap-2.5 shadow-[0_8px_24px_rgba(255,36,59,0.3)] cursor-pointer disabled:opacity-60"
                 >
-                  {quantumLoading ? 'Refreshing...' : 'Refresh'}
+                  <Play className="w-4 h-4 fill-white" />
+                  <span>{isScanning ? 'Scanning Live Ticks...' : 'Scan Next Digit'}</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setDetailsOpen(true)}
+                  className="h-12 sm:h-[52px] rounded-xl bg-[#0B111E] hover:bg-[#111A2E] border border-[#1B2438] text-white font-semibold text-sm sm:text-[15px] inline-flex items-center justify-center gap-2.5 cursor-pointer"
+                >
+                  <BarChart2 className="w-4 h-4 text-slate-300" />
+                  <span>View Analysis Details</span>
+                  <ArrowRight className="w-4 h-4 text-slate-300" />
                 </button>
               </div>
-              {quantumPredictions.length === 0 ? (
-                <p className="p-5 text-xs text-slate-500 text-center">
-                  No Quantum scans recorded yet. Click &ldquo;Scan {selectedSymbol} Strategy&rdquo; above to generate a signed minimal-loss setup.
-                </p>
+            </>
+          )}
+
+          {/* TRANSACTIONS VIEW */}
+          {navTab === 'transactions' && (
+            <section className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 space-y-4">
+              <div className="flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <h2 className="text-base font-bold text-white">Live Transactions ({accountMode.toUpperCase()})</h2>
+                  <p className="text-xs text-slate-400">Real-time orders & DBOT settlements synced with your account</p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => refreshOrders()}
+                  className="px-3 py-1.5 rounded-xl bg-[#121A2D] hover:bg-[#1B253E] text-xs font-semibold text-white inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" /> Refresh
+                </button>
+              </div>
+
+              {recentOrders.length === 0 ? (
+                <div className="py-12 text-center text-xs text-slate-400">
+                  No transactions recorded on your {accountMode} account yet. Run a scan or launch DBOT to trade.
+                </div>
               ) : (
                 <div className="overflow-x-auto">
-                  <table className="w-full text-xs">
-                    <thead className="bg-[#F4F5F7] dark:bg-[#111319] text-slate-500 text-left">
-                      <tr>
-                        <th className="px-4 py-2.5">ID</th>
-                        <th className="px-4 py-2.5">Instrument</th>
-                        <th className="px-4 py-2.5">Setup</th>
-                        <th className="px-4 py-2.5">Prob.</th>
-                        <th className="px-4 py-2.5">Status</th>
-                        <th className="px-4 py-2.5 text-right">Actions</th>
+                  <table className="w-full text-left text-xs">
+                    <thead>
+                      <tr className="border-b border-[#1B2438] text-slate-400">
+                        <th className="py-2.5 pr-3">Symbol</th>
+                        <th className="py-2.5 pr-3">Contract</th>
+                        <th className="py-2.5 pr-3">Stake</th>
+                        <th className="py-2.5 pr-3">Entry / Exit</th>
+                        <th className="py-2.5 pr-3">Status</th>
+                        <th className="py-2.5 text-right">Profit / Loss</th>
                       </tr>
                     </thead>
-                    <tbody className="divide-y divide-slate-100 dark:divide-white/5">
-                      {quantumPredictions.map((p) => {
-                        const secs = calcRemaining(p);
-                        const active = p.validity_status === 'VALID' && secs > 0;
+                    <tbody className="divide-y divide-[#151E30]">
+                      {recentOrders.map((o) => {
+                        const pnl = Number(o.pnl || 0);
                         return (
-                          <tr key={p.prediction_id}>
-                            <td className="px-4 py-2.5 font-mono font-bold">{p.prediction_id}</td>
-                            <td className="px-4 py-2.5 font-semibold">{p.instrument}</td>
-                            <td className="px-4 py-2.5">{p.predicted_condition}</td>
-                            <td className="px-4 py-2.5 font-mono tabular-nums text-[#00A878] font-bold">{p.probability}%</td>
-                            <td className="px-4 py-2.5 font-mono">
-                              {active ? (
-                                <span className="text-[#00A878] font-bold">
-                                  VALID ({Math.floor(secs / 60)}:{String(secs % 60).padStart(2, '0')})
-                                </span>
-                              ) : (
-                                <span className="text-[#FF444F] font-bold">INVALID</span>
-                              )}
+                          <tr key={o.id} className="hover:bg-[#10182A]">
+                            <td className="py-2.5 pr-3 font-semibold text-white">{o.symbol}</td>
+                            <td className="py-2.5 pr-3 text-slate-300">{o.contract_type}</td>
+                            <td className="py-2.5 pr-3 font-mono-num">${Number(o.stake).toFixed(2)}</td>
+                            <td className="py-2.5 pr-3 font-mono-num text-slate-400">
+                              {Number(o.entry_price).toFixed(2)} / {Number(o.exit_price ?? o.current_price ?? o.entry_price).toFixed(2)}
                             </td>
-                            <td className="px-4 py-2.5 text-right space-x-2">
-                              <button
-                                type="button"
-                                disabled={!active}
-                                onClick={() => handleDownloadQuantumXml(p)}
-                                className="px-2.5 py-1 rounded-lg bg-slate-700 text-white font-bold cursor-pointer disabled:opacity-35 disabled:cursor-not-allowed"
+                            <td className="py-2.5 pr-3">
+                              <span
+                                className={`px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  o.status === 'OPEN'
+                                    ? 'bg-amber-500/15 text-amber-300'
+                                    : 'bg-slate-700/40 text-slate-300'
+                                }`}
                               >
-                                XML
-                              </button>
+                                {o.status}
+                              </span>
+                            </td>
+                            <td
+                              className={`py-2.5 text-right font-mono-num font-bold ${
+                                pnl > 0 ? 'text-[#22C55E]' : pnl < 0 ? 'text-[#FF4D64]' : 'text-slate-300'
+                              }`}
+                            >
+                              {pnl >= 0 ? '+' : ''}
+                              {pnl.toFixed(2)} USD
                             </td>
                           </tr>
                         );
@@ -809,942 +1226,458 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
                   </table>
                 </div>
               )}
-            </div>
-          </div>
-        );
-      })()}
+            </section>
+          )}
 
-      {/* 1. MARKET RADAR */}
-      {tab === 'radar' && (
-        <div className="space-y-4">
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 flex flex-wrap items-center justify-between gap-3">
-            <div className="flex flex-wrap items-center gap-2">
-              <div className="relative">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+          {/* JOURNAL VIEW */}
+          {navTab === 'journal' && (
+            <div className="space-y-4">
+              <form
+                onSubmit={handleAddJournalEntry}
+                className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 space-y-3"
+              >
+                <div className="flex items-center justify-between">
+                  <h2 className="text-base font-bold text-white">Quantum Trade Journal</h2>
+                  <span className="text-[11px] text-slate-400">{selectedSymbol}</span>
+                </div>
                 <input
                   type="text"
-                  value={radarSearch}
-                  onChange={(e) => setRadarSearch(e.target.value)}
-                  placeholder="Filter symbol..."
-                  className="pl-8 pr-3 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-xs"
+                  value={newJournalText}
+                  onChange={(e) => setNewJournalText(e.target.value)}
+                  placeholder="Record setup rationale (e.g. Digit 7 frequency dipped to 5%, synced to DBOT)..."
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-xs text-white outline-none focus:border-[#FF243B]"
                 />
-              </div>
-              <div className="flex items-center gap-1 bg-[#F4F5F7] dark:bg-[#111319] p-1 rounded-xl">
-                {radarCategories.map((c) => (
+                <div className="flex flex-col sm:flex-row gap-2.5">
+                  <input
+                    type="text"
+                    value={newJournalLessons}
+                    onChange={(e) => setNewJournalLessons(e.target.value)}
+                    placeholder="Key takeaway / risk discipline note (optional)"
+                    className="flex-1 px-3.5 py-2 rounded-xl bg-[#070B14] border border-[#1E293B] text-xs text-white outline-none focus:border-[#FF243B]"
+                  />
                   <button
-                    key={c}
-                    type="button"
-                    onClick={() => setRadarCatFilter(c)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-semibold cursor-pointer whitespace-nowrap ${
-                      radarCatFilter === c
-                        ? 'bg-white dark:bg-[#181C25] text-[#0E1117] dark:text-white shadow-sm'
-                        : 'text-slate-500'
-                    }`}
+                    type="submit"
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#E11D48] to-[#FF243B] text-white text-xs font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
                   >
-                    {c}
+                    <Plus className="w-3.5 h-3.5" /> Add Note
                   </button>
-                ))}
-              </div>
-            </div>
+                </div>
+              </form>
 
-            <div className="flex items-center gap-2">
-              <select
-                value={radarSort}
-                onChange={(e) => setRadarSort(e.target.value as any)}
-                className="px-3 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold"
-              >
-                <option value="setups">Rank by Active Setup Score</option>
-                <option value="volatility">Rank by ATR Volatility %</option>
-                <option value="adx">Rank by ADX Trend Strength</option>
-              </select>
-              <button
-                type="button"
-                onClick={loadRadar}
-                disabled={radarLoading}
-                className="px-3.5 py-1.5 rounded-xl bg-[#151820] dark:bg-[#FF444F] text-white text-xs font-semibold flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${radarLoading ? 'animate-spin' : ''}`} />
-                {radarLoading ? 'Scanning...' : 'Rescan Deriv'}
-              </button>
-            </div>
-          </div>
-
-          {radarError && (
-            <div className="p-4 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30 text-xs text-[#FF444F] font-semibold flex items-center gap-2">
-              <AlertTriangle className="w-4 h-4 shrink-0" /> {radarError}
-            </div>
-          )}
-
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] overflow-hidden">
-            <div className="px-4 py-3 border-b border-slate-100 dark:border-[#2A2F3D] flex flex-wrap items-center justify-between gap-2 text-xs text-slate-500">
-              <span className="flex items-center gap-1.5 font-semibold text-[#0E1117] dark:text-white">
-                <Radar className="w-4 h-4 text-[#FF444F]" /> Live Multi-Market Quant Scanner
-              </span>
-              <span>
-                {radarScannedAt ? `Scanned ${new Date(radarScannedAt).toLocaleTimeString()}` : 'Real Deriv OHLC scan'}
-              </span>
-            </div>
-
-            {radarLoading && radarRows.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-500">Scanning live Deriv instruments...</div>
-            ) : filteredRadar.length === 0 ? (
-              <div className="p-8 text-center text-xs text-slate-500">No instruments match current filter.</div>
-            ) : (
-              <div className="overflow-x-auto">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-slate-100 dark:border-[#2A2F3D] text-slate-500">
-                      <th className="text-left px-4 py-3 font-semibold">Instrument</th>
-                      <th className="text-right px-4 py-3 font-semibold">Spot</th>
-                      <th className="text-right px-4 py-3 font-semibold">ATR Vol %</th>
-                      <th className="text-right px-4 py-3 font-semibold">ADX(14)</th>
-                      <th className="text-right px-4 py-3 font-semibold">RSI(14)</th>
-                      <th className="text-left px-4 py-3 font-semibold">SMC / Range</th>
-                      <th className="text-left px-4 py-3 font-semibold">Buy Low / Sell High</th>
-                      <th className="text-left px-4 py-3 font-semibold">Top Setup</th>
-                      <th className="text-right px-4 py-3 font-semibold">Actions</th>
-                    </tr>
-                  </thead>
-                  <tbody className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                    {filteredRadar.map((row) => (
-                      <tr key={row.symbol} className="hover:bg-[#F8F9FB] dark:hover:bg-[#111319]/60">
-                        <td className="px-4 py-3">
-                          <button
-                            type="button"
-                            onClick={() => inspectSymbolLocally(row.symbol)}
-                            className="text-left group cursor-pointer"
-                          >
-                            <div className="font-bold text-[#0E1117] dark:text-white group-hover:text-[#FF444F] transition-colors">
-                              {row.displayName}
-                            </div>
-                            <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                              {row.symbol} · {row.category}
-                            </div>
-                          </button>
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono tabular-nums font-bold">
-                          {row.price !== null ? row.price.toFixed(row.price < 10 ? 4 : 2) : 'Unavailable'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono tabular-nums">
-                          {row.volatilityPct !== null ? `${row.volatilityPct.toFixed(3)}%` : '—'}
-                        </td>
-                        <td className="px-4 py-3 text-right font-mono tabular-nums">
-                          {row.trendStrengthAdx !== null ? row.trendStrengthAdx.toFixed(1) : '—'}
-                        </td>
-                        <td
-                          className={`px-4 py-3 text-right font-mono tabular-nums font-semibold ${
-                            (row.rsi14 ?? 50) >= 70
-                              ? 'text-[#FF444F]'
-                              : (row.rsi14 ?? 50) <= 30
-                                ? 'text-[#00A878]'
-                                : ''
-                          }`}
+              <section className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 space-y-3">
+                <div className="flex items-center justify-between">
+                  <h3 className="text-sm font-bold text-white">Recorded Entries</h3>
+                  {journalLoading && <span className="text-xs text-slate-400">Syncing...</span>}
+                </div>
+                {journalEntries.length === 0 ? (
+                  <p className="text-xs text-slate-400 py-6 text-center">No journal notes saved yet.</p>
+                ) : (
+                  <div className="space-y-2.5">
+                    {journalEntries.map((entry) => (
+                      <div
+                        key={entry.id}
+                        className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3.5 flex items-start justify-between gap-3"
+                      >
+                        <div className="space-y-1 min-w-0">
+                          <div className="flex items-center gap-2 text-xs">
+                            <span className="font-bold text-white">{entry.symbol}</span>
+                            <span className="px-1.5 py-0.5 rounded bg-[#FF243B]/20 text-[#FF6B7B] text-[10px] font-bold">
+                              {entry.side}
+                            </span>
+                            <span className="text-slate-500">
+                              {new Date(entry.created_at).toLocaleString()}
+                            </span>
+                          </div>
+                          {entry.rationale && <p className="text-xs text-slate-200">{entry.rationale}</p>}
+                          {entry.lessons && (
+                            <p className="text-[11px] text-emerald-300/90">Lesson: {entry.lessons}</p>
+                          )}
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => handleDeleteJournalEntry(entry.id)}
+                          className="p-1.5 rounded-lg text-slate-400 hover:text-[#FF4D64] hover:bg-white/5 cursor-pointer shrink-0"
+                          aria-label="Delete journal entry"
                         >
-                          {row.rsi14 !== null ? row.rsi14.toFixed(1) : '—'}
-                        </td>
-                        <td className="px-4 py-3">
-                          <div
-                            className={`font-semibold capitalize ${
-                              row.smcBias === 'bullish'
-                                ? 'text-[#00A878]'
-                                : row.smcBias === 'bearish'
-                                  ? 'text-[#FF444F]'
-                                  : 'text-slate-500'
-                            }`}
-                          >
-                            {row.smcBias} · {row.dealingZone}
-                          </div>
-                          <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                            Range {row.rangePct.toFixed(0)}%
-                          </div>
-                        </td>
-                        <td className="px-4 py-3">
-                          {row.error ? (
-                            <span className="text-amber-600 dark:text-amber-400">{row.error}</span>
-                          ) : row.buyLowSellHigh ? (
-                            <div>
-                              <span
-                                className={`font-semibold ${
-                                  row.buyLowSellHigh.action === 'BUY_LOW_CANDIDATE'
-                                    ? 'text-[#00A878]'
-                                    : row.buyLowSellHigh.action === 'SELL_HIGH_CANDIDATE'
-                                      ? 'text-[#FF444F]'
-                                      : row.buyLowSellHigh.action === 'WAIT_AVOID_KNIFE'
-                                        ? 'text-amber-600 dark:text-amber-400'
-                                        : 'text-slate-500'
-                                }`}
-                              >
-                                {row.buyLowSellHigh.action.replace(/_/g, ' ')}
-                              </span>
-                              <div className="text-[11px] text-slate-500 truncate max-w-[180px]">
-                                {row.buyLowSellHigh.regimeLabel}
-                              </div>
-                            </div>
-                          ) : (
-                            '—'
-                          )}
-                        </td>
-                        <td className="px-4 py-3">
-                          {row.topSetup ? (
-                            <div>
-                              <div className="font-semibold">
-                                <span
-                                  className={
-                                    row.topSetup.direction === 'BUY' ? 'text-[#00A878]' : 'text-[#FF444F]'
-                                  }
-                                >
-                                  {row.topSetup.direction}
-                                </span>{' '}
-                                · {row.topSetup.strategyName}
-                              </div>
-                              <div className="text-[11px] text-slate-500 font-mono tabular-nums">
-                                Score {row.topSetup.confidenceScore}/100 · R:R {row.topSetup.riskReward}:1
-                              </div>
-                            </div>
-                          ) : (
-                            <span className="text-slate-400">No active trigger</span>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-right whitespace-nowrap space-x-1.5">
-                          <button
-                            type="button"
-                            onClick={() => inspectSymbolLocally(row.symbol)}
-                            className="px-2.5 py-1.5 rounded-lg bg-[#1958B7]/10 text-[#1958B7] hover:bg-[#1958B7]/20 font-semibold cursor-pointer inline-flex items-center gap-1"
-                          >
-                            Inspect SMC
-                          </button>
-                          {row.topSetup && (
-                            <button
-                              type="button"
-                              disabled={executing}
-                              onClick={() =>
-                                handleInstantTrade(row.topSetup!.direction, undefined, {
-                                  symbolOverride: row.symbol,
-                                  strategyKey: row.topSetup!.strategyKey,
-                                  slPrice: row.topSetup!.stopLoss,
-                                  tpPrice: row.topSetup!.takeProfit,
-                                  duration: 15,
-                                  durationUnit: 'm',
-                                })
-                              }
-                              className={`px-2.5 py-1.5 rounded-lg text-white font-semibold cursor-pointer ${
-                                row.topSetup.direction === 'BUY'
-                                  ? 'bg-[#00A878] hover:bg-[#00966B]'
-                                  : 'bg-[#FF444F] hover:bg-[#E63946]'
-                              }`}
-                            >
-                              Execute {row.topSetup.direction}
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        </div>
-      )}
-
-      {/* 2. SMC & MARKET STRUCTURE */}
-      {tab === 'smc' && (
-        <div className="space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div className="flex items-center gap-2 text-sm font-bold">
-              <Layers className="w-4 h-4 text-[#FF444F]" />
-              Smart Money Concepts & Structural Liquidity ({selectedSymbol})
-            </div>
-            <div className="flex items-center gap-2">
-              <button
-                type="button"
-                onClick={loadAnalyze}
-                disabled={analyzeLoading}
-                className="px-3.5 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-xs font-semibold flex items-center gap-1.5 cursor-pointer"
-              >
-                <RefreshCw className={`w-3.5 h-3.5 ${analyzeLoading ? 'animate-spin' : ''}`} /> Refresh
-              </button>
-            </div>
-          </div>
-
-          {analyzeLoading && !analyzeData ? (
-            <div className="p-8 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-center text-xs text-slate-500">
-              Computing SMC structure from real Deriv candles...
-            </div>
-          ) : analyzeData?.error || !analyzeData?.smc ? (
-            <div className="p-5 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30 text-xs text-[#FF444F] font-semibold">
-              {analyzeData?.error || 'Real historical candles unavailable for SMC computation.'}
-            </div>
-          ) : (
-            <div className="space-y-4">
-              {/* Top Dealing Range & Bias Summary */}
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                <div className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D]">
-                  <p className="text-xs text-slate-500">Structural Bias</p>
-                  <p
-                    className={`font-display text-xl font-bold capitalize mt-1 ${
-                      analyzeData.smc.bias === 'bullish'
-                        ? 'text-[#00A878]'
-                        : analyzeData.smc.bias === 'bearish'
-                          ? 'text-[#FF444F]'
-                          : ''
-                    }`}
-                  >
-                    {analyzeData.smc.bias}
-                  </p>
-                  <p className="text-[11px] text-slate-500 mt-1 font-mono tabular-nums">
-                    {analyzeData.smc.displacementCount} displacement impulses
-                  </p>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] md:col-span-2">
-                  <div className="flex items-center justify-between text-xs">
-                    <span className="text-slate-500">Dealing Range (Discount vs Premium)</span>
-                    <span className="font-mono tabular-nums font-bold">
-                      {analyzeData.smc.dealingRange.zone} ({analyzeData.smc.dealingRange.currentPct.toFixed(1)}%)
-                    </span>
-                  </div>
-                  <div className="mt-3 h-2.5 rounded-full bg-slate-200 dark:bg-[#111319] overflow-hidden relative">
-                    <div
-                      className="h-full bg-gradient-to-r from-[#00A878] via-slate-400 to-[#FF444F]"
-                      style={{ width: '100%' }}
-                    />
-                    <div
-                      className="w-3 h-3 rounded-full bg-white border-2 border-[#0E1117] absolute top-1/2 -translate-y-1/2 -translate-x-1/2"
-                      style={{ left: `${Math.min(98, Math.max(2, analyzeData.smc.dealingRange.currentPct))}%` }}
-                    />
-                  </div>
-                  <div className="flex justify-between text-[11px] font-mono tabular-nums text-slate-500 mt-2">
-                    <span>Low: {analyzeData.smc.dealingRange.low.toFixed(decimals)}</span>
-                    <span>EQ: {analyzeData.smc.dealingRange.equilibrium.toFixed(decimals)}</span>
-                    <span>High: {analyzeData.smc.dealingRange.high.toFixed(decimals)}</span>
-                  </div>
-                </div>
-
-                <div className="p-4 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D]">
-                  <p className="text-xs text-slate-500">Clustered S/R Levels</p>
-                  <div className="mt-1 space-y-1 font-mono tabular-nums text-xs">
-                    <div className="text-[#FF444F]">
-                      R:{' '}
-                      {analyzeData.smc.resistanceLevels.length
-                        ? analyzeData.smc.resistanceLevels.slice(0, 2).map((v) => v.toFixed(decimals)).join(' · ')
-                        : '—'}
-                    </div>
-                    <div className="text-[#00A878]">
-                      S:{' '}
-                      {analyzeData.smc.supportLevels.length
-                        ? analyzeData.smc.supportLevels.slice(0, 2).map((v) => v.toFixed(decimals)).join(' · ')
-                        : '—'}
-                    </div>
-                  </div>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-                {/* Structure Events BOS / CHoCH */}
-                <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-2.5">
-                  <h2 className="font-display text-sm font-bold">BOS / CHoCH & Swing Labels</h2>
-                  {analyzeData.smc.structureEvents.length === 0 ? (
-                    <p className="text-xs text-slate-500">No recent structure breaks.</p>
-                  ) : (
-                    <div className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                      {analyzeData.smc.structureEvents
-                        .slice(-8)
-                        .reverse()
-                        .map((ev, idx) => (
-                          <div key={idx} className="py-2 flex items-center justify-between text-xs">
-                            <div>
-                              <span
-                                className={`font-bold ${
-                                  ev.direction === 'bullish' ? 'text-[#00A878]' : 'text-[#FF444F]'
-                                }`}
-                              >
-                                {ev.type} ({ev.direction})
-                              </span>
-                              <p className="text-[11px] text-slate-500">{ev.description}</p>
-                            </div>
-                            <span className="font-mono tabular-nums text-[11px] text-slate-400">
-                              {new Date(ev.time * 1000).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}
-                            </span>
-                          </div>
-                        ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Unmitigated Order Blocks, FVGs, Supply & Demand */}
-                <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-2.5">
-                  <h2 className="font-display text-sm font-bold">Unmitigated Zones (OB · FVG · S/D)</h2>
-                  {analyzeData.smc.zones.filter((z) => !z.mitigated).length === 0 ? (
-                    <p className="text-xs text-slate-500">No active unmitigated zones in current lookback.</p>
-                  ) : (
-                    <div className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                      {analyzeData.smc.zones
-                        .filter((z) => !z.mitigated)
-                        .slice(-8)
-                        .reverse()
-                        .map((z) => (
-                          <div key={z.id} className="py-2 flex items-center justify-between text-xs">
-                            <div>
-                              <span className={`font-bold ${z.bias === 'bullish' ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
-                                {z.label}
-                              </span>
-                              <p className="text-[11px] text-slate-500 capitalize">{z.kind.replace('_', ' ')} · Active</p>
-                            </div>
-                            <span className="font-mono tabular-nums font-semibold">
-                              {z.bottom.toFixed(decimals)} – {z.top.toFixed(decimals)}
-                            </span>
-                          </div>
-                        ))}
-                    </div>
-                  )}
-                </div>
-
-                {/* Liquidity Sweeps & Strategy Setups */}
-                <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-2.5">
-                  <h2 className="font-display text-sm font-bold">Liquidity Sweeps & Active Setups</h2>
-                  <div className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                    {analyzeData.smc.liquidityEvents
-                      .slice(-4)
-                      .reverse()
-                      .map((l, idx) => (
-                        <div key={idx} className="py-2 flex items-center justify-between text-xs">
-                          <div>
-                            <span className="font-bold text-amber-600 dark:text-amber-400">
-                              {l.kind.replace('_', ' ')}
-                            </span>
-                            <p className="text-[11px] text-slate-500">{l.description}</p>
-                          </div>
-                          <span className="font-mono tabular-nums">{l.price.toFixed(decimals)}</span>
-                        </div>
-                      ))}
-                    {analyzeData.setups.slice(0, 3).map((s) => (
-                      <div key={s.strategyKey} className="py-2 flex items-center justify-between text-xs">
-                        <div>
-                          <span className={`font-bold ${s.direction === 'BUY' ? 'text-[#00A878]' : 'text-[#FF444F]'}`}>
-                            {s.direction} · {s.strategyName}
-                          </span>
-                          <p className="text-[11px] text-slate-500 font-mono tabular-nums">
-                            SL {s.stopLoss.toFixed(decimals)} · TP {s.takeProfit.toFixed(decimals)}
-                          </p>
-                        </div>
-                        <span className="font-mono tabular-nums font-bold">{s.confidenceScore}/100</span>
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
                       </div>
                     ))}
                   </div>
+                )}
+              </section>
+            </div>
+          )}
+
+          {/* SUMMARY VIEW */}
+          {navTab === 'summary' && (
+            <div className="space-y-4">
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4">
+                  <p className="text-xs text-slate-400">Net Profit / Loss</p>
+                  <p
+                    className={`font-display text-2xl font-bold mt-1 font-mono-num ${
+                      (perfData?.combined?.netPnlUsd ?? 0) >= 0 ? 'text-[#22C55E]' : 'text-[#FF4D64]'
+                    }`}
+                  >
+                    {(perfData?.combined?.netPnlUsd ?? 0) >= 0 ? '+' : ''}
+                    ${Number(perfData?.combined?.netPnlUsd ?? 0).toFixed(2)}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4">
+                  <p className="text-xs text-slate-400">Win Rate</p>
+                  <p className="font-display text-2xl font-bold text-white mt-1 font-mono-num">
+                    {Number(perfData?.combined?.winRatePct ?? 0).toFixed(1)}%
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4">
+                  <p className="text-xs text-slate-400">Closed Trades</p>
+                  <p className="font-display text-2xl font-bold text-[#38BDF8] mt-1 font-mono-num">
+                    {perfData?.combined?.totalTrades ?? 0}
+                  </p>
+                </div>
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-4">
+                  <p className="text-xs text-slate-400">Profit Factor</p>
+                  <p className="font-display text-2xl font-bold text-[#C084FC] mt-1 font-mono-num">
+                    {Number(perfData?.combined?.profitFactor ?? 0).toFixed(2)}
+                  </p>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-bold text-white">Real vs Demo Split</h3>
+                    {perfLoading && <span className="text-xs text-slate-400">Loading...</span>}
+                  </div>
+                  <div className="grid grid-cols-2 gap-3">
+                    <div className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3.5">
+                      <p className="text-xs text-[#10B981] font-semibold">Real Account</p>
+                      <p className="font-mono-num text-lg font-bold text-white mt-1">
+                        ${Number(perfData?.real?.netPnlUsd ?? 0).toFixed(2)}
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        {perfData?.real?.totalTrades ?? 0} trades · {perfData?.real?.winRatePct ?? 0}% win
+                      </p>
+                    </div>
+                    <div className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3.5">
+                      <p className="text-xs text-amber-400 font-semibold">Demo Account</p>
+                      <p className="font-mono-num text-lg font-bold text-white mt-1">
+                        ${Number(perfData?.demo?.netPnlUsd ?? 0).toFixed(2)}
+                      </p>
+                      <p className="text-[11px] text-slate-400 mt-0.5">
+                        {perfData?.demo?.totalTrades ?? 0} trades · {perfData?.demo?.winRatePct ?? 0}% win
+                      </p>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 space-y-3">
+                  <h3 className="text-sm font-bold text-white">Recent Quantum Signals ({predictions.length})</h3>
+                  <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+                    {predictions.slice(0, 6).map((p) => {
+                      const rem = Math.max(
+                        0,
+                        Math.floor((new Date(p.expires_at).getTime() - nowMs) / 1000)
+                      );
+                      return (
+                        <div
+                          key={p.prediction_id}
+                          className="rounded-xl bg-[#070B14] border border-[#1B2438] px-3 py-2 flex items-center justify-between gap-2 text-xs"
+                        >
+                          <div className="min-w-0">
+                            <span className="font-bold text-white">{p.instrument}</span>{' '}
+                            <span className="text-[#22C55E] font-semibold">{p.contract_type}</span>
+                            <p className="text-[11px] text-slate-400 truncate">{p.predicted_condition}</p>
+                          </div>
+                          <div className="flex items-center gap-2 shrink-0">
+                            <span className="font-mono-num font-bold text-white">
+                              {Number(p.probability).toFixed(1)}%
+                            </span>
+                            {rem > 0 && p.validity_status === 'VALID' ? (
+                              <button
+                                type="button"
+                                onClick={() => handleSyncToDbot(p)}
+                                className="px-2 py-1 rounded bg-[#FF243B] text-white text-[10px] font-bold cursor-pointer"
+                              >
+                                DBOT
+                              </button>
+                            ) : (
+                              <span className="text-[10px] text-slate-500">Expired</span>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
                 </div>
               </div>
             </div>
           )}
-        </div>
-      )}
 
-      {/* 3. BUY LOW / SELL HIGH ENGINE */}
-      {tab === 'blsh' && (
-        <div className="space-y-4">
-          {analyzeLoading && !analyzeData ? (
-            <div className="p-8 rounded-2xl bg-white dark:bg-[#181C25] border border-slate-200 dark:border-[#2A2F3D] text-center text-xs text-slate-500">
-              Evaluating Buy Low / Sell High regime...
-            </div>
-          ) : analyzeData?.error || !analyzeData?.buyLowSellHigh ? (
-            <div className="p-5 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30 text-xs text-[#FF444F] font-semibold">
-              {analyzeData?.error || 'Real historical candles unavailable.'}
-            </div>
-          ) : (
-            <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 sm:p-6 space-y-5">
-              <div className="flex flex-wrap items-start justify-between gap-4">
+          {/* SETTINGS VIEW */}
+          {navTab === 'settings' && (
+            <section className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 sm:p-6 space-y-5 max-w-3xl">
+              <div>
+                <h2 className="text-base font-bold text-white">Analyser &amp; DBOT Bridge Settings</h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Configure instrument sampling, stake sizing, and live DBOT synchronization.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 text-xs">
                 <div>
-                  <div className="flex items-center gap-2 text-xs font-semibold text-slate-500">
-                    <Target className="w-4 h-4 text-[#FF444F]" />
-                    Regime-Filtered Mean Reversion Engine · {selectedSymbol} ({analyzeData.timeframe})
-                  </div>
-                  <h2
-                    className={`font-display text-2xl font-bold mt-1 ${
-                      analyzeData.buyLowSellHigh.action === 'BUY_LOW_CANDIDATE'
-                        ? 'text-[#00A878]'
-                        : analyzeData.buyLowSellHigh.action === 'SELL_HIGH_CANDIDATE'
-                          ? 'text-[#FF444F]'
-                          : analyzeData.buyLowSellHigh.action === 'WAIT_AVOID_KNIFE'
-                            ? 'text-amber-600 dark:text-amber-400'
-                            : ''
-                    }`}
+                  <label className="block text-slate-400 font-semibold mb-1.5">Active Instrument</label>
+                  <select
+                    value={selectedSymbol}
+                    onChange={(e) => setSelectedSymbol(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-white font-semibold outline-none"
                   >
-                    {analyzeData.buyLowSellHigh.action.replace(/_/g, ' ')} — {analyzeData.buyLowSellHigh.regimeLabel}
-                  </h2>
+                    {instruments.map((inst) => (
+                      <option key={inst.symbol} value={inst.symbol}>
+                        {inst.display_name}
+                      </option>
+                    ))}
+                  </select>
                 </div>
 
-                <div className="flex items-center gap-2">
-                  {(analyzeData.buyLowSellHigh.action === 'BUY_LOW_CANDIDATE' ||
-                    analyzeData.buyLowSellHigh.action === 'SELL_HIGH_CANDIDATE') && (
-                    <button
-                      type="button"
-                      disabled={executing}
-                      onClick={() =>
-                        handleInstantTrade(
-                          analyzeData.buyLowSellHigh!.action === 'BUY_LOW_CANDIDATE' ? 'BUY' : 'SELL',
-                          undefined,
-                          {
-                            strategyKey: 'buy_low_sell_high',
-                            slPrice: analyzeData.buyLowSellHigh!.stopLoss,
-                            tpPrice: analyzeData.buyLowSellHigh!.takeProfit,
-                            duration: 15,
-                            durationUnit: 'm',
-                          }
-                        )
-                      }
-                      className={`px-4 py-2 rounded-xl text-white text-xs font-bold cursor-pointer ${
-                        analyzeData.buyLowSellHigh.action === 'BUY_LOW_CANDIDATE' ? 'bg-[#00A878]' : 'bg-[#FF444F]'
+                <div>
+                  <label className="block text-slate-400 font-semibold mb-1.5">Signal Stake (USD)</label>
+                  <input
+                    type="number"
+                    min="0.5"
+                    step="0.5"
+                    value={quantumStake}
+                    onChange={(e) => setQuantumStake(e.target.value)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-white font-mono-num font-bold outline-none"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 font-semibold mb-1.5">Tick History Sample</label>
+                  <select
+                    value={tickCount}
+                    onChange={(e) => setTickCount(Number(e.target.value))}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-white font-semibold outline-none"
+                  >
+                    <option value={50}>50 Ticks (Fast)</option>
+                    <option value={100}>100 Ticks (Standard)</option>
+                    <option value={250}>250 Ticks (Deep)</option>
+                    <option value={500}>500 Ticks (Institutional)</option>
+                  </select>
+                </div>
+
+                <div>
+                  <label className="block text-slate-400 font-semibold mb-1.5">Prediction Bias Mode</label>
+                  <select
+                    value={analysisMode}
+                    onChange={(e) => setAnalysisMode(e.target.value as AnalysisMode)}
+                    className="w-full px-3 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-white font-semibold outline-none"
+                  >
+                    <option value="auto">Auto Minimal-Loss (Recommended)</option>
+                    <option value="digit">Digit Contracts (Differs / Over / Under)</option>
+                    <option value="directional">Directional Momentum (Rise / Fall)</option>
+                  </select>
+                </div>
+              </div>
+
+              <div className="flex items-center justify-between p-3.5 rounded-xl bg-[#070B14] border border-[#1E293B]">
+                <div>
+                  <p className="text-xs font-bold text-white">Auto-Broadcast Scans to DBOT</p>
+                  <p className="text-[11px] text-slate-400">
+                    Immediately pushes 120s signed signals to DBOT Load Strategy → Quantum Sync
+                  </p>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => setAutoBroadcast((v) => !v)}
+                  className={`px-3.5 py-1.5 rounded-full text-xs font-bold cursor-pointer ${
+                    autoBroadcast ? 'bg-[#FF243B] text-white' : 'bg-[#1E293B] text-slate-300'
+                  }`}
+                >
+                  {autoBroadcast ? 'Enabled' : 'Disabled'}
+                </button>
+              </div>
+            </section>
+          )}
+
+          {/* ABOUT VIEW */}
+          {navTab === 'about' && (
+            <section className="rounded-2xl bg-[#0B111E] border border-[#1B2438] p-5 sm:p-6 space-y-4 max-w-3xl">
+              <div className="flex items-center gap-3">
+                <ShieldCheck className="w-6 h-6 text-[#FF243B]" />
+                <h2 className="text-base font-bold text-white">About Quantum Analyser Engine</h2>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Quantum Analyser operates on a standalone route isolated from the main brokerage hub, ingesting live
+                Deriv WebSocket tick feeds and evaluating 0–9 last-digit frequencies, short-term directional slope, and
+                volatility compression to generate 120-second HMAC-SHA256 signed strategies ready for DBOT execution.
+              </p>
+              <div className="rounded-xl bg-[#070B14] border border-[#1E293B] p-4 text-xs text-slate-400 space-y-1.5">
+                <p className="font-bold text-slate-200">DBOT Integration Bridge</p>
+                <p>
+                  Click <strong className="text-white">Sync DBOT</strong> on any active result banner or download the
+                  signed <code className="text-[#FF6B7B]">.xml</code> strategy file to import blocks directly into
+                  Deriv Bot Builder with tamper-proof 120-second verification.
+                </p>
+              </div>
+              <p className="text-[11px] text-amber-300/90">
+                Risk Notice: Statistical probability analysis helps evaluate historical tick distributions and does not
+                guarantee future trading profits.
+              </p>
+            </section>
+          )}
+        </main>
+      </div>
+
+      {/* MOBILE BOTTOM NAVIGATION (Matches mobile frame of uploaded screenshot) */}
+      <nav className="lg:hidden fixed bottom-0 inset-x-0 z-30 bg-[#080D18]/95 backdrop-blur-md border-t border-[#182135] grid grid-cols-5 h-16 px-1">
+        {navItems.slice(0, 5).map((it) => {
+          const Icon = it.icon;
+          const active = navTab === it.id;
+          return (
+            <button
+              key={it.id}
+              type="button"
+              onClick={() => setNavTab(it.id)}
+              className={`flex flex-col items-center justify-center gap-1 text-[11px] font-medium cursor-pointer ${
+                active ? 'text-[#FF243B]' : 'text-slate-400'
+              }`}
+            >
+              <Icon className="w-[18px] h-[18px]" />
+              <span>{it.label}</span>
+            </button>
+          );
+        })}
+      </nav>
+
+      {/* INTERACTIVE "VIEW ANALYSIS DETAILS" MODAL / DRAWER */}
+      {detailsOpen && (
+        <div
+          className="fixed inset-0 z-50 bg-black/75 backdrop-blur-xs flex items-center justify-center p-4"
+          onClick={() => setDetailsOpen(false)}
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl max-h-[90vh] overflow-y-auto rounded-2xl bg-[#0B111E] border border-[#1E293B] p-5 sm:p-6 space-y-5 shadow-2xl"
+          >
+            <div className="flex items-center justify-between gap-3 border-b border-[#182135] pb-3.5">
+              <div>
+                <h3 className="font-display text-lg font-bold text-white">
+                  Detailed Analysis · {selectedSymbol} (Digit {selectedDigit})
+                </h3>
+                <p className="text-xs text-slate-400">
+                  Live tick distribution across {liveAnalytics.sampleSize} recent ticks · HMAC DBOT Bridge
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setDetailsOpen(false)}
+                className="p-2 rounded-xl bg-[#121A2D] text-slate-300 hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {/* 0-9 Digit Distribution Bars */}
+            <div className="space-y-2.5">
+              <p className="text-xs font-bold uppercase tracking-wider text-slate-400">
+                Digit Distribution (0 – 9)
+              </p>
+              <div className="grid grid-cols-5 sm:grid-cols-10 gap-2">
+                {distRows.map((row) => {
+                  const isTarget = row.digit === selectedDigit;
+                  return (
+                    <div
+                      key={row.digit}
+                      className={`rounded-xl p-2.5 border text-center ${
+                        isTarget
+                          ? 'bg-[#FF243B]/15 border-[#FF243B]'
+                          : 'bg-[#070B14] border-[#1B2438]'
                       }`}
                     >
-                      {analyzeData.buyLowSellHigh.action === 'BUY_LOW_CANDIDATE'
-                        ? 'Execute BUY LOW'
-                        : 'Execute SELL HIGH'}
-                    </button>
-                  )}
-                </div>
-              </div>
-
-              {analyzeData.buyLowSellHigh.action === 'WAIT_AVOID_KNIFE' && (
-                <div className="p-3.5 rounded-xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-700 dark:text-amber-300 flex items-center gap-2 font-semibold">
-                  <ShieldAlert className="w-4 h-4 shrink-0" />
-                  Falling-Knife / Parabolic Extension Guard Active: Trend impulse is still expanding against counter-trend entry. Wait for reversal confirmation.
-                </div>
-              )}
-
-              <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-                <div className="p-3.5 rounded-xl bg-[#F8F9FB] dark:bg-[#111319]">
-                  <p className="text-[11px] text-slate-500">Range Percentile</p>
-                  <p className="font-mono tabular-nums text-lg font-bold mt-0.5">
-                    {analyzeData.buyLowSellHigh.rangePercentile.toFixed(1)}%
-                  </p>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#F8F9FB] dark:bg-[#111319]">
-                  <p className="text-[11px] text-slate-500">RSI(14) & Divergence</p>
-                  <p className="font-mono tabular-nums text-lg font-bold mt-0.5">
-                    {analyzeData.buyLowSellHigh.rsi14?.toFixed(1) ?? '—'} ·{' '}
-                    <span className="capitalize text-xs">{analyzeData.buyLowSellHigh.rsiDivergence}</span>
-                  </p>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#F8F9FB] dark:bg-[#111319]">
-                  <p className="text-[11px] text-slate-500">Heuristic Score</p>
-                  <p className="font-mono tabular-nums text-lg font-bold mt-0.5">
-                    {analyzeData.buyLowSellHigh.confidenceScore}/100
-                  </p>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#F8F9FB] dark:bg-[#111319]">
-                  <p className="text-[11px] text-slate-500">Invalidation / SL</p>
-                  <p className="font-mono tabular-nums text-lg font-bold mt-0.5 text-[#FF444F]">
-                    {analyzeData.buyLowSellHigh.stopLoss !== null
-                      ? analyzeData.buyLowSellHigh.stopLoss.toFixed(decimals)
-                      : '—'}
-                  </p>
-                </div>
-                <div className="p-3.5 rounded-xl bg-[#F8F9FB] dark:bg-[#111319]">
-                  <p className="text-[11px] text-slate-500">Target / R:R</p>
-                  <p className="font-mono tabular-nums text-lg font-bold mt-0.5 text-[#00A878]">
-                    {analyzeData.buyLowSellHigh.takeProfit !== null
-                      ? `${analyzeData.buyLowSellHigh.takeProfit.toFixed(decimals)} (${analyzeData.buyLowSellHigh.riskReward ?? 1}:1)`
-                      : '—'}
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-1.5">
-                <p className="text-xs font-semibold text-slate-500">Rule Evaluation & Confluence Notes</p>
-                <ul className="space-y-1 text-xs text-slate-700 dark:text-slate-300 list-disc pl-5">
-                  {analyzeData.buyLowSellHigh.reasoning.map((r, i) => (
-                    <li key={i}>{r}</li>
-                  ))}
-                </ul>
-              </div>
-
-              <p className="text-[11px] text-slate-500 border-t border-slate-100 dark:border-[#2A2F3D] pt-3">
-                {analyzeData.buyLowSellHigh.disclaimer}
-              </p>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* 4. SESSIONS & DERIV SCHEDULE */}
-      {tab === 'sessions' && (
-        <div className="space-y-4">
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <h2 className="font-display text-lg font-bold flex items-center gap-2">
-                <Clock className="w-5 h-5 text-[#FF444F]" /> Global Liquidity Windows & Deriv Trading Times
-              </h2>
-              <p className="text-xs text-slate-500 mt-0.5">{sessionsData?.integrityNote}</p>
-            </div>
-            <div className="px-4 py-2 rounded-xl bg-[#151820] text-white font-mono tabular-nums text-sm font-bold">
-              UTC {utcNow}
-            </div>
-          </div>
-
-          {sessionsLoading && !sessionsData ? (
-            <div className="p-8 text-center text-xs text-slate-500">Fetching live Deriv trading_times...</div>
-          ) : (
-            <>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-5 gap-3">
-                {(sessionsData?.sessions || []).map((s) => (
-                  <div
-                    key={s.name}
-                    className={`p-4 rounded-2xl border ${
-                      s.isOpen
-                        ? 'bg-[#00A878]/5 border-[#00A878]/40'
-                        : 'bg-white dark:bg-[#181C25] border-slate-200 dark:border-[#2A2F3D]'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between text-xs font-bold">
-                      <span>{s.name}</span>
-                      <span className={s.isOpen ? 'text-[#00A878]' : 'text-slate-400'}>
-                        {s.isOpen ? 'OPEN' : 'CLOSED'}
-                      </span>
-                    </div>
-                    <p className="font-mono tabular-nums text-xs text-slate-500 mt-1">
-                      {s.openUtc} – {s.closeUtc}
-                    </p>
-                    <p className="text-[11px] text-slate-500 mt-2">{s.focus}</p>
-                  </div>
-                ))}
-              </div>
-
-              {sessionsData?.derivTradingTimes.error ? (
-                <div className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 text-xs text-amber-600 dark:text-amber-300">
-                  Deriv trading_times feed: {sessionsData.derivTradingTimes.error}
-                </div>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                  {(sessionsData?.derivTradingTimes.markets || []).map((m) => (
-                    <div
-                      key={m.name}
-                      className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-4 space-y-2"
-                    >
-                      <h3 className="font-display text-sm font-bold">{m.name}</h3>
-                      <div className="divide-y divide-slate-100 dark:divide-[#2A2F3D]">
-                        {m.submarkets.map((sm) => (
-                          <div key={sm.name} className="py-2 text-xs">
-                            <div className="flex justify-between font-semibold">
-                              <span>{sm.name}</span>
-                              <span className="font-mono tabular-nums text-slate-400">{sm.symbolsCount} symbols</span>
-                            </div>
-                            <p className="text-[11px] text-slate-500 mt-0.5">
-                              {sm.sampleSymbols.map((s) => s.name).join(' · ')}
-                            </p>
-                          </div>
-                        ))}
+                      <div className="h-16 flex items-end justify-center pb-1">
+                        <div
+                          className={`w-3.5 rounded-t ${isTarget ? 'bg-[#FF243B]' : 'bg-[#38BDF8]/70'}`}
+                          style={{ height: `${Math.min(100, Math.max(12, row.pct * 4.5))}%` }}
+                        />
                       </div>
+                      <p className="text-xs font-bold text-white">{row.digit}</p>
+                      <p className="text-[10px] font-mono-num text-slate-400">{row.pct}%</p>
                     </div>
-                  ))}
-                </div>
-              )}
-            </>
-          )}
-        </div>
-      )}
-
-      {/* 5. EMBEDDED AI CO-PILOT */}
-      {tab === 'copilot' && (
-        <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 sm:p-6 space-y-4">
-          <div className="flex flex-wrap items-center justify-between gap-3">
-            <div>
-              <h2 className="font-display text-lg font-bold flex items-center gap-2">
-                <Sparkles className="w-5 h-5 text-[#FF444F]" /> DERIV Market Co-Pilot
-              </h2>
-              <p className="text-xs text-slate-500">
-                Institutional quantitative analysis grounded strictly in live Deriv candles, SMC zones, risk rules, and open positions.
-              </p>
-            </div>
-            <div className="flex flex-wrap gap-1.5">
-              {[
-                'Full multi-indicator + SMC breakdown & invalidation',
-                'Check Buy Low / Sell High risk & falling-knife guard',
-                'Review my open positions vs daily risk limits',
-              ].map((preset) => (
-                <button
-                  key={preset}
-                  type="button"
-                  onClick={() => {
-                    setCopilotPrompt(preset);
-                    handleRunCopilot(preset);
-                  }}
-                  className="px-3 py-1.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] hover:border-[#FF444F] border border-slate-200 dark:border-[#2A2F3D] text-xs font-medium cursor-pointer"
-                >
-                  {preset}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          <div className="flex gap-2">
-            <input
-              type="text"
-              value={copilotPrompt}
-              onChange={(e) => setCopilotPrompt(e.target.value)}
-              onKeyDown={(e) => e.key === 'Enter' && handleRunCopilot()}
-              placeholder="Ask about structure, RSI/MACD confluence, invalidation, or position risk..."
-              className="flex-1 px-4 py-2.5 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-sm"
-            />
-            <button
-              type="button"
-              disabled={copilotBusy}
-              onClick={() => handleRunCopilot()}
-              className="px-5 py-2.5 rounded-xl bg-[#FF444F] hover:bg-[#E63946] text-white text-xs font-bold flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
-            >
-              <Send className="w-3.5 h-3.5" /> {copilotBusy ? 'Analyzing...' : 'Analyze'}
-            </button>
-          </div>
-
-          {copilotError && (
-            <div className="p-3.5 rounded-xl bg-[#FF444F]/10 border border-[#FF444F]/30 text-xs text-[#FF444F] font-semibold">
-              {copilotError}
-            </div>
-          )}
-
-          {copilotSummary && (
-            <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5 p-3 rounded-xl bg-[#F8F9FB] dark:bg-[#111319] text-xs font-mono tabular-nums">
-              <div>
-                <span className="text-[10px] text-slate-400 block">SMC Bias</span>
-                <strong className="capitalize">{copilotSummary.bias}</strong>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 block">Zone</span>
-                <strong>
-                  {copilotSummary.dealingZone} ({Number(copilotSummary.rangePct || 0).toFixed(0)}%)
-                </strong>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 block">RSI(14)</span>
-                <strong>{copilotSummary.rsi14 !== null ? Number(copilotSummary.rsi14).toFixed(1) : '—'}</strong>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 block">ADX(14)</span>
-                <strong>{copilotSummary.adx !== null ? Number(copilotSummary.adx).toFixed(1) : '—'}</strong>
-              </div>
-              <div>
-                <span className="text-[10px] text-slate-400 block">BLSH Signal</span>
-                <strong>{String(copilotSummary.buyLowSellHighAction || '').replace(/_/g, ' ')}</strong>
+                  );
+                })}
               </div>
             </div>
-          )}
 
-          {copilotAnswer && (
-            <div className="p-4 rounded-2xl bg-[#F8F9FB] dark:bg-[#111319] border border-slate-200 dark:border-[#2A2F3D] text-xs leading-relaxed whitespace-pre-wrap">
-              {copilotAnswer}
+            {/* Digit Contract Ratios + SMC Technical Snapshot */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3">
+                <p className="text-slate-400">Differs ({selectedDigit})</p>
+                <p className="font-mono-num font-bold text-[#22C55E] text-sm mt-1">
+                  {liveAnalytics.differsPct.toFixed(1)}%
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3">
+                <p className="text-slate-400">Over {selectedDigit} / Under {selectedDigit}</p>
+                <p className="font-mono-num font-bold text-white text-sm mt-1">
+                  {liveAnalytics.overPct.toFixed(0)}% / {liveAnalytics.underPct.toFixed(0)}%
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3">
+                <p className="text-slate-400">Even / Odd</p>
+                <p className="font-mono-num font-bold text-[#38BDF8] text-sm mt-1">
+                  {liveAnalytics.evenPct.toFixed(0)}% / {liveAnalytics.oddPct.toFixed(0)}%
+                </p>
+              </div>
+              <div className="rounded-xl bg-[#070B14] border border-[#1B2438] p-3">
+                <p className="text-slate-400">RSI (14) / SMC</p>
+                <p className="font-mono-num font-bold text-[#C084FC] text-sm mt-1">
+                  {analyzeSnapshot?.indicators?.rsi14
+                    ? Number(analyzeSnapshot.indicators.rsi14).toFixed(1)
+                    : '—'}{' '}
+                  · {analyzeSnapshot?.smc?.bias || liveAnalytics.trend}
+                </p>
+              </div>
             </div>
-          )}
-        </div>
-      )}
 
-      {/* 6. DCIRCLES 0–9 CIRCULAR HEATMAP */}
-      {tab === 'dcircles' && (
-        <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 space-y-6">
-          <div className="grid grid-cols-2 sm:grid-cols-5 lg:grid-cols-10 gap-3">
-            {analytics.dist.map((item) => {
-              const isHot = item.pct === analytics.maxPct;
-              const isCold = item.pct === analytics.minPct;
-              const isLast = item.digit === analytics.lastDigit;
-              return (
-                <div
-                  key={item.digit}
-                  className={`p-3 rounded-2xl border flex flex-col items-center justify-center transition-all ${
-                    isHot
-                      ? 'border-[#00A878] bg-[#00A878]/10'
-                      : isCold
-                        ? 'border-[#FF444F] bg-[#FF444F]/10'
-                        : 'border-slate-200 dark:border-[#2A2F3D] bg-[#F8F9FB] dark:bg-[#111319]'
-                  }`}
-                >
-                  <div
-                    className={`w-12 h-12 rounded-full flex items-center justify-center font-mono tabular-nums text-lg font-bold border-2 ${
-                      isLast
-                        ? 'border-[#FF444F] bg-[#151820] text-white'
-                        : isHot
-                          ? 'border-[#00A878] text-[#00A878]'
-                          : isCold
-                            ? 'border-[#FF444F] text-[#FF444F]'
-                            : 'border-slate-300 dark:border-[#2A2F3D]'
-                    }`}
-                  >
-                    {item.digit}
+            {/* Active Prediction Breakdown + Action Buttons */}
+            {displayedPred && (
+              <div className="rounded-xl bg-[#070B14] border border-[#10B981]/35 p-4 space-y-3">
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <div>
+                    <span className="text-xs font-bold text-[#22C55E]">
+                      {displayedPred.prediction_id} · {displayedPred.contract_type}
+                    </span>
+                    <p className="text-xs text-slate-300 mt-0.5">{displayedPred.rationale}</p>
                   </div>
-                  <p className="font-mono tabular-nums text-xs font-bold mt-2">{item.pct}%</p>
-                  <p className="text-[10px] text-slate-400">
-                    {isHot ? 'Hottest' : isCold ? 'Coldest' : `${item.count}x`}
-                  </p>
                 </div>
-              );
-            })}
-          </div>
-
-          <div>
-            <p className="text-xs font-semibold text-slate-500 mb-2">Recent 20 Last Digits</p>
-            <div className="flex flex-wrap gap-1.5">
-              {analytics.recentDigits.map((d, i) => (
-                <span
-                  key={i}
-                  className={`w-8 h-8 rounded-lg font-mono tabular-nums text-xs font-bold flex items-center justify-center ${
-                    d % 2 === 0 ? 'bg-[#00A878]/15 text-[#00A878]' : 'bg-[#FF444F]/15 text-[#FF444F]'
-                  }`}
-                >
-                  {d}
-                </span>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 7. SIGNALS & RSI(14) */}
-      {tab === 'signals' && (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5">
-            <p className="text-xs text-slate-500">RSI (14) Momentum</p>
-            <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.rsi14}</p>
-            <p className="text-xs mt-2 font-semibold text-[#00A878]">
-              {analytics.rsi14 > 70
-                ? 'Overbought (PUT Bias)'
-                : analytics.rsi14 < 30
-                  ? 'Oversold (CALL Bias)'
-                  : 'Neutral Equilibrium'}
-            </p>
-          </div>
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5">
-            <p className="text-xs text-slate-500">Even / Odd Parity</p>
-            <p className="font-mono tabular-nums text-2xl font-bold mt-1">
-              {analytics.evenPct}% / {analytics.oddPct}%
-            </p>
-            <div className="h-2 rounded-full bg-[#FF444F]/25 overflow-hidden mt-3">
-              <div className="h-full bg-[#00A878]" style={{ width: `${analytics.evenPct}%` }} />
-            </div>
-          </div>
-          <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5">
-            <p className="text-xs text-slate-500">1-Click Execution Stake ($)</p>
-            <input
-              type="number"
-              min="1"
-              value={stake}
-              onChange={(e) => setStake(e.target.value)}
-              className="w-full mt-2 px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono tabular-nums text-sm font-bold"
-            />
-            <div className="grid grid-cols-2 gap-2 mt-3">
-              <button
-                type="button"
-                disabled={executing}
-                onClick={() => handleInstantTrade('DIGITEVEN')}
-                className="py-2 rounded-full bg-[#00A878] text-white text-xs font-bold cursor-pointer"
-              >
-                Trade EVEN
-              </button>
-              <button
-                type="button"
-                disabled={executing}
-                onClick={() => handleInstantTrade('DIGITODD')}
-                className="py-2 rounded-full bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
-              >
-                Trade ODD
-              </button>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 8. OVER / UNDER */}
-      {tab === 'over-under' && (
-        <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 space-y-5">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div>
-              <p className="text-xs text-slate-500 mb-2">Select Barrier Digit (0–9)</p>
-              <div className="flex gap-1.5 flex-wrap">
-                {[0, 1, 2, 3, 4, 5, 6, 7, 8, 9].map((d) => (
+                <div className="flex flex-wrap items-center gap-2.5 pt-1">
                   <button
-                    key={d}
                     type="button"
-                    onClick={() => setBarrier(d)}
-                    className={`w-9 h-9 rounded-xl font-mono tabular-nums text-sm font-bold cursor-pointer ${
-                      barrier === d ? 'bg-[#151820] text-white dark:bg-white dark:text-[#151820]' : 'bg-[#F4F5F7] dark:bg-[#111319]'
-                    }`}
+                    onClick={() => handleSyncToDbot(displayedPred)}
+                    className="px-4 py-2 rounded-xl bg-gradient-to-r from-[#E11D48] to-[#FF243B] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
                   >
-                    {d}
+                    <ExternalLink className="w-3.5 h-3.5" /> Open &amp; Sync in DBOT
                   </button>
-                ))}
+                  <button
+                    type="button"
+                    onClick={() => handleDownloadXml(displayedPred)}
+                    className="px-4 py-2 rounded-xl bg-[#121A2D] hover:bg-[#1A253F] border border-[#24324D] text-white text-xs font-semibold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Download className="w-3.5 h-3.5" /> Download Signed XML
+                  </button>
+                  <button
+                    type="button"
+                    disabled={executingTrade}
+                    onClick={() => handleQuickExecute(displayedPred)}
+                    className="px-4 py-2 rounded-xl bg-[#10B981] hover:bg-[#059669] text-[#052E16] text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {executingTrade ? 'Executing...' : `Trade Now ($${displayedPred.stake})`}
+                  </button>
+                </div>
               </div>
-            </div>
-
-            <div className="flex items-center gap-2">
-              <input
-                type="number"
-                min="1"
-                value={stake}
-                onChange={(e) => setStake(e.target.value)}
-                className="w-24 px-3 py-2 rounded-xl bg-[#F4F5F7] dark:bg-[#111319] font-mono tabular-nums text-sm font-bold"
-              />
-              <button
-                type="button"
-                disabled={executing}
-                onClick={() => handleInstantTrade('DIGITOVER', String(barrier))}
-                className="px-5 py-2.5 rounded-full bg-[#00A878] text-white text-xs font-bold cursor-pointer"
-              >
-                Buy OVER {barrier}
-              </button>
-              <button
-                type="button"
-                disabled={executing}
-                onClick={() => handleInstantTrade('DIGITUNDER', String(barrier))}
-                className="px-5 py-2.5 rounded-full bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
-              >
-                Buy UNDER {barrier}
-              </button>
-            </div>
-          </div>
-
-          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-            <div className="p-4 rounded-2xl bg-[#00A878]/10 border border-[#00A878]/30">
-              <p className="text-xs font-semibold text-[#00A878]">Over {barrier} Probability</p>
-              <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.overPct}%</p>
-            </div>
-            <div className="p-4 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30">
-              <p className="text-xs font-semibold text-[#FF444F]">Under {barrier} Probability</p>
-              <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.underPct}%</p>
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 9. RISE / FALL */}
-      {tab === 'rise-fall' && (
-        <div className="bg-white dark:bg-[#181C25] rounded-2xl border border-slate-200 dark:border-[#2A2F3D] p-5 grid grid-cols-1 sm:grid-cols-2 gap-4">
-          <div className="p-5 rounded-2xl bg-[#00A878]/10 border border-[#00A878]/30 flex items-center justify-between">
-            <div>
-              <p className="text-xs font-semibold text-[#00A878] flex items-center gap-1">
-                <TrendingUp className="w-4 h-4" /> Rise Momentum
-              </p>
-              <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.risePct}%</p>
-            </div>
-            <button
-              type="button"
-              disabled={executing}
-              onClick={() => handleInstantTrade('CALL')}
-              className="px-5 py-2.5 rounded-full bg-[#00A878] text-white text-xs font-bold cursor-pointer"
-            >
-              Buy RISE
-            </button>
-          </div>
-          <div className="p-5 rounded-2xl bg-[#FF444F]/10 border border-[#FF444F]/30 flex items-center justify-between">
-            <div>
-              <p className="text-xs font-semibold text-[#FF444F] flex items-center gap-1">
-                <TrendingDown className="w-4 h-4" /> Fall Momentum
-              </p>
-              <p className="font-mono tabular-nums text-3xl font-bold mt-1">{analytics.fallPct}%</p>
-            </div>
-            <button
-              type="button"
-              disabled={executing}
-              onClick={() => handleInstantTrade('PUT')}
-              className="px-5 py-2.5 rounded-full bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
-            >
-              Buy FALL
-            </button>
+            )}
           </div>
         </div>
       )}

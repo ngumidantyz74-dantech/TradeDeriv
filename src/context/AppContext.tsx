@@ -78,6 +78,9 @@ interface AppContextValue {
   adminGateOpen: boolean;
   setAdminGateOpen: (v: boolean) => void;
   openAdminPortal: () => void;
+  amyOpen: boolean;
+  setAmyOpen: (v: boolean) => void;
+  openAskAmy: () => void;
   registerLogoTap: () => void;
   registerHomeTap: () => void;
   formatMoney: (usdAmount: number, opts?: { hideable?: boolean; currencyOverride?: string }) => string;
@@ -126,6 +129,7 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const [notifications, setNotifications] = useState<NotificationItem[]>([]);
   const [workspacePreferences, setWorkspacePreferences] = useState<WorkspacePreferences>({});
   const [adminGateOpen, setAdminGateOpen] = useState<boolean>(false);
+  const [amyOpen, setAmyOpen] = useState<boolean>(false);
   const [publicSettings, setPublicSettings] = useState<PublicSettings>({
     branding: {
       appName: 'DERIV',
@@ -216,6 +220,10 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
   const openAdminPortal = useCallback(() => {
     window.location.hash = '#/admin_console';
     setAdminGateOpen(true);
+  }, []);
+
+  const openAskAmy = useCallback(() => {
+    setAmyOpen(true);
   }, []);
 
   // 30-tap logo gesture within 2.5s rolling timeout to open Administrator Console
@@ -426,6 +434,45 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
       }
     }
   }, [loginWithToken, setActiveTab, showToast]);
+
+  // Consume deep link query params (?tab=bot-builder&quantum=QP-...) when opening DBOT from standalone Quantum Analyser
+  useEffect(() => {
+    if (!user || !token) return;
+    const params = new URLSearchParams(window.location.search || '');
+    const tabParam = params.get('tab') as NavTab | null;
+    const quantumId = params.get('quantum');
+    if (!tabParam && !quantumId) return;
+
+    if (tabParam) {
+      setActiveTab(tabParam);
+    }
+
+    if (quantumId) {
+      apiFetch<{ predictions: any[] }>('/api/quantum/predictions')
+        .then((res) => {
+          const match = (res.predictions || []).find((p) => p.prediction_id === quantumId);
+          if (match) {
+            setSelectedSymbol(match.instrument);
+            setTradePreset({
+              symbol: match.instrument,
+              contractType: match.contract_type,
+              barrier: match.barrier,
+              stake: Number(match.stake || 1),
+              duration: Number(match.duration || 1),
+              durationUnit: match.duration_unit || 't',
+              strategyType: 'quantum_minimal_loss',
+              analyserSync: true,
+              quantumPredictionId: match.prediction_id,
+              quantumExpiresAt: match.expires_at,
+            });
+            showToast(`Synced Quantum signal ${match.prediction_id} into DBOT`, 'success');
+          }
+        })
+        .catch(() => {});
+    }
+
+    window.history.replaceState({}, '', window.location.pathname || '/');
+  }, [user, token, setActiveTab, setSelectedSymbol, showToast]);
 
   // Listen for popup postMessage from /api/deriv/oauth/callback
   useEffect(() => {
@@ -945,6 +992,9 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
         adminGateOpen,
         setAdminGateOpen,
         openAdminPortal,
+        amyOpen,
+        setAmyOpen,
+        openAskAmy,
         registerLogoTap,
         registerHomeTap,
         formatMoney,

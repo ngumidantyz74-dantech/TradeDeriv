@@ -37,6 +37,7 @@ export const ProfileHub: React.FC = () => {
     user,
     unreadCount,
     setActiveTab,
+    openAskAmy,
     theme,
     toggleTheme,
     logout,
@@ -333,12 +334,12 @@ export const ProfileHub: React.FC = () => {
             {renderFlatRow({
               icon: HelpCircle,
               label: 'Help centre',
-              onClick: () => setActiveTab('learning-hub'),
+              onClick: openAskAmy,
             })}
             {renderFlatRow({
               icon: MessageSquare,
               label: 'Live chat',
-              onClick: () => setActiveTab('learning-hub'),
+              onClick: openAskAmy,
             })}
           </div>
         </section>

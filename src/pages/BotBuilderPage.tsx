@@ -230,9 +230,22 @@ export const BotBuilderPage: React.FC = () => {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [utcNow, setUtcNow] = useState<string>(() => formatGmtStamp());
 
-  // Load Strategy Modal (Screenshots 152508 & 152544)
+  // Load Strategy Modal (Screenshots 152508 & 152544) + Quantum Analyser Sync
   const [loadModalOpen, setLoadModalOpen] = useState<boolean>(false);
-  const [loadModalTab, setLoadModalTab] = useState<'local' | 'drive'>('local');
+  const [loadModalTab, setLoadModalTab] = useState<'local' | 'drive' | 'quantum'>('local');
+  const [quantumSignals, setQuantumSignals] = useState<Array<{
+    prediction_id: string;
+    instrument: string;
+    contract_type: string;
+    barrier?: string | number | null;
+    stake?: number;
+    duration?: number;
+    duration_unit?: string;
+    probability?: number;
+    predicted_condition?: string;
+    expires_at: string;
+  }>>([]);
+  const [loadingQuantumSignals, setLoadingQuantumSignals] = useState<boolean>(false);
   const [xmlImportError, setXmlImportError] = useState<string | null>(null);
   const [validatingXml, setValidatingXml] = useState<boolean>(false);
   const [quantumNowMs, setQuantumNowMs] = useState<number>(() => Date.now());
@@ -410,10 +423,121 @@ export const BotBuilderPage: React.FC = () => {
   }, [tradePreset, updateXmlState, setTradePreset]);
 
   useEffect(() => {
-    if (!xmlState.quantumPredictionId && !pendingXmlImport?.quantumPrediction) return;
+    if (!xmlState.quantumPredictionId && !pendingXmlImport?.quantumPrediction && !(loadModalOpen && loadModalTab === 'quantum')) return;
     const id = setInterval(() => setQuantumNowMs(Date.now()), 1000);
     return () => clearInterval(id);
-  }, [xmlState.quantumPredictionId, pendingXmlImport?.quantumPrediction]);
+  }, [xmlState.quantumPredictionId, pendingXmlImport?.quantumPrediction, loadModalOpen, loadModalTab]);
+
+  const fetchQuantumSignals = useCallback(async () => {
+    setLoadingQuantumSignals(true);
+    try {
+      const res = await apiFetch<{ predictions: typeof quantumSignals }>('/api/quantum/predictions');
+      const now = Date.now();
+      const serverList = (res.predictions || []).filter(
+        (p) => p.expires_at && new Date(p.expires_at).getTime() > now
+      );
+      setQuantumSignals(serverList);
+    } catch {
+      // ignore transient error
+    } finally {
+      setLoadingQuantumSignals(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (loadModalOpen && loadModalTab === 'quantum') {
+      fetchQuantumSignals();
+    }
+  }, [loadModalOpen, loadModalTab, fetchQuantumSignals]);
+
+  useEffect(() => {
+    const applyBridgeSignal = (payload: any) => {
+      if (!payload || payload.type !== 'QUANTUM_SIGNAL' || !payload.predictionId) return;
+      if (payload.expiresAt && new Date(payload.expiresAt).getTime() <= Date.now()) return;
+      setQuantumSignals((prev) => {
+        const nextItem = {
+          prediction_id: String(payload.predictionId),
+          instrument: String(payload.symbol || 'R_100'),
+          contract_type: String(payload.contractType || 'CALL'),
+          barrier: payload.barrier ?? null,
+          stake: Number(payload.stake || 1),
+          duration: Number(payload.duration || 1),
+          duration_unit: String(payload.durationUnit || 't'),
+          probability: Number(payload.probability || 0),
+          predicted_condition: String(payload.predictedCondition || ''),
+          expires_at: String(payload.expiresAt),
+        };
+        return [nextItem, ...prev.filter((item) => item.prediction_id !== nextItem.prediction_id)];
+      });
+    };
+
+    try {
+      const cached = localStorage.getItem('td_quantum_dbot_bridge');
+      if (cached) applyBridgeSignal(JSON.parse(cached));
+    } catch {
+      // ignore
+    }
+
+    let ch: BroadcastChannel | null = null;
+    if (typeof BroadcastChannel !== 'undefined') {
+      ch = new BroadcastChannel('td_quantum_dbot_bridge');
+      ch.onmessage = (ev) => applyBridgeSignal(ev.data);
+    }
+    const onStorage = (ev: StorageEvent) => {
+      if (ev.key === 'td_quantum_dbot_bridge' && ev.newValue) {
+        try {
+          applyBridgeSignal(JSON.parse(ev.newValue));
+        } catch {
+          // ignore
+        }
+      }
+    };
+    window.addEventListener('storage', onStorage);
+    return () => {
+      if (ch) ch.close();
+      window.removeEventListener('storage', onStorage);
+    };
+  }, []);
+
+  const loadQuantumSignalIntoWorkspace = (sig: (typeof quantumSignals)[number]) => {
+    if (sig.expires_at && new Date(sig.expires_at).getTime() <= Date.now()) {
+      showToast('Quantum signal expired (120s). Scan again in Quantum Analyser.', 'error');
+      return;
+    }
+    const ct = String(sig.contract_type || 'CALL').toUpperCase();
+    const infCat = inferTradeCategoryFromContract(ct);
+    const sub = resolveSubtypeDef(infCat.tradeCategory, infCat.tradeSubtype);
+    const infMkt = inferMarketFromSymbol(sig.instrument || 'R_100');
+    const isDirectDigit = ['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER'].includes(ct);
+
+    updateXmlState((prev) => {
+      let assignments = setAssignmentVal(prev.assignments, 'initialStake', String(sig.stake || 1));
+      assignments = setAssignmentVal(assignments, 'tradeSide', ct);
+      return {
+        ...prev,
+        quantumPredictionId: sig.prediction_id,
+        quantumExpiresAt: sig.expires_at,
+        strategyName: `Quantum_${sig.prediction_id}`,
+        strategyType: 'quantum_minimal_loss',
+        market: infMkt.market,
+        submarket: infMkt.submarket,
+        symbol: sig.instrument || prev.symbol,
+        tradeCategory: infCat.tradeCategory,
+        tradeSubtype: infCat.tradeSubtype,
+        contractTypeSelection: ct,
+        thenPurchase: ct,
+        elsePurchase: sub.legs.find((l) => l.value !== ct)?.value || ct,
+        beforeHasIf: isDirectDigit ? false : prev.beforeHasIf,
+        prediction: sig.barrier !== null && sig.barrier !== undefined ? String(sig.barrier) : prev.prediction,
+        duration: String(sig.duration || prev.duration || 1),
+        durationUnit: String(sig.duration_unit || prev.durationUnit || 't'),
+        assignments,
+      };
+    });
+    setLoadModalOpen(false);
+    setBotView('builder');
+    showToast(`Synced Quantum ${ct} signal (${sig.instrument}) into DBOT`, 'success');
+  };
 
   const pollStatus = useCallback(async () => {
     try {
@@ -1941,7 +2065,7 @@ export const BotBuilderPage: React.FC = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-2 border-b border-slate-200 dark:border-white/[0.08] text-[13px] shrink-0">
+            <div className="grid grid-cols-3 border-b border-slate-200 dark:border-white/[0.08] text-[13px] shrink-0">
               <button
                 type="button"
                 onClick={() => setLoadModalTab('local')}
@@ -1963,6 +2087,17 @@ export const BotBuilderPage: React.FC = () => {
                 }`}
               >
                 Google Drive
+              </button>
+              <button
+                type="button"
+                onClick={() => setLoadModalTab('quantum')}
+                className={`py-2.5 border-b-2 cursor-pointer ${
+                  loadModalTab === 'quantum'
+                    ? 'border-[#FF444F] font-bold text-[#111319] dark:text-white'
+                    : 'border-transparent text-[#6B7280]'
+                }`}
+              >
+                Quantum Sync
               </button>
             </div>
 
@@ -2069,7 +2204,7 @@ export const BotBuilderPage: React.FC = () => {
                     </button>
                   </div>
                 )
-              ) : (
+              ) : loadModalTab === 'drive' ? (
                 <div className="flex-1 border-2 border-dashed border-slate-300 dark:border-white/15 rounded-lg flex flex-col items-center justify-center p-6 text-center gap-4">
                   <p className="text-[13px] text-[#525866] dark:text-slate-300 max-w-xs">
                     Import saved strategies from your device storage or browse Prebuilt Bots Lab templates.
@@ -2093,6 +2228,78 @@ export const BotBuilderPage: React.FC = () => {
                       Open Prebuilt Bots
                     </button>
                   </div>
+                </div>
+              ) : (
+                <div className="flex-1 flex flex-col gap-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-[12px] font-semibold text-[#525866] dark:text-slate-300">
+                      Live Quantum Analyser Predictions (120s TTL)
+                    </span>
+                    <button
+                      type="button"
+                      onClick={fetchQuantumSignals}
+                      disabled={loadingQuantumSignals}
+                      className="px-2.5 py-1 rounded border border-slate-300 dark:border-white/15 text-[11px] font-semibold cursor-pointer disabled:opacity-50"
+                    >
+                      {loadingQuantumSignals ? 'Refreshing...' : 'Refresh'}
+                    </button>
+                  </div>
+                  {quantumSignals.length === 0 ? (
+                    <div className="flex-1 border-2 border-dashed border-slate-300 dark:border-white/15 rounded-lg flex flex-col items-center justify-center p-6 text-center gap-3">
+                      <p className="text-[13px] text-[#525866] dark:text-slate-300 max-w-xs">
+                        No active Quantum signals right now. Run a scan in standalone Quantum Analyser to push directly to DBOT.
+                      </p>
+                      <a
+                        href="/quantum-analyser"
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="px-4 py-2 rounded-[4px] bg-[#FF444F] text-white text-xs font-bold inline-flex items-center gap-1.5"
+                      >
+                        Open Quantum Analyser
+                      </a>
+                    </div>
+                  ) : (
+                    <div className="space-y-2.5">
+                      {quantumSignals.map((sig) => {
+                        const rem = Math.max(0, Math.floor((new Date(sig.expires_at).getTime() - quantumNowMs) / 1000));
+                        const expired = rem <= 0;
+                        return (
+                          <div
+                            key={sig.prediction_id}
+                            className="rounded-lg border border-slate-200 dark:border-white/10 bg-[#F8F9FA] dark:bg-[#181C25] p-3 flex items-center justify-between gap-3"
+                          >
+                            <div className="min-w-0 space-y-1">
+                              <div className="flex items-center gap-2">
+                                <span className="text-[13px] font-bold text-[#111319] dark:text-white truncate">
+                                  {sig.instrument} · {sig.contract_type}
+                                </span>
+                                {sig.barrier !== null && sig.barrier !== undefined && sig.barrier !== '' && (
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-white/10 text-[10px] font-bold">
+                                    Digit {sig.barrier}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-[11px] text-[#525866] dark:text-slate-400 flex items-center gap-2 font-mono-num">
+                                <span>{Number(sig.probability || 0).toFixed(2)}% conf</span>
+                                <span>•</span>
+                                <span className={expired ? 'text-[#FF444F]' : 'text-[#00A878] font-semibold'}>
+                                  {expired ? 'Expired' : `${Math.floor(rem / 60)}:${String(rem % 60).padStart(2, '0')} left`}
+                                </span>
+                              </div>
+                            </div>
+                            <button
+                              type="button"
+                              disabled={expired}
+                              onClick={() => loadQuantumSignalIntoWorkspace(sig)}
+                              className="px-3 py-1.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[12px] font-bold shrink-0 cursor-pointer disabled:opacity-40"
+                            >
+                              Load into DBOT
+                            </button>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
                 </div>
               )}
             </div>

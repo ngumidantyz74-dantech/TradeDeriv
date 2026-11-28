@@ -554,7 +554,9 @@ function selectMinimalLossSetup(
   symbol: string,
   prices: number[],
   pipSize: number,
-  stake: number
+  stake: number,
+  targetDigit?: number | null,
+  analysisMode: 'auto' | 'digit' | 'directional' = 'auto'
 ): {
   contractType: string;
   predictedCondition: string;
@@ -564,6 +566,16 @@ function selectMinimalLossSetup(
   probability: number;
   lossRiskScore: number;
   rationale: string;
+  telemetry: {
+    dataPoints: number;
+    targetDigit: number;
+    targetDigitPct: number;
+    digitDistribution: Array<{ digit: number; count: number; pct: number }>;
+    trend: string;
+    momentum: string;
+    volatility: string;
+    pattern: string;
+  };
 } {
   const decimals = pipSize < 0.0001 ? 5 : pipSize < 0.001 ? 4 : pipSize < 0.01 ? 3 : 2;
   const recent = prices.slice(-100);
@@ -577,7 +589,6 @@ function selectMinimalLossSetup(
     counts[d] = (counts[d] || 0) + 1;
   });
 
-  // Evaluate candidate minimal-loss statistical profiles across synthetic/real tick history
   let minDigit = 0;
   let minFreq = Number.POSITIVE_INFINITY;
   for (let d = 0; d <= 9; d++) {
@@ -587,42 +598,110 @@ function selectMinimalLossSetup(
     }
   }
   const n = Math.max(1, digits.length);
+  const chosenDigit =
+    typeof targetDigit === 'number' && Number.isInteger(targetDigit) && targetDigit >= 0 && targetDigit <= 9
+      ? targetDigit
+      : minDigit;
+  const chosenFreq = counts[chosenDigit] || 0;
+  const chosenDigitPct = Number(((chosenFreq / n) * 100).toFixed(1));
+  const diffChosenWinPct = ((n - chosenFreq) / n) * 100;
   const diffObservedWinPct = ((n - minFreq) / n) * 100;
 
-  const over1Pct = (digits.filter((d) => d > 1).length / n) * 100;
-  const under8Pct = (digits.filter((d) => d < 8).length / n) * 100;
+  const overBarrier = Math.min(8, Math.max(1, chosenDigit <= 2 ? chosenDigit : 1));
+  const overPct = (digits.filter((d) => d > overBarrier).length / n) * 100;
+  const underBarrier = Math.max(1, Math.min(8, chosenDigit >= 7 ? chosenDigit : 8));
+  const underPct = (digits.filter((d) => d < underBarrier).length / n) * 100;
   const evenCount = digits.filter((d) => d % 2 === 0).length;
   const evenPct = (evenCount / n) * 100;
   const oddPct = 100 - evenPct;
 
-  // Check if symbol supports digit contracts (Volatility/Synthetic indices support Digits best)
+  // Market regime stats from real tick prices
+  const last10 = recent.slice(-10);
+  const prev10 = recent.slice(-20, -10);
+  const avg10 = last10.reduce((a, b) => a + b, 0) / Math.max(1, last10.length);
+  const avgPrev10 = prev10.length
+    ? prev10.reduce((a, b) => a + b, 0) / prev10.length
+    : avg10;
+  const lastSpot = recent[recent.length - 1] || avg10;
+  const firstSpot = recent[0] || lastSpot;
+  const priceDiffs = recent.slice(1).map((v, i) => Math.abs(v - recent[i]));
+  const avgStep = priceDiffs.reduce((a, b) => a + b, 0) / Math.max(1, priceDiffs.length);
+  const volRatio = lastSpot > 0 ? (avgStep / lastSpot) * 10000 : 0;
+
+  const trend = avg10 > avgPrev10 * 1.0001 ? 'Uptrend' : avg10 < avgPrev10 * 0.9999 ? 'Downtrend' : 'Sideways';
+  const momentumDiff = Math.abs(lastSpot - avg10);
+  const momentum =
+    momentumDiff > avgStep * 1.6 ? 'Strong' : momentumDiff > avgStep * 0.7 ? 'Moderate' : 'Steady';
+  const volatility = volRatio > 8 ? 'High' : volRatio > 2.5 ? 'Moderate' : 'Low';
+  const pattern =
+    lastSpot >= firstSpot && evenPct >= 50
+      ? 'Bullish'
+      : lastSpot < firstSpot && oddPct > 50
+        ? 'Bearish'
+        : avg10 >= avgPrev10
+          ? 'Accumulation'
+          : 'Distribution';
+
+  const digitDistribution = counts.map((c, d) => ({
+    digit: d,
+    count: c,
+    pct: Number(((c / n) * 100).toFixed(1)),
+  }));
+
+  const telemetry = {
+    dataPoints: n,
+    targetDigit: chosenDigit,
+    targetDigitPct: chosenDigitPct,
+    digitDistribution,
+    trend,
+    momentum,
+    volatility,
+    pattern,
+  };
+
   const isSyntheticDigit = /^(1HZ|R_|JD|BOOM|CRASH|STPIDX|RDBULL|RDBEAR)/i.test(symbol);
 
-  if (isSyntheticDigit) {
+  if (isSyntheticDigit && analysisMode !== 'directional') {
+    const hasExplicitDigit =
+      typeof targetDigit === 'number' && Number.isInteger(targetDigit) && targetDigit >= 0 && targetDigit <= 9;
+
     const candidates = [
       {
         contractType: 'DIGITDIFF',
-        predictedCondition: `Exit last digit DIFFERS from ${minDigit}`,
-        barrier: String(minDigit),
-        probability: Number(Math.min(91.5, Math.max(85.0, diffObservedWinPct * 0.5 + 45)).toFixed(1)),
-        lossRiskScore: Number((100 - Math.min(91.5, Math.max(85.0, diffObservedWinPct * 0.5 + 45))).toFixed(1)),
-        rationale: `Minimal-loss profile: digit ${minDigit} appeared only ${minFreq}/${n} recent ticks on ${symbol}. Theoretical baseline non-match probability ~90%, calibrated for lower drawdown.`,
+        predictedCondition: `Exit last digit DIFFERS from ${hasExplicitDigit ? chosenDigit : minDigit}`,
+        barrier: String(hasExplicitDigit ? chosenDigit : minDigit),
+        probability: Number(
+          Math.min(
+            94.8,
+            Math.max(85.2, (hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct) * 0.45 + 49)
+          ).toFixed(2)
+        ),
+        lossRiskScore: Number(
+          (
+            100 -
+            Math.min(
+              94.8,
+              Math.max(85.2, (hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct) * 0.45 + 49)
+            )
+          ).toFixed(2)
+        ),
+        rationale: `Minimal-loss profile: digit ${hasExplicitDigit ? chosenDigit : minDigit} appeared ${hasExplicitDigit ? chosenFreq : minFreq}/${n} recent ticks on ${symbol}. Observed non-match rate ${(hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct).toFixed(1)}%.`,
       },
       {
         contractType: 'DIGITOVER',
-        predictedCondition: 'Exit last digit OVER 1',
-        barrier: '1',
-        probability: Number(Math.min(82.5, Math.max(75.0, over1Pct * 0.5 + 40)).toFixed(1)),
-        lossRiskScore: Number((100 - Math.min(82.5, Math.max(75.0, over1Pct * 0.5 + 40))).toFixed(1)),
-        rationale: `Minimal-loss profile: digits 2–9 occurred ${over1Pct.toFixed(1)}% over ${n} ticks on ${symbol}. Designed for conservative small-gain consistency.`,
+        predictedCondition: `Exit last digit OVER ${overBarrier}`,
+        barrier: String(overBarrier),
+        probability: Number(Math.min(86.5, Math.max(74.0, overPct * 0.5 + 40)).toFixed(2)),
+        lossRiskScore: Number((100 - Math.min(86.5, Math.max(74.0, overPct * 0.5 + 40))).toFixed(2)),
+        rationale: `Minimal-loss profile: digits over ${overBarrier} occurred ${overPct.toFixed(1)}% over ${n} ticks on ${symbol}. Designed for conservative small-gain consistency.`,
       },
       {
         contractType: 'DIGITUNDER',
-        predictedCondition: 'Exit last digit UNDER 8',
-        barrier: '8',
-        probability: Number(Math.min(82.5, Math.max(75.0, under8Pct * 0.5 + 40)).toFixed(1)),
-        lossRiskScore: Number((100 - Math.min(82.5, Math.max(75.0, under8Pct * 0.5 + 40))).toFixed(1)),
-        rationale: `Minimal-loss profile: digits 0–7 occurred ${under8Pct.toFixed(1)}% over ${n} ticks on ${symbol}. Lower loss variance compared to directional guesses.`,
+        predictedCondition: `Exit last digit UNDER ${underBarrier}`,
+        barrier: String(underBarrier),
+        probability: Number(Math.min(86.5, Math.max(74.0, underPct * 0.5 + 40)).toFixed(2)),
+        lossRiskScore: Number((100 - Math.min(86.5, Math.max(74.0, underPct * 0.5 + 40))).toFixed(2)),
+        rationale: `Minimal-loss profile: digits under ${underBarrier} occurred ${underPct.toFixed(1)}% over ${n} ticks on ${symbol}. Lower loss variance compared to directional guesses.`,
       },
     ];
 
@@ -632,24 +711,23 @@ function selectMinimalLossSetup(
       ...best,
       duration: 1,
       durationUnit: 't',
+      telemetry,
     };
   }
 
-  // Forex / Commodities / Crypto -> directional Rise/Fall based on short-vs-medium EMA slope
-  const last10 = recent.slice(-10);
-  const avg10 = last10.reduce((a, b) => a + b, 0) / Math.max(1, last10.length);
-  const lastSpot = recent[recent.length - 1] || avg10;
+  // Forex / Commodities / Crypto or directional mode -> directional Rise/Fall
   const isBull = lastSpot >= avg10;
-  const dirProb = Number(Math.min(64.5, Math.max(54.0, Math.max(evenPct, oddPct, 56))).toFixed(1));
+  const dirProb = Number(Math.min(93.4, Math.max(58.0, Math.max(evenPct, oddPct, 62) + (momentum === 'Strong' ? 14 : 6))).toFixed(2));
   return {
     contractType: isBull ? 'CALL' : 'PUT',
     predictedCondition: isBull ? 'Spot closes HIGHER than entry (Rise)' : 'Spot closes LOWER than entry (Fall)',
-    barrier: '0',
-    duration: 15,
-    durationUnit: 'm',
+    barrier: String(chosenDigit),
+    duration: isSyntheticDigit ? 5 : 15,
+    durationUnit: isSyntheticDigit ? 't' : 'm',
     probability: dirProb,
-    lossRiskScore: Number((100 - dirProb).toFixed(1)),
-    rationale: `Directional momentum scan on ${symbol}: spot ${lastSpot.toFixed(decimals)} vs 10-tick mean ${avg10.toFixed(decimals)} (${isBull ? 'bullish' : 'bearish'} tilt, non-guaranteed). Stake $${stake.toFixed(2)}.`,
+    lossRiskScore: Number((100 - dirProb).toFixed(2)),
+    rationale: `Directional momentum scan on ${symbol}: spot ${lastSpot.toFixed(decimals)} vs 10-tick mean ${avg10.toFixed(decimals)} (${isBull ? 'bullish' : 'bearish'} tilt, digit ${chosenDigit} inspected). Stake $${stake.toFixed(2)}.`,
+    telemetry,
   };
 }
 
@@ -658,6 +736,16 @@ router.post('/quantum/scan', requireDb, requireAuth, async (req: AuthRequest, re
   const userId = req.user!.id;
   const requestedSymbol = String(req.body?.symbol || '1HZ100V').trim();
   const stake = Number(Math.max(0.5, Math.min(5000, Number(req.body?.stake || 1))).toFixed(2));
+  const rawDigit = req.body?.targetDigit;
+  const targetDigit =
+    rawDigit !== undefined && rawDigit !== null && rawDigit !== '' && Number.isInteger(Number(rawDigit))
+      ? Math.max(0, Math.min(9, Number(rawDigit)))
+      : null;
+  const analysisMode =
+    req.body?.analysisMode === 'directional' || req.body?.analysisMode === 'digit'
+      ? req.body.analysisMode
+      : 'auto';
+
   const validInstrument =
     CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === requestedSymbol)?.symbol || requestedSymbol;
 
@@ -669,7 +757,7 @@ router.post('/quantum/scan', requireDb, requireAuth, async (req: AuthRequest, re
   const spotPrice = latest?.quote ?? prices[prices.length - 1] ?? 1000;
   const pipSize = latest?.pipSize ?? 0.01;
 
-  const setup = selectMinimalLossSetup(validInstrument, prices, pipSize, stake);
+  const setup = selectMinimalLossSetup(validInstrument, prices, pipSize, stake, targetDigit, analysisMode);
   const predictionId = `QP-${randomId(6).toUpperCase()}`;
   const generatedAt = new Date();
   const expiresAt = new Date(generatedAt.getTime() + QUANTUM_VALIDITY_SECONDS * 1000);
@@ -723,6 +811,7 @@ router.post('/quantum/scan', requireDb, requireAuth, async (req: AuthRequest, re
       ...row,
       remainingSeconds: QUANTUM_VALIDITY_SECONDS,
     },
+    telemetry: setup.telemetry,
     disclaimer:
       'Minimal-loss statistical probability analysis only — trading outcomes are never guaranteed.',
   });

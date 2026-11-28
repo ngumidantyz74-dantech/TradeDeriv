@@ -22,6 +22,7 @@ import {
 } from './pages/ToolsPages';
 import { AdminMISPage } from './pages/AdminMISPage';
 import { DerivCircleLoader } from './components/DerivLoadingModal';
+import { AskAmyModal } from './components/AskAmyModal';
 import { apiFetch, sanitizeUiError } from './lib/api';
 
 const isQuantumPath = () => {
@@ -69,24 +70,31 @@ const StandaloneQuantumLogin: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#0E0F13] text-white flex items-center justify-center p-4">
-      <div className="w-full max-w-md rounded-3xl bg-[#151820] border border-[#2A2F3D] p-7 shadow-2xl space-y-6">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-[#FF444F] flex items-center justify-center font-bold italic text-xl text-white">
-            d
+    <div className="min-h-screen bg-[#060911] text-white flex items-center justify-center p-4 relative overflow-hidden">
+      <div className="pointer-events-none absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#FF1F3D]/20 blur-[110px]" />
+      <div className="pointer-events-none absolute -bottom-24 -right-24 w-96 h-96 rounded-full bg-[#FF1F3D]/15 blur-[110px]" />
+      <div className="relative w-full max-w-md rounded-2xl bg-[#0B111E] border border-[#1B2438] p-7 shadow-2xl space-y-6">
+        <div className="flex items-center gap-3.5">
+          <div className="flex items-end gap-1 h-8 px-1" aria-hidden="true">
+            <span className="w-1.5 h-3.5 rounded-full bg-[#FF243B]" />
+            <span className="w-1.5 h-5.5 rounded-full bg-[#FF243B]" />
+            <span className="w-1.5 h-8 rounded-full bg-[#FF243B]" />
           </div>
           <div>
-            <p className="text-[11px] font-bold uppercase tracking-wider text-[#00A878]">Standalone Engine</p>
-            <h1 className="font-display text-xl font-bold leading-tight">Quantum Analyser</h1>
+            <h1 className="font-display text-xl font-bold leading-tight">
+              <span className="text-white">Quantum </span>
+              <span className="text-[#FF243B]">Analyser</span>
+            </h1>
+            <p className="text-[11px] text-slate-400">Scan • Analyse • Predict • Trade Smarter</p>
           </div>
         </div>
 
         <p className="text-xs text-slate-400">
-          Sign in with your account credentials to run standalone tick scanning and signed DBot XML generation.
+          Sign in with your account credentials to launch the standalone Quantum Analyser &amp; DBOT bridge.
         </p>
 
         {errMsg && (
-          <div className="rounded-xl bg-[#FF444F]/15 border border-[#FF444F]/40 px-3.5 py-2.5 text-xs text-[#FF444F] font-semibold">
+          <div className="rounded-xl bg-[#FF243B]/15 border border-[#FF243B]/40 px-3.5 py-2.5 text-xs text-[#FF6B7B] font-semibold">
             {errMsg}
           </div>
         )}
@@ -100,7 +108,7 @@ const StandaloneQuantumLogin: React.FC = () => {
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@example.com"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E0F13] border border-[#2A2F3D] text-sm text-white outline-none focus:border-[#00A878]"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-sm text-white outline-none focus:border-[#FF243B]"
             />
           </div>
           <div>
@@ -111,13 +119,13 @@ const StandaloneQuantumLogin: React.FC = () => {
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter password"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-[#0E0F13] border border-[#2A2F3D] text-sm text-white outline-none focus:border-[#00A878]"
+              className="w-full px-3.5 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-sm text-white outline-none focus:border-[#FF243B]"
             />
           </div>
           <button
             type="submit"
             disabled={submitting}
-            className="w-full py-3 rounded-xl bg-[#00A878] hover:bg-[#00966B] text-white text-sm font-bold cursor-pointer disabled:opacity-60"
+            className="w-full py-3 rounded-xl bg-gradient-to-r from-[#E11D48] to-[#FF243B] hover:brightness-110 text-white text-sm font-bold cursor-pointer disabled:opacity-60 shadow-lg shadow-[#FF243B]/20"
           >
             {submitting ? 'Signing in...' : 'Sign in to Quantum Analyser'}
           </button>
@@ -128,7 +136,7 @@ const StandaloneQuantumLogin: React.FC = () => {
 };
 
 const MainRouter: React.FC = () => {
-  const { user, loadingAuth, activeTab, publicSettings, toast, adminGateOpen, setAdminGateOpen, logout } = useApp();
+  const { user, loadingAuth, activeTab, publicSettings, toast, adminGateOpen, setAdminGateOpen } = useApp();
   const envSlug = import.meta.env.VITE_ADMIN_PRIVATE_SLUG || 'pf-ops-9482';
   const privateSlug = publicSettings.global?.adminPrivateSlug || envSlug;
 
@@ -236,41 +244,16 @@ const MainRouter: React.FC = () => {
     }
 
     return (
-      <div className="min-h-screen bg-[#F7F8FA] dark:bg-[#0E0F13] text-[#111319] dark:text-white flex flex-col">
-        <header className="bg-[#151820] text-white border-b border-[#2A2F3D] px-4 sm:px-8 py-3 flex items-center justify-between gap-4 sticky top-0 z-30">
-          <div className="flex items-center gap-3 min-w-0">
-            <span className="w-8 h-8 rounded-lg bg-[#FF444F] text-white font-bold italic text-base flex items-center justify-center shrink-0">
-              d
-            </span>
-            <div className="min-w-0">
-              <div className="flex items-center gap-2">
-                <span className="font-display text-sm sm:text-base font-bold truncate">DERIV · Quantum Analyser</span>
-                <span className="hidden sm:inline-block px-2 py-0.5 rounded bg-[#00A878]/15 text-[#00A878] text-[10px] font-bold">
-                  STANDALONE
-                </span>
-              </div>
-              <p className="text-[11px] text-slate-400 truncate">{user.email}</p>
-            </div>
-          </div>
-          <button
-            type="button"
-            onClick={logout}
-            className="px-3.5 py-1.5 rounded-xl bg-[#242833] hover:bg-[#2F3443] text-xs font-semibold text-white cursor-pointer shrink-0"
-          >
-            Log out
-          </button>
-        </header>
-        <main className="flex-1">
-          <AnalysisToolPage standalone />
-        </main>
+      <div className="min-h-screen bg-[#060911] text-white flex flex-col">
+        <AnalysisToolPage standalone />
         {toast && (
           <div
-            className={`fixed bottom-6 right-4 sm:right-6 z-50 px-4 py-3 rounded-2xl text-white shadow-xl text-xs font-semibold border ${
+            className={`fixed bottom-20 lg:bottom-6 right-4 sm:right-6 z-50 px-4 py-3 rounded-2xl text-white shadow-xl text-xs font-semibold border ${
               toast.type === 'error'
-                ? 'bg-[#FF444F] border-[#E63946]'
+                ? 'bg-[#FF243B] border-[#E11D48]'
                 : toast.type === 'success'
-                  ? 'bg-[#00A878] border-[#00966B]'
-                  : 'bg-[#151820] border-[#2A2F3D]'
+                  ? 'bg-[#059669] border-[#10B981]'
+                  : 'bg-[#0B111E] border-[#1B2438]'
             }`}
           >
             {toast.message}
@@ -334,6 +317,7 @@ const MainRouter: React.FC = () => {
     <>
       {minisiteLoading && <DerivCircleLoader />}
       <AppShell>{renderTab()}</AppShell>
+      <AskAmyModal />
       {toast && (
         <div
           className={`fixed bottom-20 lg:bottom-6 right-4 sm:right-6 z-50 px-4 py-3 rounded-2xl text-white shadow-xl text-xs font-semibold border ${

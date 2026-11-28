@@ -253,6 +253,19 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     return [{ value: 'Both', label: 'Both' }, ...legChoices];
   }, [legChoices]);
 
+  const availableVariables = useMemo(() => {
+    const merged = new Set<string>(BOT_VARIABLES);
+    for (const v of state.discoveredVariables || []) {
+      if (v && v.trim()) merged.add(v.trim());
+    }
+    for (const a of state.assignments) {
+      if (a.variable && a.variable.trim()) merged.add(a.variable.trim());
+    }
+    if (state.notifyVar && state.notifyVar.trim()) merged.add(state.notifyVar.trim());
+    if (state.ifLeftVar && state.ifLeftVar.trim()) merged.add(state.ifLeftVar.trim());
+    return Array.from(merged);
+  }, [state.discoveredVariables, state.assignments, state.notifyVar, state.ifLeftVar]);
+
   const getLegLabel = (val: string) => {
     const found = legChoices.find((l) => l.value === val);
     if (found) return found.label;
@@ -359,7 +372,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
               `cb-left-${blk.id}`,
               blk.left || 'lossStreak',
               blk.left || 'lossStreak',
-              BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+              availableVariables.map((v) => ({ value: v, label: v })),
               (v) =>
                 onChange((prev) => ({
                   ...prev,
@@ -401,7 +414,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
               `cb-set-${blk.id}`,
               blk.left || 'tradeSide',
               blk.left || 'tradeSide',
-              BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+              availableVariables.map((v) => ({ value: v, label: v })),
               (v) =>
                 onChange((prev) => ({
                   ...prev,
@@ -723,40 +736,76 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                     />
                   </div>
                   <div className="border-l-[10px] border-[#07516b] space-y-[3px] pb-1 pt-[2px]">
-                    {state.assignments.map((row) => (
-                      <div
-                        key={row.id}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setSelectedBlockId(`assign-row-${row.id}`);
-                        }}
-                        className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[5px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline(`assign-row-${row.id}`)}`}
-                      >
-                        <span>set</span>
-                        {renderPillBtn(
-                          `assign-${row.id}`,
-                          row.variable,
-                          row.variable,
-                          BOT_VARIABLES.map((v) => ({ value: v, label: v })),
-                          (nextVar) =>
+                    {state.assignments.map((row) => {
+                      const isCoreVar = ['initialStake', 'profitThreshold', 'lossThreshold'].includes(row.variable);
+                      return (
+                        <div
+                          key={row.id}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedBlockId(`assign-row-${row.id}`);
+                          }}
+                          className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[5px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline(`assign-row-${row.id}`)}`}
+                        >
+                          <span>set</span>
+                          {renderPillBtn(
+                            `assign-${row.id}`,
+                            row.variable,
+                            row.variable,
+                            availableVariables.map((v) => ({ value: v, label: v })),
+                            (nextVar) =>
+                              onChange((prev) => ({
+                                ...prev,
+                                assignments: prev.assignments.map((item) =>
+                                  item.id === row.id ? { ...item, variable: nextVar } : item
+                                ),
+                              }))
+                          )}
+                          <span>to</span>
+                          {renderValuePill(row.value, (nextVal) =>
                             onChange((prev) => ({
                               ...prev,
                               assignments: prev.assignments.map((item) =>
-                                item.id === row.id ? { ...item, variable: nextVar } : item
+                                item.id === row.id ? { ...item, value: nextVal } : item
                               ),
                             }))
-                        )}
-                        <span>to</span>
-                        {renderValuePill(row.value, (nextVal) =>
-                          onChange((prev) => ({
-                            ...prev,
-                            assignments: prev.assignments.map((item) =>
-                              item.id === row.id ? { ...item, value: nextVal } : item
-                            ),
-                          }))
-                        )}
-                      </div>
-                    ))}
+                          )}
+                          {!isCoreVar && (
+                            <button
+                              type="button"
+                              title="Remove variable"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                onChange((prev) => ({
+                                  ...prev,
+                                  assignments: prev.assignments.filter((item) => item.id !== row.id),
+                                }));
+                              }}
+                              className="ml-0.5 w-4 h-4 rounded-full bg-black/15 hover:bg-black/25 dark:bg-white/15 flex items-center justify-center cursor-pointer"
+                            >
+                              <X className="w-2.5 h-2.5" />
+                            </button>
+                          )}
+                        </div>
+                      );
+                    })}
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        const nextName = `var${state.assignments.length + 1}`;
+                        const nextId = `assign-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
+                        onChange((prev) => ({
+                          ...prev,
+                          discoveredVariables: Array.from(new Set([...(prev.discoveredVariables || []), nextName])),
+                          assignments: [...prev.assignments, { id: nextId, variable: nextName, value: '0' }],
+                        }));
+                      }}
+                      className="ml-1 mt-0.5 px-2.5 py-[3px] rounded-full bg-[#e2e3e5] hover:bg-[#d5d7da] dark:bg-[#1E2532] border border-[#c8cacc] dark:border-white/15 text-[11px] font-medium text-[#374151] dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                    >
+                      <Plus className="w-3 h-3" />
+                      Add variable
+                    </button>
                   </div>
                 </div>
 
@@ -878,7 +927,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                       'notifyVarTop',
                       state.notifyVar,
                       state.notifyVar,
-                      BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                      availableVariables.map((v) => ({ value: v, label: v })),
                       (v) => onChange((prev) => ({ ...prev, notifyVar: v }))
                     )}
                     <span>to</span>
@@ -911,7 +960,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                               `npart-${part.id}`,
                               part.value,
                               part.value,
-                              BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                              availableVariables.map((v) => ({ value: v, label: v })),
                               (v) =>
                                 onChange((prev) => ({
                                   ...prev,
@@ -986,101 +1035,131 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                     'notifyVar',
                     state.notifyVar,
                     state.notifyVar,
-                    BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                    availableVariables.map((v) => ({ value: v, label: v })),
                     (v) => onChange((prev) => ({ ...prev, notifyVar: v }))
                   )}
                 </div>
 
-                {/* if [tradeSide ▾] [= ▾] (CALL) then Purchase [Rise ▾] else Purchase [Fall ▾] */}
-                <div
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    setSelectedBlockId('ifPurchase');
-                  }}
-                  className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('ifPurchase')}`}
-                >
-                  <div className="flex items-center gap-1.5 whitespace-nowrap">
-                    <span>if</span>
+                {state.beforeHasIf === false ? (
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('directPurchase');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-2 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline('directPurchase')}`}
+                  >
+                    <span className="font-medium">Purchase</span>
                     {renderPillBtn(
-                      'ifLeftVar',
-                      state.ifLeftVar,
-                      state.ifLeftVar,
-                      BOT_VARIABLES.map((v) => ({ value: v, label: v })),
-                      (v) => onChange((prev) => ({ ...prev, ifLeftVar: v }))
+                      'thenPurchase',
+                      getLegLabel(state.thenPurchase),
+                      state.thenPurchase,
+                      legChoices,
+                      (v) => onChange((prev) => ({ ...prev, thenPurchase: v }))
                     )}
-                    {renderPillBtn(
-                      'ifOp',
-                      OP_LABELS[state.ifOperator],
-                      state.ifOperator,
-                      (Object.keys(OP_LABELS) as BotXmlWorkspaceState['ifOperator'][]).map((k) => ({
-                        value: k,
-                        label: OP_LABELS[k],
-                      })),
-                      (v) => onChange((prev) => ({ ...prev, ifOperator: v as any }))
-                    )}
-                    {renderValuePill(state.ifCompareValue, (nextVal) =>
-                      onChange((prev) => ({ ...prev, ifCompareValue: nextVal }))
-                    )}
-                    <span>then</span>
-                  </div>
-
-                  {/* then Purchase slot */}
-                  <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                    <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#e5b735] rounded-[4px] px-2.5 py-1.5 flex items-center gap-1.5 w-fit">
-                      <span className="font-medium">Purchase</span>
-                      {renderPillBtn(
-                        'thenPurchase',
-                        getLegLabel(state.thenPurchase),
-                        state.thenPurchase,
-                        legChoices,
-                        (v) => onChange((prev) => ({ ...prev, thenPurchase: v }))
-                      )}
-                    </div>
-                  </div>
-
-                  {state.elseEnabled ? (
-                    <>
-                      <div className="flex items-center gap-1.5 pt-0.5">
-                        <span>else</span>
-                        <button
-                          type="button"
-                          title="Remove else"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            onChange((prev) => ({ ...prev, elseEnabled: false }));
-                          }}
-                          className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
-                        >
-                          <Minus className="w-2.5 h-2.5" />
-                        </button>
-                      </div>
-                      <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                        <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 flex items-center gap-1.5 w-fit">
-                          <span className="font-medium">Purchase</span>
-                          {renderPillBtn(
-                            'elsePurchase',
-                            getLegLabel(state.elsePurchase),
-                            state.elsePurchase,
-                            legChoices,
-                            (v) => onChange((prev) => ({ ...prev, elsePurchase: v }))
-                          )}
-                        </div>
-                      </div>
-                    </>
-                  ) : (
                     <button
                       type="button"
-                      title="Add else branch"
+                      title="Add if/else condition"
                       onClick={(e) => {
                         e.stopPropagation();
-                        onChange((prev) => ({ ...prev, elseEnabled: true }));
+                        onChange((prev) => ({ ...prev, beforeHasIf: true }));
                       }}
-                      className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                      className="ml-1 px-2 py-[2px] rounded-full bg-white/80 hover:bg-white dark:bg-[#151820] border border-[#c8cacc] dark:border-white/20 text-[10.5px] font-medium text-[#525866] dark:text-slate-300 cursor-pointer"
                     >
-                      <Plus className="w-2.5 h-2.5" />
+                      + Condition
                     </button>
-                  )}
-                </div>
+                  </div>
+                ) : (
+                  /* if [tradeSide ▾] [= ▾] (CALL) then Purchase [Rise ▾] else Purchase [Fall ▾] */
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('ifPurchase');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('ifPurchase')}`}
+                  >
+                    <div className="flex items-center gap-1.5 whitespace-nowrap">
+                      <span>if</span>
+                      {renderPillBtn(
+                        'ifLeftVar',
+                        state.ifLeftVar,
+                        state.ifLeftVar,
+                        availableVariables.map((v) => ({ value: v, label: v })),
+                        (v) => onChange((prev) => ({ ...prev, ifLeftVar: v }))
+                      )}
+                      {renderPillBtn(
+                        'ifOp',
+                        OP_LABELS[state.ifOperator],
+                        state.ifOperator,
+                        (Object.keys(OP_LABELS) as BotXmlWorkspaceState['ifOperator'][]).map((k) => ({
+                          value: k,
+                          label: OP_LABELS[k],
+                        })),
+                        (v) => onChange((prev) => ({ ...prev, ifOperator: v as any }))
+                      )}
+                      {renderValuePill(state.ifCompareValue, (nextVal) =>
+                        onChange((prev) => ({ ...prev, ifCompareValue: nextVal }))
+                      )}
+                      <span>then</span>
+                    </div>
+
+                    {/* then Purchase slot */}
+                    <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                      <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#e5b735] rounded-[4px] px-2.5 py-1.5 flex items-center gap-1.5 w-fit">
+                        <span className="font-medium">Purchase</span>
+                        {renderPillBtn(
+                          'thenPurchase',
+                          getLegLabel(state.thenPurchase),
+                          state.thenPurchase,
+                          legChoices,
+                          (v) => onChange((prev) => ({ ...prev, thenPurchase: v }))
+                        )}
+                      </div>
+                    </div>
+
+                    {state.elseEnabled ? (
+                      <>
+                        <div className="flex items-center gap-1.5 pt-0.5">
+                          <span>else</span>
+                          <button
+                            type="button"
+                            title="Remove else"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              onChange((prev) => ({ ...prev, elseEnabled: false }));
+                            }}
+                            className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                          >
+                            <Minus className="w-2.5 h-2.5" />
+                          </button>
+                        </div>
+                        <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                          <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 flex items-center gap-1.5 w-fit">
+                            <span className="font-medium">Purchase</span>
+                            {renderPillBtn(
+                              'elsePurchase',
+                              getLegLabel(state.elsePurchase),
+                              state.elsePurchase,
+                              legChoices,
+                              (v) => onChange((prev) => ({ ...prev, elsePurchase: v }))
+                            )}
+                          </div>
+                        </div>
+                      </>
+                    ) : (
+                      <button
+                        type="button"
+                        title="Add else branch"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onChange((prev) => ({ ...prev, elseEnabled: true }));
+                        }}
+                        className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                      >
+                        <Plus className="w-2.5 h-2.5" />
+                      </button>
+                    )}
+                  </div>
+                )}
 
                 {renderCustomBlocksForSection('purchase')}
               </div>
@@ -1144,6 +1223,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                       </div>
                     </div>
                   </div>
+                  {renderCustomBlocksForSection('sell')}
                 </div>
                 <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
               </div>
@@ -1300,6 +1380,9 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                 <div className="bg-[#07516b] h-4 w-[258px] rounded-b-[6px]" />
               </div>
             ))}
+            {(state.customBlocks || []).some((b) => b.section === 'canvas') && (
+              <div className="space-y-2">{renderCustomBlocksForSection('canvas')}</div>
+            )}
           </div>
         </div>
       </div>
