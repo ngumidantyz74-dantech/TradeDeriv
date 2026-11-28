@@ -70,62 +70,61 @@ const StandaloneQuantumLogin: React.FC = () => {
   };
 
   return (
-    <div className="min-h-screen bg-[#060911] text-white flex items-center justify-center p-4 relative overflow-hidden">
-      <div className="pointer-events-none absolute -top-24 -left-24 w-96 h-96 rounded-full bg-[#FF1F3D]/20 blur-[110px]" />
-      <div className="pointer-events-none absolute -bottom-24 -right-24 w-96 h-96 rounded-full bg-[#FF1F3D]/15 blur-[110px]" />
-      <div className="relative w-full max-w-md rounded-2xl bg-[#0B111E] border border-[#1B2438] p-7 shadow-2xl space-y-6">
+    <div className="min-h-screen bg-[#0B0E14] text-white flex items-center justify-center p-4">
+      <div className="w-full max-w-md rounded-xl bg-[#12161F] border border-[#222938] p-7 shadow-2xl space-y-6">
         <div className="flex items-center gap-3.5">
-          <div className="flex items-end gap-1 h-8 px-1" aria-hidden="true">
-            <span className="w-1.5 h-3.5 rounded-full bg-[#FF243B]" />
-            <span className="w-1.5 h-5.5 rounded-full bg-[#FF243B]" />
-            <span className="w-1.5 h-8 rounded-full bg-[#FF243B]" />
-          </div>
+          <svg viewBox="0 0 40 40" className="w-9 h-9 shrink-0" fill="none" aria-hidden="true">
+            <path d="M31.5 29.5A14 14 0 1 1 34 20" stroke="#FF444F" strokeWidth="3.2" strokeLinecap="round" />
+            <rect x="13" y="21" width="3.5" height="10" rx="1.2" fill="#FF444F" />
+            <rect x="18.5" y="15" width="3.5" height="16" rx="1.2" fill="#FF444F" />
+            <rect x="24" y="10" width="3.5" height="21" rx="1.2" fill="#FF444F" />
+            <circle cx="31" cy="27.5" r="2.8" fill="#FF444F" />
+          </svg>
           <div>
-            <h1 className="font-display text-xl font-bold leading-tight">
-              <span className="text-white">Quantum </span>
-              <span className="text-[#FF243B]">Analyser</span>
+            <h1 className="font-display text-xl font-bold leading-tight text-white">
+              Quantum Analyser
             </h1>
-            <p className="text-[11px] text-slate-400">Scan • Analyse • Predict • Trade Smarter</p>
+            <p className="text-xs text-[#94A3B8] italic">Deriv Options Analyser</p>
           </div>
         </div>
 
-        <p className="text-xs text-slate-400">
-          Sign in with your account credentials to launch the standalone Quantum Analyser &amp; DBOT bridge.
+        <p className="text-xs text-[#CBD5E1]">
+          Sign in with your account credentials to launch the standalone Quantum Analyser &amp; Deriv Bot terminal.
         </p>
 
         {errMsg && (
-          <div className="rounded-xl bg-[#FF243B]/15 border border-[#FF243B]/40 px-3.5 py-2.5 text-xs text-[#FF6B7B] font-semibold">
+          <div className="rounded-lg bg-[#FF444F]/15 border border-[#FF444F]/40 px-3.5 py-2.5 text-xs text-[#FF6B74] font-semibold">
             {errMsg}
           </div>
         )}
 
         <form onSubmit={handleSubmit} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">Email</label>
+            <label className="block text-xs font-medium text-[#CBD5E1] mb-1.5">Email</label>
             <input
               type="email"
               required
               value={email}
               onChange={(e) => setEmail(e.target.value)}
               placeholder="name@example.com"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-sm text-white outline-none focus:border-[#FF243B]"
+              className="w-full px-3.5 py-2.5 rounded-lg bg-[#0D1118] border border-[#262E3F] text-sm text-white outline-none focus:border-[#FF444F]"
             />
           </div>
           <div>
-            <label className="block text-xs font-semibold text-slate-300 mb-1.5">Password</label>
+            <label className="block text-xs font-medium text-[#CBD5E1] mb-1.5">Password</label>
             <input
               type="password"
               required
               value={password}
               onChange={(e) => setPassword(e.target.value)}
               placeholder="Enter password"
-              className="w-full px-3.5 py-2.5 rounded-xl bg-[#070B14] border border-[#1E293B] text-sm text-white outline-none focus:border-[#FF243B]"
+              className="w-full px-3.5 py-2.5 rounded-lg bg-[#0D1118] border border-[#262E3F] text-sm text-white outline-none focus:border-[#FF444F]"
             />
           </div>
           <button
             type="submit"
             disabled={submitting}
-            className="w-full py-3 rounded-xl bg-gradient-to-r from-[#E11D48] to-[#FF243B] hover:brightness-110 text-white text-sm font-bold cursor-pointer disabled:opacity-60 shadow-lg shadow-[#FF243B]/20"
+            className="w-full py-3 rounded-lg bg-[#FF444F] hover:bg-[#E63946] text-white text-sm font-bold cursor-pointer disabled:opacity-60"
           >
             {submitting ? 'Signing in...' : 'Sign in to Quantum Analyser'}
           </button>
@@ -244,16 +243,16 @@ const MainRouter: React.FC = () => {
     }
 
     return (
-      <div className="min-h-screen bg-[#060911] text-white flex flex-col">
+      <div className="min-h-screen bg-[#0B0E14] text-white flex flex-col">
         <AnalysisToolPage standalone />
         {toast && (
           <div
-            className={`fixed bottom-20 lg:bottom-6 right-4 sm:right-6 z-50 px-4 py-3 rounded-2xl text-white shadow-xl text-xs font-semibold border ${
+            className={`fixed bottom-20 lg:bottom-6 right-4 sm:right-6 z-50 px-4 py-3 rounded-xl text-white shadow-xl text-xs font-semibold border ${
               toast.type === 'error'
-                ? 'bg-[#FF243B] border-[#E11D48]'
+                ? 'bg-[#FF444F] border-[#E11D48]'
                 : toast.type === 'success'
-                  ? 'bg-[#059669] border-[#10B981]'
-                  : 'bg-[#0B111E] border-[#1B2438]'
+                  ? 'bg-[#0C2B21] border-[#00D084] text-[#00D084]'
+                  : 'bg-[#12161F] border-[#222938]'
             }`}
           >
             {toast.message}
