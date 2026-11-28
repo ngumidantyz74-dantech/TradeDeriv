@@ -134,6 +134,22 @@ function getContractDisplayLabel(ct: string): string {
   if (u === 'DIGITODD') return 'Odd';
   if (u === 'CALL' || u === 'CALLE') return 'Rise';
   if (u === 'PUT' || u === 'PUTE') return 'Fall';
+  if (u === 'HIGHER') return 'Higher';
+  if (u === 'LOWER') return 'Lower';
+  if (u === 'ONETOUCH' || u === 'TOUCH') return 'Touch';
+  if (u === 'NOTOUCH') return 'No Touch';
+  if (u === 'EXPIRYRANGE') return 'Stays In';
+  if (u === 'EXPIRYMISS') return 'Goes Out';
+  if (u === 'ENDSIN') return 'Ends In';
+  if (u === 'ENDSOUT') return 'Ends Out';
+  if (u === 'ASIANU') return 'Asian Up';
+  if (u === 'ASIAND') return 'Asian Down';
+  if (u === 'RESETCALL') return 'Reset Call';
+  if (u === 'RESETPUT') return 'Reset Put';
+  if (u === 'TICKHIGH') return 'High Tick';
+  if (u === 'TICKLOW') return 'Low Tick';
+  if (u === 'RUNHIGH') return 'Only Ups';
+  if (u === 'RUNLOW') return 'Only Downs';
   if (u === 'ACCU') return 'Accumulators';
   if (u === 'MULTUP') return 'Mult Up';
   if (u === 'MULTDOWN') return 'Mult Down';
@@ -206,6 +222,7 @@ export const BotBuilderPage: React.FC = () => {
   const [telemetryOpen, setTelemetryOpen] = useState<boolean>(false);
   const [telemetryTab, setTelemetryTab] = useState<'summary' | 'transactions' | 'journal'>('summary');
   const [txDetailOpen, setTxDetailOpen] = useState<boolean>(false);
+  const [whatsThisOpen, setWhatsThisOpen] = useState<boolean>(false);
   const [journalFilter, setJournalFilter] = useState<'all' | 'error' | 'profit' | 'bought'>('all');
   const [filterMenuOpen, setFilterMenuOpen] = useState<boolean>(false);
   const [accountSheetOpen, setAccountSheetOpen] = useState<boolean>(false);
@@ -693,6 +710,11 @@ export const BotBuilderPage: React.FC = () => {
 
     const nextSnapshot: BotXmlWorkspaceState = {
       ...xmlState,
+      importedGroups: [],
+      customBlocks: [],
+      blockPositions: {},
+      hasSellConditions: false,
+      sellByCountdown: false,
       ...(p.parsedState || {}),
       quantumPredictionId: p.quantumPrediction?.prediction_id || null,
       quantumExpiresAt: p.quantumPrediction?.expires_at || null,
@@ -1405,102 +1427,100 @@ export const BotBuilderPage: React.FC = () => {
             <div className="flex-1 overflow-y-auto">
               {/* SUMMARY TAB (Screenshots 152631, 152655) */}
               {telemetryTab === 'summary' && (
-                <div className="p-3.5 space-y-4">
+                <div>
                   {latestBotOrder ? (
                     <>
+                      {/* Edge-to-edge pink gradient header matching Screenshot 152655 */}
                       <div
-                        className={`rounded-xl overflow-hidden border border-slate-200/80 dark:border-white/10 shadow-xs bg-white dark:bg-[#181C25]`}
+                        className={`px-4 py-3 flex items-center justify-between border-b border-[#f0f1f2] dark:border-white/[0.06] bg-gradient-to-r ${
+                          (latestMetrics?.pnl ?? 0) >= 0
+                            ? 'from-[#e2f5f2] via-[#f4fbfa] to-white dark:from-[#2A9D8F]/15 dark:via-[#181C25] dark:to-[#181C25]'
+                            : 'from-[#f9dfe4] via-[#fdf2f4] to-white dark:from-[#FF444F]/15 dark:via-[#181C25] dark:to-[#181C25]'
+                        }`}
                       >
-                        <div
-                          className={`px-3.5 py-2.5 flex items-center justify-between bg-gradient-to-b ${
-                            (latestMetrics?.pnl ?? 0) >= 0
-                              ? 'from-[#00A878]/10 to-transparent'
-                              : 'from-[#FF444F]/10 to-transparent'
-                          }`}
-                        >
-                          <div className="flex items-center gap-2">
-                            <BotInstrumentIcon symbol={latestBotOrder.symbol} size="sm" />
-                            <span className="text-[12px] font-bold text-[#111319] dark:text-white">
-                              {instruments.find((i) => i.symbol === latestBotOrder.symbol)?.display_name ||
-                                latestBotOrder.symbol}
-                            </span>
-                          </div>
-                          <span className="inline-flex items-center gap-1.5 text-[12px] font-bold text-[#111319] dark:text-white">
-                            <BotContractTypeIcon
-                              contractType={latestBotOrder.contract_type}
-                              side={latestBotOrder.side}
-                              barrier={latestBotOrder.barrier}
-                              className="w-3.5 h-3.5 shrink-0"
-                            />
-                            {getContractDisplayLabel(latestBotOrder.contract_type)}
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <BotInstrumentIcon symbol={latestBotOrder.symbol} size="md" />
+                          <span className="text-[13px] font-bold text-[#111319] dark:text-white truncate">
+                            {instruments.find((i) => i.symbol === latestBotOrder.symbol)?.display_name ||
+                              latestBotOrder.symbol}
                           </span>
                         </div>
+                        <span className="inline-flex items-center gap-1.5 text-[13px] font-bold text-[#111319] dark:text-white shrink-0">
+                          <BotContractTypeIcon
+                            contractType={latestBotOrder.contract_type}
+                            side={latestBotOrder.side}
+                            barrier={latestBotOrder.barrier}
+                            className="w-4 h-4 shrink-0"
+                          />
+                          {getContractDisplayLabel(latestBotOrder.contract_type)}
+                        </span>
+                      </div>
 
-                        <div className="px-3.5 pb-3.5 pt-2 space-y-2.5 text-[11px]">
-                          <span className="inline-block px-2 py-0.5 rounded bg-[#7BB3B8] text-white font-bold text-[10px]">
-                            USD
-                          </span>
+                      <div className="px-5 py-4 space-y-3 text-[12px]">
+                        <span className="inline-block px-2 py-0.5 rounded-[5px] bg-[#80a9a7] text-white font-bold text-[11px]">
+                          USD
+                        </span>
 
-                          <div className="grid grid-cols-3 gap-2 items-center">
-                            <div>
-                              <p className="text-[#6B7280] dark:text-slate-400">Total profit/loss:</p>
-                              <p
-                                className={`font-mono-num font-bold text-[12px] mt-0.5 ${
-                                  (latestMetrics?.pnl ?? 0) >= 0 ? 'text-[#2A9D8F]' : 'text-[#FF444F]'
-                                }`}
-                              >
-                                {(latestMetrics?.pnl ?? 0) >= 0 ? '+' : ''}
-                                {(latestMetrics?.pnl ?? 0).toFixed(2)}{' '}
-                                {(latestMetrics?.pnl ?? 0) >= 0 ? '▲' : '▼'}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-[#6B7280] dark:text-slate-400">Contract value:</p>
-                              <p
-                                className={`font-mono-num font-bold text-[12px] mt-0.5 ${
-                                  (latestMetrics?.pnl ?? 0) >= 0 ? 'text-[#2A9D8F]' : 'text-[#FF444F]'
-                                }`}
-                              >
-                                {(latestMetrics?.pnl ?? 0) > 0
-                                  ? (Number(latestBotOrder.stake) + (latestMetrics?.pnl ?? 0)).toFixed(2)
-                                  : '0.00'}{' '}
-                                {(latestMetrics?.pnl ?? 0) > 0 ? '▲' : '▼'}
-                              </p>
-                            </div>
-                            <div className="text-right">
-                              <p className="text-[#6B7280] dark:text-slate-400">
-                                Tick {latestBotOrder.duration || 1}
-                              </p>
-                              <span className="inline-block w-2 h-2 rounded-full bg-[#7BB3B8] mt-1" />
-                            </div>
+                        <div className="grid grid-cols-3 gap-2 items-center">
+                          <div>
+                            <p className="text-[#777d84] dark:text-slate-400">Total profit/loss:</p>
+                            <p
+                              className={`font-mono-num font-bold text-[13px] mt-0.5 ${
+                                (latestMetrics?.pnl ?? 0) >= 0 ? 'text-[#2A9D8F]' : 'text-[#ed4b5b]'
+                              }`}
+                            >
+                              {(latestMetrics?.pnl ?? 0) >= 0 ? '+' : ''}
+                              {(latestMetrics?.pnl ?? 0).toFixed(2)}{' '}
+                              {(latestMetrics?.pnl ?? 0) >= 0 ? '▲' : '▼'}
+                            </p>
                           </div>
-
-                          <div className="grid grid-cols-3 gap-2 pt-1">
-                            <div>
-                              <p className="text-[#6B7280] dark:text-slate-400">Stake:</p>
-                              <p className="font-mono-num font-bold text-[12px]">
-                                {Number(latestBotOrder.stake || 0).toFixed(2)}
-                              </p>
-                            </div>
-                            <div>
-                              <p className="text-[#6B7280] dark:text-slate-400">Potential payout:</p>
-                              <p className="font-mono-num font-bold text-[12px]">
-                                {(
-                                  Number(latestBotOrder.payout || 0) ||
-                                  Number(latestBotOrder.stake || 0) * 1.95
-                                ).toFixed(2)}
-                              </p>
-                            </div>
-                            <div />
+                          <div>
+                            <p className="text-[#777d84] dark:text-slate-400">Contract value:</p>
+                            <p
+                              className={`font-mono-num font-bold text-[13px] mt-0.5 ${
+                                (latestMetrics?.pnl ?? 0) >= 0 ? 'text-[#2A9D8F]' : 'text-[#ed4b5b]'
+                              }`}
+                            >
+                              {(latestMetrics?.pnl ?? 0) > 0
+                                ? (Number(latestBotOrder.stake) + (latestMetrics?.pnl ?? 0)).toFixed(2)
+                                : '0.00'}{' '}
+                              {(latestMetrics?.pnl ?? 0) > 0 ? '▲' : '▼'}
+                            </p>
                           </div>
+                          <div className="text-right">
+                            <p className="text-[#555] dark:text-slate-300 font-medium">
+                              Tick {latestBotOrder.duration || 1}
+                            </p>
+                            <span className="inline-block w-2.5 h-2.5 rounded-full bg-[#80aaa8] mt-1" />
+                          </div>
+                        </div>
+
+                        <div className="grid grid-cols-3 gap-2 pt-1">
+                          <div>
+                            <p className="text-[#777d84] dark:text-slate-400">Stake:</p>
+                            <p className="font-mono-num font-bold text-[13px] mt-0.5 text-[#111319] dark:text-white">
+                              {Number(latestBotOrder.stake || 0).toFixed(2)}
+                            </p>
+                          </div>
+                          <div>
+                            <p className="text-[#777d84] dark:text-slate-400">Potential payout:</p>
+                            <p className="font-mono-num font-bold text-[13px] mt-0.5 text-[#111319] dark:text-white">
+                              {(
+                                Number(latestBotOrder.payout || 0) ||
+                                Number(latestBotOrder.stake || 0) * 1.95
+                              ).toFixed(2)}
+                            </p>
+                          </div>
+                          <div />
                         </div>
                       </div>
-                      <p className="text-center text-[11px] text-[#6B7280] dark:text-slate-400">
+
+                      <div className="py-4 border-t border-[#f4f4f4] dark:border-white/[0.06] text-center text-[12px] text-[#777d84] dark:text-slate-400">
                         Resale not offered
-                      </p>
+                      </div>
                     </>
                   ) : (
-                    <div className="py-12 text-center space-y-2">
+                    <div className="py-12 px-4 text-center space-y-2">
                       <p className="text-[13px] font-semibold text-[#525866] dark:text-slate-300">
                         No open or recent contract summary yet
                       </p>
@@ -1534,7 +1554,7 @@ export const BotBuilderPage: React.FC = () => {
                     </button>
                   </div>
 
-                  <div className="grid grid-cols-3 px-4 py-2.5 text-[11px] font-bold text-[#374151] dark:text-slate-300 border-b border-slate-100 dark:border-white/[0.06]">
+                  <div className="grid grid-cols-3 px-4 py-2.5 text-[12px] font-bold text-[#374151] dark:text-slate-300 border-b border-slate-100 dark:border-white/[0.06]">
                     <span>Type</span>
                     <span className="text-center">Entry/Exit spot</span>
                     <span className="text-right">Buy price and P/L</span>
@@ -1563,7 +1583,7 @@ export const BotBuilderPage: React.FC = () => {
                     </div>
                   )}
 
-                  <div className="divide-y divide-slate-100 dark:divide-white/[0.06]">
+                  <div>
                     {botOrders.slice(0, 40).map((o, idx, arr) => {
                       const live = computeLiveOrderMetrics(o, ticks);
                       const win = live.pnl >= 0;
@@ -1590,25 +1610,29 @@ export const BotBuilderPage: React.FC = () => {
                           {hasRunSeparator && (
                             <div
                               aria-hidden="true"
-                              className="h-[6px] w-full bg-[#F2F3F5] dark:bg-[#0E1015]"
+                              className="h-[6px] w-full bg-[#e6e8eb] dark:bg-[#0B0E14]"
                             />
                           )}
-                          <div className="grid grid-cols-3 items-center px-4 py-2.5 text-[11px]">
+                          <div
+                            onClick={() => setTxDetailOpen(true)}
+                            className="grid grid-cols-3 items-center px-4 py-3 text-[12px] border-b-[5px] border-[#f0f1f2] dark:border-[#0E1015] hover:bg-[#fafafa] dark:hover:bg-white/[0.02] cursor-pointer"
+                          >
                             <TradeTypeCell
                               symbol={o.symbol}
                               contractType={o.contract_type}
                               side={o.side}
                               barrier={o.barrier}
                               size="sm"
+                              iconClassName="w-5 h-5 shrink-0"
                             />
 
-                            <div className="flex flex-col items-center font-mono-num tabular-nums space-y-0.5">
+                            <div className="flex flex-col items-center font-mono-num tabular-nums space-y-0.5 text-[#525866] dark:text-slate-300">
                               <div className="flex items-center gap-2">
-                                <span className="w-2.5 h-2.5 rounded-full border-2 border-[#FF444F] shrink-0" />
+                                <span className="w-2.5 h-2.5 rounded-full border-2 border-[#e75c68] shrink-0" />
                                 <span>{Number(o.entry_price || 0).toFixed(2)}</span>
                               </div>
-                              <div className="flex items-center gap-2 text-[#525866] dark:text-slate-400">
-                                <span className="w-2.5 h-2.5 rounded-full border-2 border-[#9CA3AF] shrink-0" />
+                              <div className="flex items-center gap-2 text-[#62666b] dark:text-slate-400">
+                                <span className="w-2.5 h-2.5 rounded-full border-2 border-[#a9adb0] shrink-0" />
                                 <span>{exitVal.toFixed(2)}</span>
                               </div>
                             </div>
@@ -1617,7 +1641,7 @@ export const BotBuilderPage: React.FC = () => {
                               <p className="text-[#525866] dark:text-slate-300">
                                 {Number(o.stake || 0).toFixed(2)} USD
                               </p>
-                              <p className={`font-semibold ${win ? 'text-[#2A9D8F]' : 'text-[#FF444F]'}`}>
+                              <p className={`font-semibold ${win ? 'text-[#55a99f]' : 'text-[#d66c72]'}`}>
                                 {win ? '+' : ''}
                                 {live.pnl.toFixed(2)} USD
                               </p>
@@ -1741,43 +1765,55 @@ export const BotBuilderPage: React.FC = () => {
             </div>
 
             {/* Pinned 2x3 Session Totals Footer inside Drawer (Screenshots 152613, 152655) */}
-            <div className="shrink-0 bg-white dark:bg-[#151820] border-t border-slate-200 dark:border-white/[0.08] px-4 py-3 grid grid-cols-3 gap-y-3 text-center text-[11px]">
+            <div className="relative shrink-0 bg-[#f1f2f5] dark:bg-[#181C25] border-t border-slate-200 dark:border-white/[0.08] px-4 py-3.5 grid grid-cols-3 gap-y-3.5 text-center text-[12px]">
+              {whatsThisOpen && (
+                <div
+                  onClick={() => setWhatsThisOpen(false)}
+                  className="absolute right-3 bottom-full mb-2 w-64 rounded-lg bg-[#242a33] text-white text-left text-[11px] p-3 shadow-xl z-40"
+                >
+                  Tracks cumulative bot session stake, payout, closed runs, wins/losses, and net realized profit/loss for the active {accountMode.toUpperCase()} account.
+                </div>
+              )}
               <div>
                 <p className="font-bold text-[#374151] dark:text-slate-300">Total stake</p>
-                <p className="font-mono-num mt-0.5 text-[#111319] dark:text-white">
+                <p className="font-mono-num mt-1 text-[#555] dark:text-white">
                   {totalStake.toFixed(2)} USD
                 </p>
               </div>
               <div>
                 <p className="font-bold text-[#374151] dark:text-slate-300">Total payout</p>
-                <p className="font-mono-num mt-0.5 text-[#111319] dark:text-white">
+                <p className="font-mono-num mt-1 text-[#555] dark:text-white">
                   {totalPayout.toFixed(2)} USD
                 </p>
               </div>
               <div>
-                <p className="text-[10px] underline decoration-dotted text-[#6B7280] dark:text-slate-400">
+                <button
+                  type="button"
+                  onClick={() => setWhatsThisOpen((v) => !v)}
+                  className="text-[11px] underline decoration-dotted text-[#777] dark:text-slate-400 cursor-pointer block mx-auto mb-0.5"
+                >
                   What&apos;s this?
-                </p>
+                </button>
                 <p className="font-bold text-[#374151] dark:text-slate-300">No. of runs</p>
-                <p className="font-mono-num mt-0.5 text-[#111319] dark:text-white">{totalRuns}</p>
+                <p className="font-mono-num mt-1 text-[#555] dark:text-white">{totalRuns}</p>
               </div>
 
               <div>
                 <p className="font-bold text-[#374151] dark:text-slate-300">Contracts lost</p>
-                <p className="font-mono-num mt-0.5 text-[#111319] dark:text-white">{contractsLost}</p>
+                <p className="font-mono-num mt-1 text-[#555] dark:text-white">{contractsLost}</p>
               </div>
               <div>
                 <p className="font-bold text-[#374151] dark:text-slate-300">Contracts won</p>
-                <p className="font-mono-num mt-0.5 text-[#111319] dark:text-white">{contractsWon}</p>
+                <p className="font-mono-num mt-1 text-[#555] dark:text-white">{contractsWon}</p>
               </div>
               <div>
                 <p className="font-bold text-[#374151] dark:text-slate-300">Total profit/loss</p>
                 <p
-                  className={`font-mono-num font-bold mt-0.5 ${
+                  className={`font-mono-num font-bold mt-1 ${
                     totalProfitLoss > 0
-                      ? 'text-[#2A9D8F]'
+                      ? 'text-[#55a99f]'
                       : totalProfitLoss < 0
-                        ? 'text-[#FF444F]'
+                        ? 'text-[#d66c72]'
                         : 'text-[#111319] dark:text-white'
                   }`}
                 >
@@ -1791,9 +1827,9 @@ export const BotBuilderPage: React.FC = () => {
 
         {/* TRANSACTIONS DETAILED SUMMARY MODAL VIEW (Screenshot 152706) */}
         {txDetailOpen && (
-          <div className="absolute inset-0 z-35 bg-white dark:bg-[#151820] flex flex-col">
+          <div className="absolute inset-0 z-35 bg-white dark:bg-[#0F1115] flex flex-col">
             <div className="h-12 shrink-0 px-4 border-b border-slate-200 dark:border-white/[0.08] flex items-center justify-between">
-              <h3 className="text-[14px] font-bold text-[#111319] dark:text-white">
+              <h3 className="text-[15px] font-bold text-[#111319] dark:text-white">
                 Transactions detailed summary
               </h3>
               <button
@@ -1802,10 +1838,10 @@ export const BotBuilderPage: React.FC = () => {
                 className="p-1.5 rounded-lg hover:bg-slate-100 dark:hover:bg-white/10 cursor-pointer"
                 aria-label="Close detailed summary"
               >
-                <X className="w-4 h-4" />
+                <X className="w-5 h-5" />
               </button>
             </div>
-            <div className="flex-1 overflow-y-auto p-3.5 space-y-3 bg-[#F8F9FA] dark:bg-[#0F1115]">
+            <div className="flex-1 overflow-y-auto p-3.5 space-y-3.5 bg-white dark:bg-[#0F1115]">
               {botOrders.map((o) => {
                 const live = computeLiveOrderMetrics(o, ticks);
                 const win = live.pnl >= 0;
@@ -1814,50 +1850,51 @@ export const BotBuilderPage: React.FC = () => {
                 return (
                   <div
                     key={o.id}
-                    className="bg-white dark:bg-[#181C25] rounded-xl border border-slate-200/80 dark:border-white/[0.08] p-4 space-y-3 text-[12px]"
+                    className="bg-[#f1f2f4] dark:bg-[#181C25] rounded-[10px] p-4 space-y-3.5 text-[12px]"
                   >
                     <TradeTypeCell
                       symbol={o.symbol}
                       contractType={o.contract_type}
                       side={o.side}
                       barrier={o.barrier}
-                      size="sm"
+                      size="md"
+                      iconClassName="w-5 h-5 shrink-0"
                     />
                     <div>
-                      <p className="font-bold text-[#111319] dark:text-white text-[11px]">Ref. ID</p>
-                      <p className="font-mono-num text-[#525866] dark:text-slate-300 mt-0.5">{refId}</p>
+                      <p className="font-bold text-[#111319] dark:text-white text-[12px]">Ref. ID</p>
+                      <p className="font-mono-num text-[#676b70] dark:text-slate-300 mt-1 text-[13px]">{refId}</p>
                     </div>
                     <div className="flex items-start justify-between gap-4">
                       <div>
-                        <p className="font-bold text-[#111319] dark:text-white text-[11px]">Timestamp</p>
-                        <p className="text-[#525866] dark:text-slate-300 mt-0.5 font-mono-num">
+                        <p className="font-bold text-[#111319] dark:text-white text-[12px]">Timestamp</p>
+                        <p className="text-[#676b70] dark:text-slate-300 mt-1 font-mono-num text-[13px]">
                           {formatGmtStamp(o.opened_at)}
                         </p>
                       </div>
                       <div className="text-right">
-                        <p className="font-bold text-[#111319] dark:text-white text-[11px]">Entry Spot</p>
-                        <p className="font-mono-num text-[#525866] dark:text-slate-300 mt-0.5">
+                        <p className="font-bold text-[#111319] dark:text-white text-[12px]">Entry Spot</p>
+                        <p className="font-mono-num text-[#676b70] dark:text-slate-300 mt-1 text-[13px]">
                           {Number(o.entry_price || 0).toFixed(2)}
                         </p>
                       </div>
                     </div>
                     <div className="flex items-start justify-between gap-4">
                       <div>
-                        <p className="font-bold text-[#111319] dark:text-white text-[11px]">Buy Price</p>
-                        <p className="font-mono-num text-[#525866] dark:text-slate-300 mt-0.5">
+                        <p className="font-bold text-[#111319] dark:text-white text-[12px]">Buy Price</p>
+                        <p className="font-mono-num text-[#676b70] dark:text-slate-300 mt-1 text-[13px]">
                           {Number(o.stake || 0).toFixed(2)}
                         </p>
                       </div>
                       <div className="text-right">
-                        <p className="font-bold text-[#111319] dark:text-white text-[11px]">Exit Spot</p>
-                        <p className="font-mono-num text-[#525866] dark:text-slate-300 mt-0.5">
+                        <p className="font-bold text-[#111319] dark:text-white text-[12px]">Exit Spot</p>
+                        <p className="font-mono-num text-[#676b70] dark:text-slate-300 mt-1 text-[13px]">
                           {exitVal.toFixed(2)}
                         </p>
                       </div>
                     </div>
-                    <div className="flex items-center justify-between pt-2 border-t border-slate-100 dark:border-white/[0.06]">
-                      <span className="font-bold text-[#111319] dark:text-white text-[11px]">Profit / Loss</span>
-                      <span className={`font-mono-num font-bold ${win ? 'text-[#2A9D8F]' : 'text-[#FF444F]'}`}>
+                    <div className="flex items-center justify-between pt-2 border-t border-slate-200/70 dark:border-white/[0.06]">
+                      <span className="font-bold text-[#111319] dark:text-white text-[13px]">Profit / Loss</span>
+                      <span className={`font-mono-num font-bold text-[13px] ${win ? 'text-[#55a99f]' : 'text-[#d66c72]'}`}>
                         {win ? '+' : ''}
                         {live.pnl.toFixed(2)}
                       </span>
@@ -1865,6 +1902,23 @@ export const BotBuilderPage: React.FC = () => {
                   </div>
                 );
               })}
+            </div>
+            <div className="shrink-0 bg-[#f1f2f5] dark:bg-[#151820] border-t border-slate-200 dark:border-white/[0.08] px-4 py-3 grid grid-cols-3 text-center text-[12px]">
+              <div>
+                <p className="font-bold text-[#374151] dark:text-slate-300">Total stake</p>
+                <p className="font-mono-num mt-0.5 text-[#555] dark:text-white">{totalStake.toFixed(2)} USD</p>
+              </div>
+              <div>
+                <p className="font-bold text-[#374151] dark:text-slate-300">Total payout</p>
+                <p className="font-mono-num mt-0.5 text-[#555] dark:text-white">{totalPayout.toFixed(2)} USD</p>
+              </div>
+              <div>
+                <p className="text-[10px] underline decoration-dotted text-[#777] dark:text-slate-400">
+                  What&apos;s this?
+                </p>
+                <p className="font-bold text-[#374151] dark:text-slate-300">No. of runs</p>
+                <p className="font-mono-num mt-0.5 text-[#555] dark:text-white">{totalRuns}</p>
+              </div>
             </div>
           </div>
         )}
@@ -1912,7 +1966,7 @@ export const BotBuilderPage: React.FC = () => {
               </button>
             </div>
 
-            <input ref={fileRef} type="file" accept=".xml" onChange={handleImportXmlFile} className="hidden" />
+            <input ref={fileRef} type="file" accept=".xml,text/xml,application/xml" onChange={handleImportXmlFile} className="hidden" />
 
             <div className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-3">
               {/* Warm amber notice matching Screenshot 152508 */}
@@ -2079,13 +2133,13 @@ export const BotBuilderPage: React.FC = () => {
           );
         })()}
 
-        <div className="px-3 py-2 flex items-center gap-2">
+        <div className="px-3.5 py-2 flex items-center gap-0">
           {!telemetry?.running ? (
             <button
               type="button"
               disabled={submitting}
               onClick={() => handleRunBot()}
-              className="px-4 py-2.5 rounded-[4px] bg-[#2A9D8F] hover:bg-[#23867A] text-white font-bold text-[13px] flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
+              className="px-4 h-[44px] rounded-l-[5px] rounded-r-none bg-[#4bb5ad] hover:bg-[#3fa39b] text-white font-bold text-[14px] flex items-center gap-1.5 cursor-pointer shrink-0 disabled:opacity-50"
             >
               <Play className="w-3.5 h-3.5 fill-current" />
               {submitting ? 'Starting' : 'Run'}
@@ -2094,14 +2148,14 @@ export const BotBuilderPage: React.FC = () => {
             <button
               type="button"
               onClick={handleStopBot}
-              className="px-4 py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white font-bold text-[13px] flex items-center gap-1.5 cursor-pointer shrink-0"
+              className="px-4 h-[44px] rounded-l-[5px] rounded-r-none bg-[#ed4b5b] hover:bg-[#dc3c4c] text-white font-bold text-[14px] flex items-center gap-1.5 cursor-pointer shrink-0"
             >
               <Square className="w-3.5 h-3.5 fill-current" />
               Stop
             </button>
           )}
 
-          {/* Status & Progress Bar matching 210257 (Dismissible Won/Lost overlay pill) */}
+          {/* Seamless Joined Status & Progress Bar matching Screenshots 152655 & 152836 */}
           <div
             role="button"
             tabIndex={0}
@@ -2111,12 +2165,12 @@ export const BotBuilderPage: React.FC = () => {
                 setTelemetryOpen((v) => !v);
               }
             }}
-            className={`relative flex-1 h-[40px] rounded-[4px] border px-3 flex flex-col justify-center cursor-pointer overflow-hidden ${
+            className={`relative flex-1 h-[44px] rounded-r-[5px] rounded-l-none border border-l-0 px-3 flex flex-col justify-center cursor-pointer overflow-hidden ${
               showOutcomePill && runState === 'won'
                 ? 'bg-gradient-to-r from-[#2A9D8F]/5 via-[#2A9D8F]/12 to-[#2A9D8F]/5 border-[#2A9D8F]/30'
                 : showOutcomePill && runState === 'lost'
                   ? 'bg-gradient-to-r from-[#FF444F]/5 via-[#FF444F]/12 to-[#FF444F]/5 border-[#FF444F]/30'
-                  : 'bg-[#F9FAFB] dark:bg-[#111319] border-slate-200 dark:border-white/[0.08]'
+                  : 'bg-white dark:bg-[#111319] border-[#d4d6d8] dark:border-white/[0.12]'
             }`}
           >
             <div className="flex items-center justify-center gap-2 text-[13px] font-bold">
@@ -2151,42 +2205,48 @@ export const BotBuilderPage: React.FC = () => {
                   </button>
                 </>
               ) : runState === 'bought' ? (
-                <span className="text-[#111319] dark:text-white text-[12px]">Contract bought</span>
+                <span className="text-[#111319] dark:text-white text-[12.5px]">Contract bought</span>
               ) : runState === 'buying' ? (
-                <span className="text-[#111319] dark:text-white text-[12px]">Buying contract</span>
+                <span className="text-[#111319] dark:text-white text-[12.5px]">Buying contract</span>
               ) : (
-                <span className="text-[#374151] dark:text-slate-300 text-[12px]">Bot is not running</span>
+                <span className="text-[#33363a] dark:text-slate-300 text-[12.5px]">Bot is not running</span>
               )}
             </div>
 
-            {/* Progress bar + 3-node timeline track */}
-            <div className="relative w-full h-[2px] bg-slate-200 dark:bg-white/10 rounded-full mt-1.5">
+            {/* Progress track + endpoint circles */}
+            <div className="relative w-full h-[4px] bg-[#d6d8d9] dark:bg-white/10 rounded-full mt-1.5">
               <div
                 className={`h-full rounded-full transition-all duration-300 ${
-                  runState === 'bought' || (showOutcomePill && runState === 'won')
-                    ? 'bg-[#2A9D8F] w-full'
-                    : runState === 'buying'
-                      ? 'bg-[#FF444F] w-1/3'
-                      : showOutcomePill && runState === 'lost'
-                        ? 'bg-[#FF444F] w-full'
-                        : 'w-0'
+                  runState === 'bought'
+                    ? 'bg-[#80aaa8] w-1/2'
+                    : showOutcomePill && runState === 'won'
+                      ? 'bg-[#4bb5ad] w-full'
+                      : runState === 'buying'
+                        ? 'bg-[#80aaa8] w-1/4'
+                        : showOutcomePill && runState === 'lost'
+                          ? 'bg-[#ed4b5b] w-full'
+                          : 'w-0'
                 }`}
               />
               <span
-                className={`absolute left-0 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full ${
-                  telemetry?.running ? 'bg-[#FF444F]/70' : 'bg-slate-400'
+                className={`absolute left-0 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${
+                  telemetry?.running ? 'bg-[#ed4b5b]/45' : 'bg-[#9ca3af]/60'
                 }`}
               />
               <span
-                className={`absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full ${
-                  runState === 'bought' || (showOutcomePill && runState === 'won')
-                    ? 'bg-[#2A9D8F]'
-                    : 'bg-slate-400'
+                className={`absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${
+                  runState === 'bought'
+                    ? 'bg-[#ed4b5b]/45'
+                    : showOutcomePill && runState === 'won'
+                      ? 'bg-[#4bb5ad]/60'
+                      : 'bg-transparent'
                 }`}
               />
               <span
-                className={`absolute right-0 top-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full ${
-                  showOutcomePill && runState === 'won' ? 'bg-[#2A9D8F]' : 'bg-slate-400'
+                className={`absolute right-0 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${
+                  telemetry?.running || (showOutcomePill && runState === 'won')
+                    ? 'bg-[#80aaa8]/60'
+                    : 'bg-[#9ca3af]/60'
                 }`}
               />
             </div>

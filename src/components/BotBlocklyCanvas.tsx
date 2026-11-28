@@ -1,11 +1,10 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import {
-  ListChecks,
-  ShoppingBasket,
-  Flag,
   Check,
   Plus,
   Minus,
+  X,
+  RotateCcw,
 } from 'lucide-react';
 import {
   BLOCK_MARKETS,
@@ -20,6 +19,7 @@ import {
   type BotXmlWorkspaceState,
   type BlockMarketName,
   type TradeCategoryName,
+  type AddedVisualBlock,
 } from '../lib/botXml';
 import type { MarketInstrument } from '../types';
 
@@ -61,6 +61,42 @@ const OP_LABELS: Record<BotXmlWorkspaceState['ifOperator'], string> = {
   LTE: '≤',
 };
 
+const ALL_TRADE_CATEGORIES: TradeCategoryName[] = [
+  'Digits',
+  'Up/Down',
+  'Touch/No Touch',
+  'In/Out',
+  'Asians',
+  'Reset Call/Reset Put',
+  'High/Low Ticks',
+  'Only Ups/Only Downs',
+  'Multipliers',
+  'Accumulators',
+];
+
+const BLOCK_TRAY_ITEMS: Array<{
+  kind: AddedVisualBlock['kind'];
+  label: string;
+  defaultSection: AddedVisualBlock['section'];
+}> = [
+  { kind: 'if', label: 'Logic condition', defaultSection: 'purchase' },
+  { kind: 'set', label: 'Set variable', defaultSection: 'purchase' },
+  { kind: 'purchase', label: 'Purchase contract', defaultSection: 'purchase' },
+  { kind: 'notify', label: 'Notify', defaultSection: 'purchase' },
+  { kind: 'stop', label: 'Stop bot', defaultSection: 'restart' },
+];
+
+const BlockHeaderBadge: React.FC = () => (
+  <span
+    aria-hidden="true"
+    className="w-[18px] h-[20px] rounded-[2px] border-[1.5px] border-[#8fc1d2] flex flex-col justify-center gap-[2px] px-[2.5px] shrink-0"
+  >
+    <span className="block h-[1.5px] w-full bg-[#d4e8ef]" />
+    <span className="block h-[1.5px] w-full bg-[#d4e8ef]" />
+    <span className="block h-[1.5px] w-full bg-[#d4e8ef]" />
+  </span>
+);
+
 export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   state,
   onChange,
@@ -71,6 +107,16 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   const [popupMenu, setPopupMenu] = useState<ActivePopupMenu | null>(null);
   const [valuePrompt, setValuePrompt] = useState<ActiveValuePrompt | null>(null);
   const [promptInput, setPromptInput] = useState('');
+  const [selectedBlockId, setSelectedBlockId] = useState<string>('market');
+
+  // Drag offset state for repositioning block groups smoothly
+  const dragRef = useRef<{
+    groupId: string;
+    startX: number;
+    startY: number;
+    origX: number;
+    origY: number;
+  } | null>(null);
 
   useEffect(() => {
     if (!popupMenu) return;
@@ -78,6 +124,58 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     window.addEventListener('scroll', handleOutside, true);
     return () => window.removeEventListener('scroll', handleOutside, true);
   }, [popupMenu]);
+
+  useEffect(() => {
+    const onPointerMove = (e: PointerEvent) => {
+      if (!dragRef.current) return;
+      const { groupId, startX, startY, origX, origY } = dragRef.current;
+      const scale = Math.max(0.5, canvasZoom / 100);
+      const dx = (e.clientX - startX) / scale;
+      const dy = (e.clientY - startY) / scale;
+      onChange((prev) => ({
+        ...prev,
+        blockPositions: {
+          ...(prev.blockPositions || {}),
+          [groupId]: { x: Math.round(origX + dx), y: Math.round(origY + dy) },
+        },
+      }));
+    };
+    const onPointerUp = () => {
+      dragRef.current = null;
+    };
+    window.addEventListener('pointermove', onPointerMove);
+    window.addEventListener('pointerup', onPointerUp);
+    window.addEventListener('pointercancel', onPointerUp);
+    return () => {
+      window.removeEventListener('pointermove', onPointerMove);
+      window.removeEventListener('pointerup', onPointerUp);
+      window.removeEventListener('pointercancel', onPointerUp);
+    };
+  }, [canvasZoom, onChange]);
+
+  const startGroupDrag = (e: React.PointerEvent<HTMLDivElement>, groupId: string) => {
+    if ((e.target as HTMLElement).closest('button,input,select')) return;
+    e.stopPropagation();
+    const pos = state.blockPositions?.[groupId] || { x: 0, y: 0 };
+    dragRef.current = {
+      groupId,
+      startX: e.clientX,
+      startY: e.clientY,
+      origX: pos.x,
+      origY: pos.y,
+    };
+    setSelectedBlockId(groupId);
+  };
+
+  const getGroupTransform = (groupId: string): React.CSSProperties | undefined => {
+    const pos = state.blockPositions?.[groupId];
+    if (!pos || (pos.x === 0 && pos.y === 0)) return undefined;
+    return { transform: `translate(${pos.x}px, ${pos.y}px)` };
+  };
+
+  const hasCustomPositions = Boolean(
+    state.blockPositions && Object.values(state.blockPositions).some((p) => p.x !== 0 || p.y !== 0)
+  );
 
   const openDropdown = (
     e: React.MouseEvent<HTMLButtonElement>,
@@ -87,12 +185,13 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     onSelect: (v: string) => void
   ) => {
     e.stopPropagation();
+    setSelectedBlockId(id);
     const rect = e.currentTarget.getBoundingClientRect();
     const vw = typeof window !== 'undefined' ? window.innerWidth : 390;
     const vh = typeof window !== 'undefined' ? window.innerHeight : 844;
-    const menuWidth = Math.max(150, Math.min(240, rect.width + 72));
+    const menuWidth = Math.max(175, Math.min(265, rect.width + 80));
     const clampedLeft = Math.max(10, Math.min(rect.left, vw - menuWidth - 10));
-    const estHeight = Math.min(340, choices.length * 36 + 16);
+    const estHeight = Math.min(340, choices.length * 38 + 16);
     const top = rect.bottom + estHeight > vh - 70 ? Math.max(60, rect.top - estHeight - 6) : rect.bottom + 6;
     setPopupMenu({
       id,
@@ -157,18 +256,48 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   const getLegLabel = (val: string) => {
     const found = legChoices.find((l) => l.value === val);
     if (found) return found.label;
-    if (val === 'CALL') return 'Rise';
-    if (val === 'PUT') return 'Fall';
-    if (val === 'DIGITOVER') return 'Over';
-    if (val === 'DIGITUNDER') return 'Under';
-    if (val === 'DIGITMATCH') return 'Matches';
-    if (val === 'DIGITDIFF') return 'Differs';
-    if (val === 'DIGITEVEN') return 'Even';
-    if (val === 'DIGITODD') return 'Odd';
-    if (val === 'MULTUP') return 'Up';
-    if (val === 'MULTDOWN') return 'Down';
-    if (val === 'ACCU') return 'Accumulators';
+    for (const st of TRADE_SUBTYPES) {
+      const m = st.legs.find((l) => l.value === val);
+      if (m) return m.label;
+    }
     return val;
+  };
+
+  const addTrayBlock = (kind: AddedVisualBlock['kind'], section?: AddedVisualBlock['section']) => {
+    const targetSection: AddedVisualBlock['section'] =
+      section || (kind === 'stop' ? 'restart' : 'purchase');
+    const newBlock: AddedVisualBlock = {
+      id: `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+      section: targetSection,
+      kind,
+      label:
+        kind === 'if'
+          ? 'Logic condition'
+          : kind === 'set'
+            ? 'Set variable'
+            : kind === 'purchase'
+              ? 'Purchase contract'
+              : kind === 'notify'
+                ? 'Notify'
+                : 'Stop bot',
+      left: 'lossStreak',
+      op: 'LT',
+      right: 'lossThreshold',
+      value: '0',
+      contract: state.thenPurchase || 'CALL',
+    };
+    onChange((prev) => ({
+      ...prev,
+      customBlocks: [...(prev.customBlocks || []), newBlock],
+    }));
+    setSelectedBlockId(newBlock.id);
+  };
+
+  const removeCustomBlock = (id: string) => {
+    onChange((prev) => ({
+      ...prev,
+      customBlocks: (prev.customBlocks || []).filter((b) => b.id !== id),
+    }));
   };
 
   const renderPillBtn = (
@@ -181,22 +310,163 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     <button
       type="button"
       onClick={(e) => openDropdown(e, id, selectedValue, choices, onSelect)}
-      className="px-2 py-[2px] rounded-full bg-[#F7F8FA] hover:bg-white dark:bg-[#151820] border border-[#B9C0CA] dark:border-white/20 text-[11px] font-medium text-[#111319] dark:text-slate-100 inline-flex items-center gap-1 cursor-pointer leading-tight shrink-0"
+      className="px-2.5 py-[3px] rounded-full bg-white hover:bg-[#FAFAFA] dark:bg-[#151820] border border-[#c8cacc] dark:border-white/20 text-[12px] font-medium text-[#374151] dark:text-slate-100 inline-flex items-center gap-1.5 cursor-pointer leading-tight shrink-0 shadow-[0_1px_1px_rgba(0,0,0,0.04)]"
     >
-      <span className="truncate max-w-[165px]">{displayLabel}</span>
-      <span className="text-[9px] text-[#374151] dark:text-slate-400">▾</span>
+      <span className="truncate max-w-[180px]">{displayLabel}</span>
+      <span className="text-[9.5px] text-[#111319] dark:text-slate-400">▾</span>
     </button>
   );
 
   const renderValuePill = (value: string, onConfirm: (nextVal: string) => void) => (
     <button
       type="button"
-      onClick={() => openValuePrompt(value, onConfirm)}
-      className="min-w-[26px] px-2.5 py-[2px] rounded-full bg-[#F7F8FA] hover:bg-white dark:bg-[#151820] border border-[#B9C0CA] dark:border-white/20 text-[11px] font-medium text-[#111319] dark:text-slate-100 text-center cursor-pointer leading-tight shrink-0"
+      onClick={(e) => {
+        e.stopPropagation();
+        openValuePrompt(value, onConfirm);
+      }}
+      onDoubleClick={(e) => {
+        e.stopPropagation();
+        openValuePrompt(value, onConfirm);
+      }}
+      title="Tap to edit value"
+      className="min-w-[28px] px-2.5 py-[3px] rounded-full bg-white hover:bg-[#FAFAFA] dark:bg-[#151820] border border-[#c8cacc] dark:border-white/20 text-[12px] font-medium text-[#374151] dark:text-slate-100 text-center cursor-pointer leading-tight shrink-0 shadow-[0_1px_1px_rgba(0,0,0,0.04)]"
     >
       {value}
     </button>
   );
+
+  const selOutline = (blockId: string) =>
+    selectedBlockId === blockId
+      ? 'ring-[3px] ring-[#f3c54e] shadow-[0_0_0_1px_#f8e5a7] relative z-20'
+      : 'border border-[#c8cacc] dark:border-white/10';
+
+  const renderCustomBlocksForSection = (section: AddedVisualBlock['section']) => {
+    const items = (state.customBlocks || []).filter((b) => b.section === section);
+    if (items.length === 0) return null;
+    return items.map((blk) => (
+      <div
+        key={blk.id}
+        onClick={(e) => {
+          e.stopPropagation();
+          setSelectedBlockId(blk.id);
+        }}
+        className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-2.5 py-[5px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit whitespace-nowrap cursor-pointer ${selOutline(blk.id)}`}
+      >
+        {blk.kind === 'if' && (
+          <>
+            <span>If</span>
+            {renderPillBtn(
+              `cb-left-${blk.id}`,
+              blk.left || 'lossStreak',
+              blk.left || 'lossStreak',
+              BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+              (v) =>
+                onChange((prev) => ({
+                  ...prev,
+                  customBlocks: (prev.customBlocks || []).map((item) =>
+                    item.id === blk.id ? { ...item, left: v } : item
+                  ),
+                }))
+            )}
+            {renderPillBtn(
+              `cb-op-${blk.id}`,
+              OP_LABELS[blk.op || 'LT'],
+              blk.op || 'LT',
+              (Object.keys(OP_LABELS) as BotXmlWorkspaceState['ifOperator'][]).map((k) => ({
+                value: k,
+                label: OP_LABELS[k],
+              })),
+              (v) =>
+                onChange((prev) => ({
+                  ...prev,
+                  customBlocks: (prev.customBlocks || []).map((item) =>
+                    item.id === blk.id ? { ...item, op: v as any } : item
+                  ),
+                }))
+            )}
+            {renderValuePill(blk.right || 'lossThreshold', (v) =>
+              onChange((prev) => ({
+                ...prev,
+                customBlocks: (prev.customBlocks || []).map((item) =>
+                  item.id === blk.id ? { ...item, right: v } : item
+                ),
+              }))
+            )}
+          </>
+        )}
+        {blk.kind === 'set' && (
+          <>
+            <span>set</span>
+            {renderPillBtn(
+              `cb-set-${blk.id}`,
+              blk.left || 'tradeSide',
+              blk.left || 'tradeSide',
+              BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+              (v) =>
+                onChange((prev) => ({
+                  ...prev,
+                  customBlocks: (prev.customBlocks || []).map((item) =>
+                    item.id === blk.id ? { ...item, left: v } : item
+                  ),
+                }))
+            )}
+            <span>to</span>
+            {renderValuePill(blk.value || '0', (v) =>
+              onChange((prev) => ({
+                ...prev,
+                customBlocks: (prev.customBlocks || []).map((item) =>
+                  item.id === blk.id ? { ...item, value: v } : item
+                ),
+              }))
+            )}
+          </>
+        )}
+        {blk.kind === 'purchase' && (
+          <>
+            <span className="font-medium">Purchase</span>
+            {renderPillBtn(
+              `cb-pur-${blk.id}`,
+              getLegLabel(blk.contract || state.thenPurchase),
+              blk.contract || state.thenPurchase,
+              legChoices,
+              (v) =>
+                onChange((prev) => ({
+                  ...prev,
+                  customBlocks: (prev.customBlocks || []).map((item) =>
+                    item.id === blk.id ? { ...item, contract: v } : item
+                  ),
+                }))
+            )}
+          </>
+        )}
+        {blk.kind === 'notify' && (
+          <>
+            <span>Notify</span>
+            {renderValuePill(blk.value || 'Signal active', (v) =>
+              onChange((prev) => ({
+                ...prev,
+                customBlocks: (prev.customBlocks || []).map((item) =>
+                  item.id === blk.id ? { ...item, value: v } : item
+                ),
+              }))
+            )}
+          </>
+        )}
+        {blk.kind === 'stop' && <span className="font-semibold text-[#b91c1c] dark:text-[#FF444F]">Stop bot</span>}
+        <button
+          type="button"
+          onClick={(e) => {
+            e.stopPropagation();
+            removeCustomBlock(blk.id);
+          }}
+          title="Remove block"
+          className="ml-1 w-4 h-4 rounded-full bg-black/15 hover:bg-black/25 dark:bg-white/15 flex items-center justify-center cursor-pointer"
+        >
+          <X className="w-2.5 h-2.5" />
+        </button>
+      </div>
+    ));
+  };
 
   const candleLabel =
     CANDLE_INTERVALS.find((c) => c.value === state.candleInterval)?.label || '1 minute';
@@ -204,649 +474,853 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     DURATION_UNITS.find((u) => u.value === state.durationUnit)?.label || 'Ticks';
 
   return (
-    <div
-      onClick={() => setPopupMenu(null)}
-      className="relative flex-1 overflow-auto bg-white dark:bg-[#0B0E14] px-3.5 py-3.5"
-    >
-      {/* Top-Left ONLY Quick Strategy Red Button matching Screenshot 205837 */}
-      <div className="mb-5">
-        <button
-          type="button"
-          onClick={onOpenQuickStrategy}
-          className="px-4 py-[9px] rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold shadow-xs cursor-pointer"
-        >
-          Quick strategy
-        </button>
-      </div>
-
-      {/* Blockly Horizontal Workspace Canvas (Blocks 1 + 2 on Left, Block 4 on Right) */}
+    <div className="flex-1 min-h-0 flex flex-col overflow-hidden bg-white dark:bg-[#0B0E14]">
+      {/* Scrollable Dotted Blockly Workspace */}
       <div
-        className="flex flex-row items-start gap-8 pb-16 min-w-max origin-top-left transition-transform"
-        style={{ transform: `scale(${canvasZoom / 100})` }}
+        onClick={() => setPopupMenu(null)}
+        onDragOver={(e) => e.preventDefault()}
+        onDrop={(e) => {
+          const kind = e.dataTransfer.getData('text/block-kind') as AddedVisualBlock['kind'];
+          if (kind) addTrayBlock(kind);
+        }}
+        className="relative flex-1 overflow-auto bg-[radial-gradient(#e4e7e9_1px,transparent_1px)] dark:bg-[radial-gradient(#1f2634_1px,transparent_1px)] [background-size:22px_22px] px-4 py-4"
       >
-        {/* LEFT STACK: BLOCK 1 (Trade Parameters) + BLOCK 2 (Purchase Conditions) */}
-        <div className="flex flex-col gap-7 items-start pl-3">
-          {/* BLOCK 1: 1. Trade parameters */}
-          <div className="relative">
-            <div className="bg-[#0A405C] text-white rounded-tl-[4px] rounded-tr-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11.5px] font-medium w-[238px] shadow-xs">
-              <ListChecks className="w-3.5 h-3.5 text-white/90 shrink-0" />
-              <span>1. Trade parameters</span>
-            </div>
+        {/* Top-Left Quick Strategy Red Button + Optional Reset Layout */}
+        <div className="mb-6 flex items-center justify-between gap-3">
+          <button
+            type="button"
+            onClick={onOpenQuickStrategy}
+            className="px-4 py-[9px] rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold shadow-xs cursor-pointer"
+          >
+            Quick strategy
+          </button>
 
-            {/* C-Block Body */}
-            <div className="border-l-[10px] border-[#0A405C] bg-transparent">
-              {/* Top Input Parameters Stack */}
-              <div className="space-y-[2px]">
-                {/* Market: Market > Submarket > Symbol */}
-                <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1 text-[11px] text-[#111319] dark:text-slate-200 whitespace-nowrap">
-                  <span>Market:</span>
-                  {renderPillBtn(
-                    'market',
-                    state.market,
-                    state.market,
-                    BLOCK_MARKETS.map((m) => ({ value: m, label: m })),
-                    (nextMarket) => {
-                      const mkt = nextMarket as BlockMarketName;
-                      const subs = BLOCK_SUBMARKETS[mkt] || ['Continuous Indices'];
-                      const nextSub = subs[0];
-                      const nextSym =
-                        BLOCK_SYMBOLS.find((s) => s.market === mkt && s.submarket === nextSub)?.symbol ||
-                        state.symbol;
-                      onChange((prev) => ({
-                        ...prev,
-                        market: mkt,
-                        submarket: nextSub,
-                        symbol: nextSym,
-                      }));
-                    }
-                  )}
-                  <span className="text-[#4B5563]">&gt;</span>
-                  {renderPillBtn(
-                    'submarket',
-                    state.submarket,
-                    state.submarket,
-                    submarketsForMarket.map((s) => ({ value: s, label: s })),
-                    (nextSub) => {
-                      const nextSym =
-                        BLOCK_SYMBOLS.find((s) => s.market === state.market && s.submarket === nextSub)?.symbol ||
-                        state.symbol;
-                      onChange((prev) => ({
-                        ...prev,
-                        submarket: nextSub,
-                        symbol: nextSym,
-                      }));
-                    }
-                  )}
-                  <span className="text-[#4B5563]">&gt;</span>
-                  {renderPillBtn(
-                    'symbol',
-                    activeSymbolLabel,
-                    state.symbol,
-                    symbolsForSubmarket.map((s) => ({ value: s.symbol, label: s.label })),
-                    (nextSym) => onChange((prev) => ({ ...prev, symbol: nextSym }))
-                  )}
-                </div>
+          {hasCustomPositions && (
+            <button
+              type="button"
+              onClick={() => onChange((prev) => ({ ...prev, blockPositions: {} }))}
+              className="px-2.5 py-1.5 rounded-[4px] bg-white/90 dark:bg-[#151820] border border-slate-200 dark:border-white/15 text-[11px] font-semibold text-[#525866] dark:text-slate-300 inline-flex items-center gap-1 cursor-pointer"
+            >
+              <RotateCcw className="w-3 h-3" />
+              Align blocks
+            </button>
+          )}
+        </div>
 
-                {/* Trade Type: Category > Subtype */}
-                <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1 text-[11px] text-[#111319] dark:text-slate-200 w-fit whitespace-nowrap">
-                  <span>Trade Type:</span>
-                  {renderPillBtn(
-                    'tradeCat',
-                    state.tradeCategory,
-                    state.tradeCategory,
-                    (['Up/Down', 'Digits', 'Options', 'Multipliers'] as TradeCategoryName[]).map((c) => ({
-                      value: c,
-                      label: c,
-                    })),
-                    (nextCat) => {
-                      const cat = nextCat as TradeCategoryName;
-                      const subDef = resolveSubtypeDef(cat, '');
-                      onChange((prev) => ({
-                        ...prev,
-                        tradeCategory: cat,
-                        tradeSubtype: subDef.subtype,
-                        contractTypeSelection: 'Both',
-                        thenPurchase: subDef.legs[0].value,
-                        elsePurchase: subDef.legs[1]?.value || subDef.legs[0].value,
-                      }));
-                    }
-                  )}
-                  <span className="text-[#4B5563]">&gt;</span>
-                  {renderPillBtn(
-                    'tradeSub',
-                    state.tradeSubtype,
-                    state.tradeSubtype,
-                    subtypesForCategory.map((t) => ({ value: t.subtype, label: t.subtype })),
-                    (nextSub) => {
-                      const subDef = resolveSubtypeDef(state.tradeCategory, nextSub);
-                      onChange((prev) => ({
-                        ...prev,
-                        tradeSubtype: nextSub,
-                        contractTypeSelection: 'Both',
-                        thenPurchase: subDef.legs[0].value,
-                        elsePurchase: subDef.legs[1]?.value || subDef.legs[0].value,
-                      }));
-                    }
-                  )}
-                </div>
-
-                {/* Contract Type: [Both ▾] */}
-                <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit">
-                  <span>Contract Type:</span>
-                  {renderPillBtn(
-                    'contractType',
-                    state.contractTypeSelection === 'Both'
-                      ? 'Both'
-                      : getLegLabel(state.contractTypeSelection),
-                    state.contractTypeSelection,
-                    contractChoices,
-                    (nextVal) =>
-                      onChange((prev) => ({
-                        ...prev,
-                        contractTypeSelection: nextVal,
-                        thenPurchase: nextVal === 'Both' ? prev.thenPurchase : nextVal,
-                      }))
-                  )}
-                </div>
-
-                {/* Default Candle Interval */}
-                <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit">
-                  <span>Default Candle Interval:</span>
-                  {renderPillBtn(
-                    'candleInterval',
-                    candleLabel,
-                    state.candleInterval,
-                    CANDLE_INTERVALS,
-                    (v) => onChange((prev) => ({ ...prev, candleInterval: v }))
-                  )}
-                </div>
-
-                {/* Restart buy/sell on error */}
-                <div
-                  onClick={() =>
-                    onChange((prev) => ({ ...prev, restartBuySellOnError: !prev.restartBuySellOnError }))
-                  }
-                  className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-2 text-[11px] text-[#111319] dark:text-slate-200 w-fit cursor-pointer"
-                >
-                  <span>Restart buy/sell on error (disable for better performance):</span>
-                  <span className="w-[15px] h-[15px] rounded-[2px] bg-[#F7F8FA] border border-[#B9C0CA] flex items-center justify-center text-[10px] font-bold text-[#111319]">
-                    {state.restartBuySellOnError ? '✓' : ''}
-                  </span>
-                </div>
-
-                {/* Restart last trade on error */}
-                <div
-                  onClick={() =>
-                    onChange((prev) => ({
-                      ...prev,
-                      restartLastTradeOnError: !prev.restartLastTradeOnError,
-                    }))
-                  }
-                  className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-2 text-[11px] text-[#111319] dark:text-slate-200 w-fit cursor-pointer"
-                >
-                  <span>Restart last trade on error (bot ignores the unsuccessful trade):</span>
-                  <span className="w-[15px] h-[15px] rounded-[2px] bg-[#F7F8FA] border border-[#B9C0CA] flex items-center justify-center text-[10px] font-bold text-[#111319]">
-                    {state.restartLastTradeOnError ? '✓' : ''}
-                  </span>
-                </div>
+        {/* Horizontal Blockly Workspace Canvas */}
+        <div
+          className="flex flex-row items-start gap-9 pb-16 min-w-max origin-top-left transition-transform"
+          style={{ transform: `scale(${canvasZoom / 100})` }}
+        >
+          {/* LEFT STACK: BLOCK 1 (Trade parameters) + BLOCK 2 (Purchase conditions) + BLOCK 3 (Sell conditions) */}
+          <div className="flex flex-col gap-8 items-start pl-2">
+            {/* BLOCK 1: 1. Trade parameters */}
+            <div className="relative" style={getGroupTransform('group-trade-def')}>
+              <div
+                onPointerDown={(e) => startGroupDrag(e, 'group-trade-def')}
+                className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
+                  selectedBlockId === 'group-trade-def' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                }`}
+              >
+                <BlockHeaderBadge />
+                <span>1. Trade parameters</span>
+                {/* Bottom curved puzzle tab notch matching screenshot */}
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                />
               </div>
 
-              {/* Run once at start: Middle C-divider */}
-              <div className="mt-1">
-                <div className="bg-[#0A405C] text-white px-2.5 py-1.5 text-[11.5px] font-medium w-[228px]">
-                  Run once at start:
+              {/* C-Block Body */}
+              <div className="border-l-[10px] border-[#07516b] bg-transparent pt-[2px]">
+                <div className="space-y-[3px]">
+                  {/* Market: Market > Submarket > Symbol */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('market');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 whitespace-nowrap cursor-pointer ${selOutline('market')}`}
+                  >
+                    <span>Market:</span>
+                    {renderPillBtn(
+                      'market',
+                      state.market,
+                      state.market,
+                      BLOCK_MARKETS.map((m) => ({ value: m, label: m })),
+                      (nextMarket) => {
+                        const mkt = nextMarket as BlockMarketName;
+                        const subs = BLOCK_SUBMARKETS[mkt] || ['Continuous Indices'];
+                        const nextSub = subs[0];
+                        const nextSym =
+                          BLOCK_SYMBOLS.find((s) => s.market === mkt && s.submarket === nextSub)?.symbol ||
+                          state.symbol;
+                        onChange((prev) => ({
+                          ...prev,
+                          market: mkt,
+                          submarket: nextSub,
+                          symbol: nextSym,
+                        }));
+                      }
+                    )}
+                    <span className="text-[#4B5563] text-[13px]">&gt;</span>
+                    {renderPillBtn(
+                      'submarket',
+                      state.submarket,
+                      state.submarket,
+                      submarketsForMarket.map((s) => ({ value: s, label: s })),
+                      (nextSub) => {
+                        const nextSym =
+                          BLOCK_SYMBOLS.find((s) => s.market === state.market && s.submarket === nextSub)?.symbol ||
+                          state.symbol;
+                        onChange((prev) => ({
+                          ...prev,
+                          submarket: nextSub,
+                          symbol: nextSym,
+                        }));
+                      }
+                    )}
+                    <span className="text-[#4B5563] text-[13px]">&gt;</span>
+                    {renderPillBtn(
+                      'symbol',
+                      activeSymbolLabel,
+                      state.symbol,
+                      symbolsForSubmarket.map((s) => ({ value: s.symbol, label: s.label })),
+                      (nextSym) => onChange((prev) => ({ ...prev, symbol: nextSym }))
+                    )}
+                  </div>
+
+                  {/* Trade Type: Category (ALL 10 categories) > Subtype */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('tradeType');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit whitespace-nowrap cursor-pointer ${selOutline('tradeType')}`}
+                  >
+                    <span>Trade Type:</span>
+                    {renderPillBtn(
+                      'tradeCat',
+                      state.tradeCategory,
+                      state.tradeCategory,
+                      ALL_TRADE_CATEGORIES.map((c) => ({ value: c, label: c })),
+                      (nextCat) => {
+                        const cat = nextCat as TradeCategoryName;
+                        const subDef = resolveSubtypeDef(cat, '');
+                        onChange((prev) => ({
+                          ...prev,
+                          tradeCategory: cat,
+                          tradeSubtype: subDef.subtype,
+                          contractTypeSelection: subDef.isAccu ? 'ACCU' : 'Both',
+                          thenPurchase: subDef.legs[0].value,
+                          elsePurchase: subDef.legs[1]?.value || subDef.legs[0].value,
+                        }));
+                      }
+                    )}
+                    <span className="text-[#4B5563] text-[13px]">&gt;</span>
+                    {renderPillBtn(
+                      'tradeSub',
+                      state.tradeSubtype,
+                      state.tradeSubtype,
+                      subtypesForCategory.map((t) => ({ value: t.subtype, label: t.subtype })),
+                      (nextSub) => {
+                        const subDef = resolveSubtypeDef(state.tradeCategory, nextSub);
+                        onChange((prev) => ({
+                          ...prev,
+                          tradeSubtype: nextSub,
+                          contractTypeSelection: subDef.isAccu ? 'ACCU' : 'Both',
+                          thenPurchase: subDef.legs[0].value,
+                          elsePurchase: subDef.legs[1]?.value || subDef.legs[0].value,
+                        }));
+                      }
+                    )}
+                  </div>
+
+                  {/* Contract Type: [Both ▾] */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('contractType');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline('contractType')}`}
+                  >
+                    <span>Contract Type:</span>
+                    {renderPillBtn(
+                      'contractType',
+                      state.contractTypeSelection === 'Both'
+                        ? 'Both'
+                        : getLegLabel(state.contractTypeSelection),
+                      state.contractTypeSelection,
+                      contractChoices,
+                      (nextVal) =>
+                        onChange((prev) => ({
+                          ...prev,
+                          contractTypeSelection: nextVal,
+                          thenPurchase: nextVal === 'Both' ? prev.thenPurchase : nextVal,
+                        }))
+                    )}
+                  </div>
+
+                  {/* Default Candle Interval */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('candleInterval');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline('candleInterval')}`}
+                  >
+                    <span>Default Candle Interval:</span>
+                    {renderPillBtn(
+                      'candleInterval',
+                      candleLabel,
+                      state.candleInterval,
+                      CANDLE_INTERVALS,
+                      (v) => onChange((prev) => ({ ...prev, candleInterval: v }))
+                    )}
+                  </div>
+
+                  {/* Restart buy/sell on error */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('errBuySell');
+                      onChange((prev) => ({ ...prev, restartBuySellOnError: !prev.restartBuySellOnError }));
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-2 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline('errBuySell')}`}
+                  >
+                    <span>Restart buy/sell on error (disable for better performance):</span>
+                    <span className="w-[16px] h-[16px] rounded-[2px] bg-white border border-[#B9C0CA] flex items-center justify-center text-[11px] font-bold text-[#111319] shrink-0">
+                      {state.restartBuySellOnError ? '✓' : ''}
+                    </span>
+                  </div>
+
+                  {/* Restart last trade on error */}
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('errLastTrade');
+                      onChange((prev) => ({
+                        ...prev,
+                        restartLastTradeOnError: !prev.restartLastTradeOnError,
+                      }));
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-2 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline('errLastTrade')}`}
+                  >
+                    <span>Restart last trade on error (bot ignores the unsuccessful trade):</span>
+                    <span className="w-[16px] h-[16px] rounded-[2px] bg-white border border-[#B9C0CA] flex items-center justify-center text-[11px] font-bold text-[#111319] shrink-0">
+                      {state.restartLastTradeOnError ? '✓' : ''}
+                    </span>
+                  </div>
                 </div>
-                <div className="border-l-[10px] border-[#0A405C] space-y-[2px] pb-1">
-                  {state.assignments.map((row) => (
-                    <div
-                      key={row.id}
-                      className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[4px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit"
-                    >
-                      <span>set</span>
-                      {renderPillBtn(
-                        `assign-${row.id}`,
-                        row.variable,
-                        row.variable,
-                        BOT_VARIABLES.map((v) => ({ value: v, label: v })),
-                        (nextVar) =>
+
+                {/* Run once at start: Middle C-divider */}
+                <div className="mt-1.5">
+                  <div className="relative bg-[#07516b] text-white px-3 py-2 text-[12.5px] font-normal w-[248px]">
+                    <span>Run once at start:</span>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-[24px] -bottom-[7px] w-[34px] h-[9px] bg-[#07516b] rounded-b-[12px] z-10"
+                    />
+                  </div>
+                  <div className="border-l-[10px] border-[#07516b] space-y-[3px] pb-1 pt-[2px]">
+                    {state.assignments.map((row) => (
+                      <div
+                        key={row.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          setSelectedBlockId(`assign-row-${row.id}`);
+                        }}
+                        className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[5px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline(`assign-row-${row.id}`)}`}
+                      >
+                        <span>set</span>
+                        {renderPillBtn(
+                          `assign-${row.id}`,
+                          row.variable,
+                          row.variable,
+                          BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                          (nextVar) =>
+                            onChange((prev) => ({
+                              ...prev,
+                              assignments: prev.assignments.map((item) =>
+                                item.id === row.id ? { ...item, variable: nextVar } : item
+                              ),
+                            }))
+                        )}
+                        <span>to</span>
+                        {renderValuePill(row.value, (nextVal) =>
                           onChange((prev) => ({
                             ...prev,
                             assignments: prev.assignments.map((item) =>
-                              item.id === row.id ? { ...item, variable: nextVar } : item
+                              item.id === row.id ? { ...item, value: nextVal } : item
                             ),
                           }))
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Trade options: C-divider */}
+                <div>
+                  <div className="relative bg-[#07516b] text-white px-3 py-2 text-[12.5px] font-normal w-[248px]">
+                    <span>Trade options:</span>
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-[24px] -bottom-[7px] w-[34px] h-[9px] bg-[#07516b] rounded-b-[12px] z-10"
+                    />
+                  </div>
+                  <div className="border-l-[10px] border-[#07516b] pb-1 pt-[2px]">
+                    <div
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setSelectedBlockId('tradeOptions');
+                      }}
+                      className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit whitespace-nowrap cursor-pointer ${selOutline('tradeOptions')}`}
+                    >
+                      {!activeSubtypeDef.isAccu && (
+                        <>
+                          <span>Duration:</span>
+                          {renderPillBtn(
+                            'durationUnit',
+                            durationUnitLabel,
+                            state.durationUnit,
+                            DURATION_UNITS,
+                            (v) => onChange((prev) => ({ ...prev, durationUnit: v }))
+                          )}
+                          {renderValuePill(state.duration, (v) =>
+                            onChange((prev) => ({ ...prev, duration: v }))
+                          )}
+                        </>
                       )}
-                      <span>to</span>
-                      {renderValuePill(row.value, (nextVal) =>
-                        onChange((prev) => ({
-                          ...prev,
-                          assignments: prev.assignments.map((item) =>
-                            item.id === row.id ? { ...item, value: nextVal } : item
-                          ),
-                        }))
+                      <span>Stake: USD</span>
+                      {renderValuePill(
+                        state.assignments.find((a) => a.variable === 'initialStake')?.value || '1',
+                        (nextStake) =>
+                          onChange((prev) => ({
+                            ...prev,
+                            assignments: setAssignmentVal(prev.assignments, 'initialStake', nextStake),
+                          }))
+                      )}
+                      {activeSubtypeDef.usesPrediction && (
+                        <>
+                          <span>Prediction:</span>
+                          {renderValuePill(state.prediction, (v) =>
+                            onChange((prev) => ({ ...prev, prediction: v }))
+                          )}
+                        </>
+                      )}
+                      {activeSubtypeDef.isAccu && (
+                        <>
+                          <span>Growth Rate:</span>
+                          {renderPillBtn(
+                            'growthRate',
+                            `${Math.round(state.growthRate * 100)}%`,
+                            String(state.growthRate),
+                            [
+                              { value: '0.01', label: '1%' },
+                              { value: '0.02', label: '2%' },
+                              { value: '0.03', label: '3%' },
+                              { value: '0.04', label: '4%' },
+                              { value: '0.05', label: '5%' },
+                            ],
+                            (v) => onChange((prev) => ({ ...prev, growthRate: Number(v) }))
+                          )}
+                          <span>Take Profit:</span>
+                          {renderValuePill(
+                            state.accumulatorTakeProfit ||
+                              state.assignments.find((a) => a.variable === 'profitThreshold')?.value ||
+                              '5',
+                            (nextTp) =>
+                              onChange((prev) => ({
+                                ...prev,
+                                accumulatorTakeProfit: nextTp,
+                              }))
+                          )}
+                        </>
                       )}
                     </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Trade options: C-divider */}
-              <div>
-                <div className="bg-[#0A405C] text-white px-2.5 py-1.5 text-[11.5px] font-medium w-[228px]">
-                  Trade options:
-                </div>
-                <div className="border-l-[10px] border-[#0A405C] pb-1">
-                  <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit whitespace-nowrap">
-                    {!activeSubtypeDef.isAccu && (
-                      <>
-                        <span>Duration:</span>
-                        {renderPillBtn(
-                          'durationUnit',
-                          durationUnitLabel,
-                          state.durationUnit,
-                          DURATION_UNITS,
-                          (v) => onChange((prev) => ({ ...prev, durationUnit: v }))
-                        )}
-                        {renderValuePill(state.duration, (v) =>
-                          onChange((prev) => ({ ...prev, duration: v }))
-                        )}
-                      </>
-                    )}
-                    <span>Stake: USD</span>
-                    {renderValuePill(
-                      state.assignments.find((a) => a.variable === 'initialStake')?.value || '1',
-                      (nextStake) =>
-                        onChange((prev) => ({
-                          ...prev,
-                          assignments: setAssignmentVal(prev.assignments, 'initialStake', nextStake),
-                        }))
-                    )}
-                    {activeSubtypeDef.usesPrediction && (
-                      <>
-                        <span>Prediction:</span>
-                        {renderValuePill(state.prediction, (v) =>
-                          onChange((prev) => ({ ...prev, prediction: v }))
-                        )}
-                      </>
-                    )}
-                    {activeSubtypeDef.isAccu && (
-                      <>
-                        <span>Growth Rate:</span>
-                        {renderPillBtn(
-                          'growthRate',
-                          `${Math.round(state.growthRate * 100)}%`,
-                          String(state.growthRate),
-                          [
-                            { value: '0.01', label: '1%' },
-                            { value: '0.02', label: '2%' },
-                            { value: '0.03', label: '3%' },
-                            { value: '0.04', label: '4%' },
-                            { value: '0.05', label: '5%' },
-                          ],
-                          (v) => onChange((prev) => ({ ...prev, growthRate: Number(v) }))
-                        )}
-                        <span>Take Profit:</span>
-                        {renderValuePill(
-                          state.accumulatorTakeProfit ||
-                            state.assignments.find((a) => a.variable === 'profitThreshold')?.value ||
-                            '5',
-                          (nextTp) =>
-                            onChange((prev) => ({
-                              ...prev,
-                              accumulatorTakeProfit: nextTp,
-                            }))
-                        )}
-                      </>
-                    )}
                   </div>
                 </div>
               </div>
+
+              {/* Bottom C-Block Footer Cap */}
+              <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
             </div>
 
-            {/* Bottom C-Block Footer Cap */}
-            <div className="bg-[#0A405C] h-5 w-[238px] rounded-b-[4px]" />
-          </div>
+            {/* BLOCK 2: 2. Purchase conditions (with exact #D99B26 gold top highlight) */}
+            <div className="relative" style={getGroupTransform('group-before-purchase')}>
+              <div
+                onPointerDown={(e) => startGroupDrag(e, 'group-before-purchase')}
+                className={`relative bg-[#07516b] border-t-[3px] border-t-[#D99B26] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
+                  selectedBlockId === 'group-before-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                }`}
+              >
+                <BlockHeaderBadge />
+                <span>2. Purchase conditions</span>
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                />
+              </div>
 
-          {/* BLOCK 2: 2. Purchase conditions (with exact 2px #D99B26 gold top highlight) */}
-          <div className="relative">
-            <div className="bg-[#0A405C] border-t-[3px] border-t-[#D99B26] text-white rounded-tl-[4px] rounded-tr-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11.5px] font-medium w-[238px] shadow-xs">
-              <ShoppingBasket className="w-3.5 h-3.5 text-white/90 shrink-0" />
-              <span>2. Purchase conditions</span>
-            </div>
+              <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+                {/* set [msgInfo ▾] to create text with (+) */}
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBlockId('textJoin');
+                  }}
+                  className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] pl-3 pr-2.5 py-2 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline('textJoin')}`}
+                >
+                  <div className="flex items-center gap-1.5 pb-1.5">
+                    <span>set</span>
+                    {renderPillBtn(
+                      'notifyVarTop',
+                      state.notifyVar,
+                      state.notifyVar,
+                      BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                      (v) => onChange((prev) => ({ ...prev, notifyVar: v }))
+                    )}
+                    <span>to</span>
+                    <span className="font-medium">create text with</span>
+                    <button
+                      type="button"
+                      title="Add item"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onChange((prev) => ({
+                          ...prev,
+                          notifyParts: [
+                            ...prev.notifyParts,
+                            { id: `p-${Date.now()}`, kind: 'text', value: 'text' },
+                          ],
+                        }));
+                      }}
+                      className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                    >
+                      <Plus className="w-2.5 h-2.5" />
+                    </button>
+                  </div>
 
-            <div className="border-l-[10px] border-[#0A405C] space-y-[2px]">
-              {/* set [msgInfo ▾] to create text with (+) */}
-              <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] pl-2.5 pr-2 pt-1.5 pb-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit">
-                <div className="flex items-center gap-1.5 pb-1.5">
-                  <span>set</span>
+                  {/* Nested create text slots with (-) buttons */}
+                  <div className="ml-4 border-l-4 border-[#C8CCD4] dark:border-white/15 pl-2.5 space-y-1.5 py-1.5 bg-[#EAECEF] dark:bg-[#171C26] rounded-[4px] pr-2.5">
+                    {state.notifyParts.map((part) => (
+                      <div key={part.id} className="flex items-center gap-1.5">
+                        {part.kind === 'var'
+                          ? renderPillBtn(
+                              `npart-${part.id}`,
+                              part.value,
+                              part.value,
+                              BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                              (v) =>
+                                onChange((prev) => ({
+                                  ...prev,
+                                  notifyParts: prev.notifyParts.map((p) =>
+                                    p.id === part.id ? { ...p, value: v } : p
+                                  ),
+                                }))
+                            )
+                          : renderValuePill(part.value, (nextVal) =>
+                              onChange((prev) => ({
+                                ...prev,
+                                notifyParts: prev.notifyParts.map((p) =>
+                                  p.id === part.id ? { ...p, value: nextVal } : p
+                                ),
+                              }))
+                            )}
+                        <button
+                          type="button"
+                          title="Remove item"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onChange((prev) => ({
+                              ...prev,
+                              notifyParts: prev.notifyParts.filter((p) => p.id !== part.id),
+                            }));
+                          }}
+                          className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                        >
+                          <Minus className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+                {/* Notify [blue ▾] with sound: [Silent ▾] [msgInfo ▾] */}
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBlockId('notify');
+                  }}
+                  className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit whitespace-nowrap cursor-pointer ${selOutline('notify')}`}
+                >
+                  <span>Notify</span>
                   {renderPillBtn(
-                    'notifyVarTop',
+                    'notifyColor',
+                    state.notifyColor,
+                    state.notifyColor,
+                    [
+                      { value: 'blue', label: 'blue' },
+                      { value: 'green', label: 'green' },
+                      { value: 'yellow', label: 'yellow' },
+                      { value: 'red', label: 'red' },
+                    ],
+                    (v) => onChange((prev) => ({ ...prev, notifyColor: v as any }))
+                  )}
+                  <span>with sound:</span>
+                  {renderPillBtn(
+                    'notifySound',
+                    state.notifySound,
+                    state.notifySound,
+                    [
+                      { value: 'Silent', label: 'Silent' },
+                      { value: 'Announcement', label: 'Announcement' },
+                      { value: 'Earned money', label: 'Earned money' },
+                      { value: 'Job done', label: 'Job done' },
+                      { value: 'Severe error', label: 'Severe error' },
+                    ],
+                    (v) => onChange((prev) => ({ ...prev, notifySound: v as any }))
+                  )}
+                  {renderPillBtn(
+                    'notifyVar',
                     state.notifyVar,
                     state.notifyVar,
                     BOT_VARIABLES.map((v) => ({ value: v, label: v })),
                     (v) => onChange((prev) => ({ ...prev, notifyVar: v }))
                   )}
-                  <span>to</span>
-                  <span className="font-medium">create text with</span>
-                  <button
-                    type="button"
-                    title="Add item"
-                    onClick={() =>
-                      onChange((prev) => ({
-                        ...prev,
-                        notifyParts: [
-                          ...prev.notifyParts,
-                          { id: `p-${Date.now()}`, kind: 'text', value: 'text' },
-                        ],
-                      }))
-                    }
-                    className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
-                  >
-                    <Plus className="w-2.5 h-2.5" />
-                  </button>
                 </div>
 
-                {/* Nested create text slots with (-) buttons */}
-                <div className="ml-4 border-l-4 border-[#D0D4DB] dark:border-white/15 pl-2 space-y-1 py-1 bg-[#EAECEF] dark:bg-[#171C26] rounded-[3px] pr-2">
-                  {state.notifyParts.map((part) => (
-                    <div key={part.id} className="flex items-center gap-1.5">
-                      {part.kind === 'var'
-                        ? renderPillBtn(
-                            `npart-${part.id}`,
-                            part.value,
-                            part.value,
-                            BOT_VARIABLES.map((v) => ({ value: v, label: v })),
-                            (v) =>
-                              onChange((prev) => ({
-                                ...prev,
-                                notifyParts: prev.notifyParts.map((p) =>
-                                  p.id === part.id ? { ...p, value: v } : p
-                                ),
-                              }))
-                          )
-                        : renderValuePill(part.value, (nextVal) =>
-                            onChange((prev) => ({
-                              ...prev,
-                              notifyParts: prev.notifyParts.map((p) =>
-                                p.id === part.id ? { ...p, value: nextVal } : p
-                              ),
-                            }))
-                          )}
-                      <button
-                        type="button"
-                        title="Remove item"
-                        onClick={() =>
-                          onChange((prev) => ({
-                            ...prev,
-                            notifyParts: prev.notifyParts.filter((p) => p.id !== part.id),
-                          }))
-                        }
-                        className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
-                      >
-                        <Minus className="w-2.5 h-2.5" />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Notify [blue ▾] with sound: [Silent ▾] [msgInfo ▾] */}
-              <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit whitespace-nowrap">
-                <span>Notify</span>
-                {renderPillBtn(
-                  'notifyColor',
-                  state.notifyColor,
-                  state.notifyColor,
-                  [
-                    { value: 'blue', label: 'blue' },
-                    { value: 'green', label: 'green' },
-                    { value: 'yellow', label: 'yellow' },
-                    { value: 'red', label: 'red' },
-                  ],
-                  (v) => onChange((prev) => ({ ...prev, notifyColor: v as any }))
-                )}
-                <span>with sound:</span>
-                {renderPillBtn(
-                  'notifySound',
-                  state.notifySound,
-                  state.notifySound,
-                  [
-                    { value: 'Silent', label: 'Silent' },
-                    { value: 'Announcement', label: 'Announcement' },
-                    { value: 'Earned money', label: 'Earned money' },
-                    { value: 'Job done', label: 'Job done' },
-                    { value: 'Severe error', label: 'Severe error' },
-                  ],
-                  (v) => onChange((prev) => ({ ...prev, notifySound: v as any }))
-                )}
-                {renderPillBtn(
-                  'notifyVar',
-                  state.notifyVar,
-                  state.notifyVar,
-                  BOT_VARIABLES.map((v) => ({ value: v, label: v })),
-                  (v) => onChange((prev) => ({ ...prev, notifyVar: v }))
-                )}
-              </div>
-
-              {/* if [tradeSide ▾] [= ▾] (CALL) then Purchase [Rise ▾] else Purchase [Fall ▾] */}
-              <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] text-[11px] text-[#111319] dark:text-slate-200 w-fit space-y-1.5">
-                <div className="flex items-center gap-1.5 whitespace-nowrap">
-                  <span>if</span>
-                  {renderPillBtn(
-                    'ifLeftVar',
-                    state.ifLeftVar,
-                    state.ifLeftVar,
-                    BOT_VARIABLES.map((v) => ({ value: v, label: v })),
-                    (v) => onChange((prev) => ({ ...prev, ifLeftVar: v }))
-                  )}
-                  {renderPillBtn(
-                    'ifOp',
-                    OP_LABELS[state.ifOperator],
-                    state.ifOperator,
-                    (Object.keys(OP_LABELS) as BotXmlWorkspaceState['ifOperator'][]).map((k) => ({
-                      value: k,
-                      label: OP_LABELS[k],
-                    })),
-                    (v) => onChange((prev) => ({ ...prev, ifOperator: v as any }))
-                  )}
-                  {renderValuePill(state.ifCompareValue, (nextVal) =>
-                    onChange((prev) => ({ ...prev, ifCompareValue: nextVal }))
-                  )}
-                  <span>then</span>
-                </div>
-
-                {/* then Purchase slot */}
-                <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                  <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[3px] px-2.5 py-1 flex items-center gap-1.5 w-fit">
-                    <span>Purchase</span>
-                    {renderPillBtn(
-                      'thenPurchase',
-                      getLegLabel(state.thenPurchase),
-                      state.thenPurchase,
-                      legChoices,
-                      (v) => onChange((prev) => ({ ...prev, thenPurchase: v }))
-                    )}
-                  </div>
-                </div>
-
-                {state.elseEnabled ? (
-                  <>
-                    <div className="flex items-center gap-1.5 pt-0.5">
-                      <span>else</span>
-                      <button
-                        type="button"
-                        title="Remove else"
-                        onClick={() => onChange((prev) => ({ ...prev, elseEnabled: false }))}
-                        className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
-                      >
-                        <Minus className="w-2.5 h-2.5" />
-                      </button>
-                    </div>
-                    <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                      <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[3px] px-2.5 py-1 flex items-center gap-1.5 w-fit">
-                        <span>Purchase</span>
-                        {renderPillBtn(
-                          'elsePurchase',
-                          getLegLabel(state.elsePurchase),
-                          state.elsePurchase,
-                          legChoices,
-                          (v) => onChange((prev) => ({ ...prev, elsePurchase: v }))
-                        )}
-                      </div>
-                    </div>
-                  </>
-                ) : (
-                  <button
-                    type="button"
-                    title="Add else branch"
-                    onClick={() => onChange((prev) => ({ ...prev, elseEnabled: true }))}
-                    className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
-                  >
-                    <Plus className="w-2.5 h-2.5" />
-                  </button>
-                )}
-              </div>
-            </div>
-
-            <div className="bg-[#0A405C] h-5 w-[238px] rounded-b-[4px]" />
-          </div>
-
-          {/* BLOCK 3: 3. Sell conditions (during_purchase) when active or Accumulators */}
-          {(state.hasSellConditions || activeSubtypeDef.isAccu) && (
-            <div className="relative">
-              <div className="bg-[#0A405C] border-t-[3px] border-t-[#D99B26] text-white rounded-tl-[4px] rounded-tr-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11.5px] font-medium w-[238px] shadow-xs">
-                <ShoppingBasket className="w-3.5 h-3.5 text-white/90 shrink-0" />
-                <span>3. Sell conditions</span>
-              </div>
-              <div className="border-l-[10px] border-[#0A405C] space-y-[2px]">
-                <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] text-[11px] text-[#111319] dark:text-slate-200 w-fit space-y-1.5">
+                {/* if [tradeSide ▾] [= ▾] (CALL) then Purchase [Rise ▾] else Purchase [Fall ▾] */}
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBlockId('ifPurchase');
+                  }}
+                  className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('ifPurchase')}`}
+                >
                   <div className="flex items-center gap-1.5 whitespace-nowrap">
                     <span>if</span>
-                    <span className="px-2 py-[2px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15">
-                      Sell is available
-                    </span>
-                    <span>&amp;</span>
                     {renderPillBtn(
-                      'sellMode',
-                      state.sellByCountdown ? 'Count Down' : 'Take Profit',
-                      state.sellByCountdown ? 'countdown' : 'tp',
-                      [
-                        { value: 'tp', label: 'Take Profit' },
-                        { value: 'countdown', label: 'Count Down' },
-                      ],
-                      (v) => onChange((prev) => ({ ...prev, sellByCountdown: v === 'countdown' }))
+                      'ifLeftVar',
+                      state.ifLeftVar,
+                      state.ifLeftVar,
+                      BOT_VARIABLES.map((v) => ({ value: v, label: v })),
+                      (v) => onChange((prev) => ({ ...prev, ifLeftVar: v }))
                     )}
-                    {state.sellByCountdown && (
-                      <>
-                        <span>Tick Count &gt;</span>
-                        {renderValuePill(state.sellTickCount || '0', (nextTicks) =>
-                          onChange((prev) => ({ ...prev, sellTickCount: nextTicks }))
-                        )}
-                      </>
+                    {renderPillBtn(
+                      'ifOp',
+                      OP_LABELS[state.ifOperator],
+                      state.ifOperator,
+                      (Object.keys(OP_LABELS) as BotXmlWorkspaceState['ifOperator'][]).map((k) => ({
+                        value: k,
+                        label: OP_LABELS[k],
+                      })),
+                      (v) => onChange((prev) => ({ ...prev, ifOperator: v as any }))
+                    )}
+                    {renderValuePill(state.ifCompareValue, (nextVal) =>
+                      onChange((prev) => ({ ...prev, ifCompareValue: nextVal }))
                     )}
                     <span>then</span>
                   </div>
+
+                  {/* then Purchase slot */}
                   <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                    <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[3px] px-2.5 py-1 w-fit font-medium">
-                      Sell at market
+                    <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#e5b735] rounded-[4px] px-2.5 py-1.5 flex items-center gap-1.5 w-fit">
+                      <span className="font-medium">Purchase</span>
+                      {renderPillBtn(
+                        'thenPurchase',
+                        getLegLabel(state.thenPurchase),
+                        state.thenPurchase,
+                        legChoices,
+                        (v) => onChange((prev) => ({ ...prev, thenPurchase: v }))
+                      )}
                     </div>
                   </div>
-                </div>
-              </div>
-              <div className="bg-[#0A405C] h-5 w-[238px] rounded-b-[4px]" />
-            </div>
-          )}
-        </div>
 
-        {/* RIGHT STACK: BLOCK 4 (4. Restart trading conditions - matches Screenshot 210134) */}
-        <div className="relative pt-3">
-          <div className="bg-[#0A405C] text-white rounded-tl-[4px] rounded-tr-[4px] px-2.5 py-1.5 flex items-center gap-2 text-[11.5px] font-medium w-[238px] shadow-xs">
-            <Flag className="w-3.5 h-3.5 text-white/90 shrink-0" />
-            <span>4. Restart trading conditions</span>
-          </div>
-
-          <div className="border-l-[10px] border-[#0A405C] space-y-[2px]">
-            {/* Update Stake And Side On Result with: resultIsWin (Result is [Win ▾]) */}
-            <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] flex items-center gap-1.5 text-[11px] text-[#111319] dark:text-slate-200 w-fit whitespace-nowrap">
-              <span>{state.updateProcedureName || 'Update Stake And Side On Result with: resultIsWin'}</span>
-              <span className="px-2 py-[2px] rounded-full bg-[#EAECEF] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15 inline-flex items-center gap-1">
-                <span>Result is</span>
-                {renderPillBtn(
-                  'restartResult',
-                  state.restartResultCheck === 'win' ? 'Win' : 'Loss',
-                  state.restartResultCheck,
-                  [
-                    { value: 'win', label: 'Win' },
-                    { value: 'loss', label: 'Loss' },
-                  ],
-                  (v) => onChange((prev) => ({ ...prev, restartResultCheck: v as 'win' | 'loss' }))
-                )}
-              </span>
-            </div>
-
-            {/* if (Evaluate Profit And Loss Limits with: lastProfit Contract Details: [profit ▾]) then */}
-            <div className="bg-[#E2E4E8] dark:bg-[#1E2532] border border-[#C6CBD2] dark:border-white/10 rounded-r-[3px] px-2.5 py-[5px] text-[11px] text-[#111319] dark:text-slate-200 w-fit space-y-1.5">
-              <div className="flex items-center gap-1.5 whitespace-nowrap">
-                <span>if</span>
-                <span className="px-2.5 py-[2px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15 inline-flex items-center gap-1">
-                  <span>Evaluate Profit And Loss Limits with: lastProfit Contract Details:</span>
-                  {renderPillBtn(
-                    'restartDetail',
-                    state.restartDetailField,
-                    state.restartDetailField,
-                    [
-                      { value: 'profit', label: 'profit' },
-                      { value: 'payout', label: 'payout' },
-                      { value: 'buy_price', label: 'buy_price' },
-                    ],
-                    (v) => onChange((prev) => ({ ...prev, restartDetailField: v as any }))
-                  )}
-                </span>
-                <span>then</span>
-              </div>
-
-              <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[3px] px-2.5 py-1 w-fit font-medium">
-                  Trade again
-                </div>
-              </div>
-
-              {state.restartElseEnabled ? (
-                <>
-                  <div className="flex items-center gap-1.5">
-                    <span>else</span>
+                  {state.elseEnabled ? (
+                    <>
+                      <div className="flex items-center gap-1.5 pt-0.5">
+                        <span>else</span>
+                        <button
+                          type="button"
+                          title="Remove else"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onChange((prev) => ({ ...prev, elseEnabled: false }));
+                          }}
+                          className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                        >
+                          <Minus className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                      <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                        <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 flex items-center gap-1.5 w-fit">
+                          <span className="font-medium">Purchase</span>
+                          {renderPillBtn(
+                            'elsePurchase',
+                            getLegLabel(state.elsePurchase),
+                            state.elsePurchase,
+                            legChoices,
+                            (v) => onChange((prev) => ({ ...prev, elsePurchase: v }))
+                          )}
+                        </div>
+                      </div>
+                    </>
+                  ) : (
                     <button
                       type="button"
-                      onClick={() => onChange((prev) => ({ ...prev, restartElseEnabled: false }))}
+                      title="Add else branch"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onChange((prev) => ({ ...prev, elseEnabled: true }));
+                      }}
                       className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
                     >
-                      <Minus className="w-2.5 h-2.5" />
+                      <Plus className="w-2.5 h-2.5" />
                     </button>
-                  </div>
-                  <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                    <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[3px] px-2.5 py-1 w-fit font-medium text-[#6B7280]">
-                      Stop trading
+                  )}
+                </div>
+
+                {renderCustomBlocksForSection('purchase')}
+              </div>
+
+              <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+            </div>
+
+            {/* BLOCK 3: 3. Sell conditions (during_purchase) */}
+            {(state.hasSellConditions || activeSubtypeDef.isAccu) && (
+              <div className="relative" style={getGroupTransform('group-during-purchase')}>
+                <div
+                  onPointerDown={(e) => startGroupDrag(e, 'group-during-purchase')}
+                  className={`relative bg-[#07516b] border-t-[3px] border-t-[#D99B26] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
+                    selectedBlockId === 'group-during-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                  }`}
+                >
+                  <BlockHeaderBadge />
+                  <span>3. Sell conditions</span>
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                  />
+                </div>
+                <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+                  <div
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      setSelectedBlockId('sellCond');
+                    }}
+                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('sellCond')}`}
+                  >
+                    <div className="flex items-center gap-1.5 whitespace-nowrap">
+                      <span>if</span>
+                      <span className="px-2.5 py-[3px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15">
+                        Sell is available
+                      </span>
+                      <span>&amp;</span>
+                      {renderPillBtn(
+                        'sellMode',
+                        state.sellByCountdown ? 'Count Down' : 'Take Profit',
+                        state.sellByCountdown ? 'countdown' : 'tp',
+                        [
+                          { value: 'tp', label: 'Take Profit' },
+                          { value: 'countdown', label: 'Count Down' },
+                        ],
+                        (v) => onChange((prev) => ({ ...prev, sellByCountdown: v === 'countdown' }))
+                      )}
+                      {state.sellByCountdown && (
+                        <>
+                          <span>Tick Count &gt;</span>
+                          {renderValuePill(state.sellTickCount || '0', (nextTicks) =>
+                            onChange((prev) => ({ ...prev, sellTickCount: nextTicks }))
+                          )}
+                        </>
+                      )}
+                      <span>then</span>
+                    </div>
+                    <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                      <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 w-fit font-medium">
+                        Sell at market
+                      </div>
                     </div>
                   </div>
-                </>
-              ) : (
-                <button
-                  type="button"
-                  title="Toggle else"
-                  onClick={() => onChange((prev) => ({ ...prev, restartElseEnabled: true }))}
-                  className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
-                >
-                  <Plus className="w-2.5 h-2.5" />
-                </button>
-              )}
-            </div>
+                </div>
+                <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+              </div>
+            )}
           </div>
 
-          <div className="bg-[#0A405C] h-5 w-[238px] rounded-b-[4px]" />
+          {/* RIGHT STACK: BLOCK 4 (4. Restart trading conditions) + Any Parsed XML Procedure Cards */}
+          <div className="flex flex-col gap-7 items-start pt-3">
+            <div className="relative" style={getGroupTransform('group-after-purchase')}>
+              <div
+                onPointerDown={(e) => startGroupDrag(e, 'group-after-purchase')}
+                className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
+                  selectedBlockId === 'group-after-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                }`}
+              >
+                <BlockHeaderBadge />
+                <span>4. Restart trading conditions</span>
+                <span
+                  aria-hidden="true"
+                  className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                />
+              </div>
+
+              <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+                {/* Update Stake And Side On Result with: resultIsWin (Result is [Win ▾]) */}
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBlockId('restartUpdate');
+                  }}
+                  className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit whitespace-nowrap cursor-pointer ${selOutline('restartUpdate')}`}
+                >
+                  <span>{state.updateProcedureName || 'Update Stake And Side On Result with: resultIsWin'}</span>
+                  <span className="px-2 py-[2px] rounded-full bg-[#EAECEF] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15 inline-flex items-center gap-1">
+                    <span>Result is</span>
+                    {renderPillBtn(
+                      'restartResult',
+                      state.restartResultCheck === 'win' ? 'Win' : 'Loss',
+                      state.restartResultCheck,
+                      [
+                        { value: 'win', label: 'Win' },
+                        { value: 'loss', label: 'Loss' },
+                      ],
+                      (v) => onChange((prev) => ({ ...prev, restartResultCheck: v as 'win' | 'loss' }))
+                    )}
+                  </span>
+                </div>
+
+                {/* if (Evaluate Profit And Loss Limits with: lastProfit Contract Details: [profit ▾]) then */}
+                <div
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setSelectedBlockId('restartIf');
+                  }}
+                  className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('restartIf')}`}
+                >
+                  <div className="flex items-center gap-1.5 whitespace-nowrap">
+                    <span>if</span>
+                    <span className="px-2.5 py-[3px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15 inline-flex items-center gap-1">
+                      <span>Evaluate Profit And Loss Limits with: lastProfit Contract Details:</span>
+                      {renderPillBtn(
+                        'restartDetail',
+                        state.restartDetailField,
+                        state.restartDetailField,
+                        [
+                          { value: 'profit', label: 'profit' },
+                          { value: 'payout', label: 'payout' },
+                          { value: 'buy_price', label: 'buy_price' },
+                        ],
+                        (v) => onChange((prev) => ({ ...prev, restartDetailField: v as any }))
+                      )}
+                    </span>
+                    <span>then</span>
+                  </div>
+
+                  <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                    <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 w-fit font-medium">
+                      Trade again
+                    </div>
+                  </div>
+
+                  {state.restartElseEnabled ? (
+                    <>
+                      <div className="flex items-center gap-1.5">
+                        <span>else</span>
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onChange((prev) => ({ ...prev, restartElseEnabled: false }));
+                          }}
+                          className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                        >
+                          <Minus className="w-2.5 h-2.5" />
+                        </button>
+                      </div>
+                      <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                        <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 w-fit font-medium text-[#6B7280]">
+                          Stop trading
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <button
+                      type="button"
+                      title="Toggle else"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onChange((prev) => ({ ...prev, restartElseEnabled: true }));
+                      }}
+                      className="w-4 h-4 rounded-full bg-[#111319] text-white flex items-center justify-center cursor-pointer"
+                    >
+                      <Plus className="w-2.5 h-2.5" />
+                    </button>
+                  )}
+                </div>
+
+                {renderCustomBlocksForSection('restart')}
+              </div>
+
+              <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+            </div>
+
+            {/* Render Imported Procedure / Function Groups from uploaded DBot XMLs */}
+            {(state.importedGroups || []).map((grp) => (
+              <div
+                key={grp.id}
+                style={getGroupTransform(`proc-${grp.id}`)}
+                className="relative"
+              >
+                <div
+                  onPointerDown={(e) => startGroupDrag(e, `proc-${grp.id}`)}
+                  className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[12.5px] font-normal min-w-[258px] max-w-[360px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
+                    selectedBlockId === `proc-${grp.id}` ? 'ring-[3px] ring-[#f3c54e]' : ''
+                  }`}
+                >
+                  <BlockHeaderBadge />
+                  <span className="truncate">{grp.title}</span>
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                  />
+                </div>
+                <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+                  {grp.lines.map((line, i) => (
+                    <div
+                      key={`${grp.id}-${i}`}
+                      className="bg-[#e2e3e5] dark:bg-[#1E2532] border border-[#c8cacc] dark:border-white/10 rounded-r-[4px] px-3 py-[5px] text-[11.5px] text-[#374151] dark:text-slate-200 max-w-[340px] truncate"
+                    >
+                      {line}
+                    </div>
+                  ))}
+                </div>
+                <div className="bg-[#07516b] h-4 w-[258px] rounded-b-[6px]" />
+              </div>
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* BLOCKLY FLAT GREY #DCDCDC POPUP DROPDOWN MENU (Matches Screenshots 210512 & 210527) */}
+      {/* Bottom Interactive Block Tray matching .dragbank in deriv_bot_visual_replica_editable_xml_upgraded.html */}
+      <div className="shrink-0 bg-[#f6f7f8] dark:bg-[#151820] border-t border-[#e5e7eb] dark:border-white/[0.08] px-3 py-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
+        {BLOCK_TRAY_ITEMS.map((item) => (
+          <button
+            key={item.kind}
+            type="button"
+            draggable
+            onDragStart={(e) => e.dataTransfer.setData('text/block-kind', item.kind)}
+            onClick={() => addTrayBlock(item.kind, item.defaultSection)}
+            className="px-3 py-1.5 rounded-[5px] bg-[#07516b] hover:bg-[#096281] text-white text-[12px] font-normal whitespace-nowrap shrink-0 cursor-grab active:cursor-grabbing shadow-xs"
+          >
+            + {item.label}
+          </button>
+        ))}
+      </div>
+
+      {/* BLOCKLY FLAT #e6e6e6 POPUP DROPDOWN MENU (Matches Screenshot 210512 (1)) */}
       {popupMenu && (
         <div
           onClick={(e) => e.stopPropagation()}
@@ -856,7 +1330,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
             left: popupMenu.left,
             minWidth: popupMenu.width,
           }}
-          className="z-[90] bg-[#DCDCDC] dark:bg-[#2A2F3D] border border-[#C2C6CC] dark:border-white/15 rounded-[2px] shadow-[0_6px_18px_rgba(0,0,0,0.22)] py-1 max-h-[340px] overflow-y-auto"
+          className="z-[90] bg-[#e6e6e6] dark:bg-[#2A2F3D] border border-[#c2c6cc] dark:border-white/15 rounded-[2px] shadow-[0_6px_18px_rgba(0,0,0,0.22)] py-1 max-h-[340px] overflow-y-auto"
         >
           {popupMenu.choices.map((choice, idx) => {
             const active = choice.value === popupMenu.selectedValue;
@@ -868,14 +1342,14 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                   popupMenu.onSelect(choice.value);
                   setPopupMenu(null);
                 }}
-                className={`w-full px-3 py-1.5 flex items-center gap-2 text-left text-[13.5px] font-medium cursor-pointer transition-colors ${
+                className={`w-full px-3 py-2 flex items-center gap-2.5 text-left text-[13.5px] font-bold cursor-pointer transition-colors ${
                   active
-                    ? 'bg-[#CECECE] dark:bg-white/15 text-[#111319] dark:text-white'
-                    : 'text-[#111319] dark:text-slate-100 hover:bg-[#D2D2D2] dark:hover:bg-white/10'
+                    ? 'bg-[#d0d0d0] dark:bg-white/15 text-[#111111] dark:text-white'
+                    : 'text-[#111111] dark:text-slate-100 hover:bg-[#dadada] dark:hover:bg-white/10'
                 }`}
               >
                 <span className="w-4 flex items-center justify-center shrink-0">
-                  {active && <Check className="w-3.5 h-3.5 text-[#111319] dark:text-white" strokeWidth={2.5} />}
+                  {active && <Check className="w-4 h-4 text-[#111111] dark:text-white" strokeWidth={2.5} />}
                 </span>
                 <span className="truncate">{choice.label}</span>
               </button>
@@ -884,7 +1358,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
         </div>
       )}
 
-      {/* CENTERED "Change value:" PROMPT MODAL (Matches Screenshot 210517) */}
+      {/* CENTERED "Change value:" PROMPT MODAL */}
       {valuePrompt && (
         <div
           onClick={() => setValuePrompt(null)}

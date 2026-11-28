@@ -143,14 +143,30 @@ function getLastDigit(price: number, pipSize = 0.01): number {
 
 function flipBotTradeSide(side: string): string {
   const s = String(side || '').toUpperCase();
-  if (s === 'CALL' || s === 'RISE') return 'PUT';
-  if (s === 'PUT' || s === 'FALL') return 'CALL';
+  if (s === 'CALL' || s === 'RISE' || s === 'CALLE') return 'PUT';
+  if (s === 'PUT' || s === 'FALL' || s === 'PUTE') return 'CALL';
+  if (s === 'HIGHER') return 'LOWER';
+  if (s === 'LOWER') return 'HIGHER';
   if (s === 'DIGITOVER' || s === 'OVER') return 'DIGITUNDER';
   if (s === 'DIGITUNDER' || s === 'UNDER') return 'DIGITOVER';
   if (s === 'DIGITEVEN' || s === 'EVEN') return 'DIGITODD';
   if (s === 'DIGITODD' || s === 'ODD') return 'DIGITEVEN';
   if (s === 'DIGITMATCH' || s === 'MATCH') return 'DIGITDIFF';
   if (s === 'DIGITDIFF' || s === 'DIFF') return 'DIGITMATCH';
+  if (s === 'ONETOUCH' || s === 'TOUCH') return 'NOTOUCH';
+  if (s === 'NOTOUCH') return 'ONETOUCH';
+  if (s === 'EXPIRYRANGE') return 'EXPIRYMISS';
+  if (s === 'EXPIRYMISS') return 'EXPIRYRANGE';
+  if (s === 'ENDSIN') return 'ENDSOUT';
+  if (s === 'ENDSOUT') return 'ENDSIN';
+  if (s === 'ASIANU') return 'ASIAND';
+  if (s === 'ASIAND') return 'ASIANU';
+  if (s === 'RESETCALL') return 'RESETPUT';
+  if (s === 'RESETPUT') return 'RESETCALL';
+  if (s === 'TICKHIGH') return 'TICKLOW';
+  if (s === 'TICKLOW') return 'TICKHIGH';
+  if (s === 'RUNHIGH') return 'RUNLOW';
+  if (s === 'RUNLOW') return 'RUNHIGH';
   if (s === 'MULTUP' || s === 'BUY') return 'MULTDOWN';
   if (s === 'MULTDOWN' || s === 'SELL') return 'MULTUP';
   return s;
@@ -322,6 +338,30 @@ function decideBotSide(session: InternalBotSession, latestPrice: number, pipSize
       side: ct,
       barrier: session.barrier || (ct === 'HIGHER' ? '+0.50' : '-0.50'),
       reason: `Block barrier ${ct} @ ${latestPrice.toFixed(2)}`,
+    };
+  }
+  if (ct === 'ONETOUCH' || ct === 'NOTOUCH') {
+    return {
+      contractType: ct,
+      side: ct,
+      barrier: session.barrier || '+0.50',
+      reason: `Touch barrier ${ct} @ ${latestPrice.toFixed(2)}`,
+    };
+  }
+  if (ct === 'EXPIRYRANGE' || ct === 'EXPIRYMISS' || ct === 'ENDSIN' || ct === 'ENDSOUT') {
+    return {
+      contractType: ct,
+      side: ct,
+      barrier: session.barrier || '+0.50',
+      reason: `Range ${ct} @ ${latestPrice.toFixed(2)}`,
+    };
+  }
+  if (ct === 'ASIANU' || ct === 'ASIAND' || ct === 'RESETCALL' || ct === 'RESETPUT' || ct === 'TICKHIGH' || ct === 'TICKLOW' || ct === 'RUNHIGH' || ct === 'RUNLOW') {
+    return {
+      contractType: ct,
+      side: ct,
+      barrier: '',
+      reason: `Block strategy ${ct} @ ${latestPrice.toFixed(2)}`,
     };
   }
   if (ct === 'MULTUP' || ct === 'MULTDOWN') {

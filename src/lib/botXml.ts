@@ -1,7 +1,7 @@
 export type BlockMarketName =
   | 'Derived'
   | 'Forex'
-  | 'Stock Indices'
+  | 'Stocks'
   | 'Commodities'
   | 'Cryptocurrencies';
 
@@ -15,7 +15,7 @@ export interface SymbolCatalogItem {
 export const BLOCK_MARKETS: BlockMarketName[] = [
   'Derived',
   'Forex',
-  'Stock Indices',
+  'Stocks',
   'Commodities',
   'Cryptocurrencies',
 ];
@@ -31,10 +31,10 @@ export const BLOCK_SUBMARKETS: Record<BlockMarketName, string[]> = {
     'Commodities Basket',
     'Step Indices',
   ],
-  Forex: ['Major Pairs', 'Minor Pairs'],
-  'Stock Indices': ['American Indices', 'European Indices', 'Asian Indices'],
-  Commodities: ['Metals', 'Energy'],
-  Cryptocurrencies: ['Cryptocurrencies'],
+  Forex: ['Forex Major Pairs', 'Forex Minor Pairs', 'Forex Exotic Pairs'],
+  Stocks: ['US Stocks', 'UK Stocks', 'European Stocks', 'Stock Indices'],
+  Commodities: ['Metals', 'Energy', 'Soft Commodities'],
+  Cryptocurrencies: ['Crypto'],
 };
 
 export const BLOCK_SYMBOLS: SymbolCatalogItem[] = [
@@ -45,18 +45,24 @@ export const BLOCK_SYMBOLS: SymbolCatalogItem[] = [
   { symbol: '1HZ25V', label: 'Volatility 25 (1s) Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: '1HZ10V', label: 'Volatility 10 (1s) Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: '1HZ15V', label: 'Volatility 15 (1s) Index', market: 'Derived', submarket: 'Continuous Indices' },
+  { symbol: '1HZ150V', label: 'Volatility 150 (1s) Index', market: 'Derived', submarket: 'Continuous Indices' },
+  { symbol: '1HZ250V', label: 'Volatility 250 (1s) Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: 'R_100', label: 'Volatility 100 Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: 'R_75', label: 'Volatility 75 Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: 'R_50', label: 'Volatility 50 Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: 'R_25', label: 'Volatility 25 Index', market: 'Derived', submarket: 'Continuous Indices' },
   { symbol: 'R_10', label: 'Volatility 10 Index', market: 'Derived', submarket: 'Continuous Indices' },
   // Crash/Boom Indices
-  { symbol: 'BOOM1000', label: 'Boom 1000 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
-  { symbol: 'BOOM500', label: 'Boom 500 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
-  { symbol: 'BOOM300N', label: 'Boom 300 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
-  { symbol: 'CRASH1000', label: 'Crash 1000 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
-  { symbol: 'CRASH500', label: 'Crash 500 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
   { symbol: 'CRASH300N', label: 'Crash 300 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'CRASH500', label: 'Crash 500 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'CRASH600', label: 'Crash 600 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'CRASH900', label: 'Crash 900 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'CRASH1000', label: 'Crash 1000 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'BOOM300N', label: 'Boom 300 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'BOOM500', label: 'Boom 500 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'BOOM600', label: 'Boom 600 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'BOOM900', label: 'Boom 900 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
+  { symbol: 'BOOM1000', label: 'Boom 1000 Index', market: 'Derived', submarket: 'Crash/Boom Indices' },
   // Jump Indices
   { symbol: 'JD10', label: 'Jump 10 Index', market: 'Derived', submarket: 'Jump Indices' },
   { symbol: 'JD25', label: 'Jump 25 Index', market: 'Derived', submarket: 'Jump Indices' },
@@ -64,41 +70,89 @@ export const BLOCK_SYMBOLS: SymbolCatalogItem[] = [
   { symbol: 'JD75', label: 'Jump 75 Index', market: 'Derived', submarket: 'Jump Indices' },
   { symbol: 'JD100', label: 'Jump 100 Index', market: 'Derived', submarket: 'Jump Indices' },
   // Range Break Indices
-  { symbol: 'RDBULL', label: 'Bull Market Index', market: 'Derived', submarket: 'Range Break Indices' },
-  { symbol: 'RDBEAR', label: 'Bear Market Index', market: 'Derived', submarket: 'Range Break Indices' },
+  { symbol: 'RB100', label: 'Range Break 100 Index', market: 'Derived', submarket: 'Range Break Indices' },
+  { symbol: 'RB200', label: 'Range Break 200 Index', market: 'Derived', submarket: 'Range Break Indices' },
   // Daily Reset Indices
-  { symbol: 'RDBULL', label: 'Bull Market Reset Index', market: 'Derived', submarket: 'Daily Reset Indices' },
-  { symbol: 'RDBEAR', label: 'Bear Market Reset Index', market: 'Derived', submarket: 'Daily Reset Indices' },
-  // Forex Basket & Commodities Basket
+  { symbol: 'RDBULL', label: 'Bull Market Index', market: 'Derived', submarket: 'Daily Reset Indices' },
+  { symbol: 'RDBEAR', label: 'Bear Market Index', market: 'Derived', submarket: 'Daily Reset Indices' },
+  // Forex Basket
   { symbol: 'WLDAUD', label: 'AUD Basket', market: 'Derived', submarket: 'Forex Basket' },
   { symbol: 'WLDEUR', label: 'EUR Basket', market: 'Derived', submarket: 'Forex Basket' },
   { symbol: 'WLDGBP', label: 'GBP Basket', market: 'Derived', submarket: 'Forex Basket' },
   { symbol: 'WLDUSD', label: 'USD Basket', market: 'Derived', submarket: 'Forex Basket' },
+  // Commodities Basket
   { symbol: 'WLDXAU', label: 'Gold Basket', market: 'Derived', submarket: 'Commodities Basket' },
+  { symbol: 'WLDXAG', label: 'Silver Basket', market: 'Derived', submarket: 'Commodities Basket' },
+  { symbol: 'WLDCMP', label: 'Commodity Basket', market: 'Derived', submarket: 'Commodities Basket' },
   // Step Indices
   { symbol: 'STPIDX', label: 'Step Index', market: 'Derived', submarket: 'Step Indices' },
-  // Forex
-  { symbol: 'frxEURUSD', label: 'EUR/USD', market: 'Forex', submarket: 'Major Pairs' },
-  { symbol: 'frxGBPUSD', label: 'GBP/USD', market: 'Forex', submarket: 'Major Pairs' },
-  { symbol: 'frxUSDJPY', label: 'USD/JPY', market: 'Forex', submarket: 'Major Pairs' },
-  { symbol: 'frxAUDUSD', label: 'AUD/USD', market: 'Forex', submarket: 'Major Pairs' },
-  { symbol: 'frxEURGBP', label: 'EUR/GBP', market: 'Forex', submarket: 'Minor Pairs' },
+  // Forex Major Pairs
+  { symbol: 'frxEURUSD', label: 'EUR/USD', market: 'Forex', submarket: 'Forex Major Pairs' },
+  { symbol: 'frxGBPUSD', label: 'GBP/USD', market: 'Forex', submarket: 'Forex Major Pairs' },
+  { symbol: 'frxUSDJPY', label: 'USD/JPY', market: 'Forex', submarket: 'Forex Major Pairs' },
+  { symbol: 'frxAUDUSD', label: 'AUD/USD', market: 'Forex', submarket: 'Forex Major Pairs' },
+  { symbol: 'frxUSDCAD', label: 'USD/CAD', market: 'Forex', submarket: 'Forex Major Pairs' },
+  { symbol: 'frxUSDCHF', label: 'USD/CHF', market: 'Forex', submarket: 'Forex Major Pairs' },
+  { symbol: 'frxNZDUSD', label: 'NZD/USD', market: 'Forex', submarket: 'Forex Major Pairs' },
+  // Forex Minor Pairs
+  { symbol: 'frxEURGBP', label: 'EUR/GBP', market: 'Forex', submarket: 'Forex Minor Pairs' },
+  { symbol: 'frxEURJPY', label: 'EUR/JPY', market: 'Forex', submarket: 'Forex Minor Pairs' },
+  { symbol: 'frxGBPJPY', label: 'GBP/JPY', market: 'Forex', submarket: 'Forex Minor Pairs' },
+  { symbol: 'frxAUDJPY', label: 'AUD/JPY', market: 'Forex', submarket: 'Forex Minor Pairs' },
+  { symbol: 'frxEURAUD', label: 'EUR/AUD', market: 'Forex', submarket: 'Forex Minor Pairs' },
+  // Forex Exotic Pairs
+  { symbol: 'frxUSDTRY', label: 'USD/TRY', market: 'Forex', submarket: 'Forex Exotic Pairs' },
+  { symbol: 'frxUSDZAR', label: 'USD/ZAR', market: 'Forex', submarket: 'Forex Exotic Pairs' },
+  { symbol: 'frxUSDMXN', label: 'USD/MXN', market: 'Forex', submarket: 'Forex Exotic Pairs' },
+  // US Stocks
+  { symbol: 'AAPL', label: 'Apple Inc', market: 'Stocks', submarket: 'US Stocks' },
+  { symbol: 'AMZN', label: 'Amazon.com', market: 'Stocks', submarket: 'US Stocks' },
+  { symbol: 'TSLA', label: 'Tesla Inc', market: 'Stocks', submarket: 'US Stocks' },
+  { symbol: 'MSFT', label: 'Microsoft Corp', market: 'Stocks', submarket: 'US Stocks' },
+  // UK Stocks
+  { symbol: 'BARC', label: 'Barclays PLC', market: 'Stocks', submarket: 'UK Stocks' },
+  { symbol: 'BP', label: 'BP PLC', market: 'Stocks', submarket: 'UK Stocks' },
+  { symbol: 'VOD', label: 'Vodafone Group', market: 'Stocks', submarket: 'UK Stocks' },
+  // European Stocks
+  { symbol: 'BMW', label: 'BMW AG', market: 'Stocks', submarket: 'European Stocks' },
+  { symbol: 'SIE', label: 'Siemens AG', market: 'Stocks', submarket: 'European Stocks' },
+  { symbol: 'AIR', label: 'Airbus SE', market: 'Stocks', submarket: 'European Stocks' },
   // Stock Indices
-  { symbol: 'OTC_DJI', label: 'Wall Street 30', market: 'Stock Indices', submarket: 'American Indices' },
-  { symbol: 'OTC_NDX', label: 'US Tech 100', market: 'Stock Indices', submarket: 'American Indices' },
-  { symbol: 'OTC_SPC', label: 'US 500', market: 'Stock Indices', submarket: 'American Indices' },
-  { symbol: 'OTC_FTSE', label: 'UK 100', market: 'Stock Indices', submarket: 'European Indices' },
-  { symbol: 'OTC_GDAXI', label: 'Germany 40', market: 'Stock Indices', submarket: 'European Indices' },
-  { symbol: 'OTC_N225', label: 'Japan 225', market: 'Stock Indices', submarket: 'Asian Indices' },
+  { symbol: 'OTC_DJI', label: 'Wall Street 30', market: 'Stocks', submarket: 'Stock Indices' },
+  { symbol: 'OTC_NDX', label: 'US Tech 100', market: 'Stocks', submarket: 'Stock Indices' },
+  { symbol: 'OTC_SPC', label: 'US 500', market: 'Stocks', submarket: 'Stock Indices' },
+  { symbol: 'OTC_FTSE', label: 'UK 100', market: 'Stocks', submarket: 'Stock Indices' },
+  { symbol: 'OTC_GDAXI', label: 'Germany 40', market: 'Stocks', submarket: 'Stock Indices' },
+  { symbol: 'OTC_N225', label: 'Japan 225', market: 'Stocks', submarket: 'Stock Indices' },
   // Commodities
-  { symbol: 'frxXAUUSD', label: 'Gold/USD', market: 'Commodities', submarket: 'Metals' },
-  { symbol: 'frxXAGUSD', label: 'Silver/USD', market: 'Commodities', submarket: 'Metals' },
+  { symbol: 'frxXAUUSD', label: 'Gold', market: 'Commodities', submarket: 'Metals' },
+  { symbol: 'frxXAGUSD', label: 'Silver', market: 'Commodities', submarket: 'Metals' },
+  { symbol: 'frxXPDUSD', label: 'Palladium', market: 'Commodities', submarket: 'Metals' },
+  { symbol: 'frxXPTUSD', label: 'Platinum', market: 'Commodities', submarket: 'Metals' },
+  { symbol: 'USOUSD', label: 'Oil', market: 'Commodities', submarket: 'Energy' },
+  { symbol: 'NATGAS', label: 'Natural Gas', market: 'Commodities', submarket: 'Energy' },
+  { symbol: 'COFFEEUSD', label: 'Coffee', market: 'Commodities', submarket: 'Soft Commodities' },
+  { symbol: 'COCOAUSD', label: 'Cocoa', market: 'Commodities', submarket: 'Soft Commodities' },
+  { symbol: 'COTTONUSD', label: 'Cotton', market: 'Commodities', submarket: 'Soft Commodities' },
+  { symbol: 'SUGARUSD', label: 'Sugar', market: 'Commodities', submarket: 'Soft Commodities' },
   // Cryptocurrencies
-  { symbol: 'cryBTCUSD', label: 'BTC/USD', market: 'Cryptocurrencies', submarket: 'Cryptocurrencies' },
-  { symbol: 'cryETHUSD', label: 'ETH/USD', market: 'Cryptocurrencies', submarket: 'Cryptocurrencies' },
+  { symbol: 'cryBTCUSD', label: 'Bitcoin', market: 'Cryptocurrencies', submarket: 'Crypto' },
+  { symbol: 'cryETHUSD', label: 'Ethereum', market: 'Cryptocurrencies', submarket: 'Crypto' },
+  { symbol: 'cryLTCUSD', label: 'Litecoin', market: 'Cryptocurrencies', submarket: 'Crypto' },
+  { symbol: 'cryBCHUSD', label: 'Bitcoin Cash', market: 'Cryptocurrencies', submarket: 'Crypto' },
 ];
 
-export type TradeCategoryName = 'Up/Down' | 'Digits' | 'Options' | 'Multipliers';
+export type TradeCategoryName =
+  | 'Digits'
+  | 'Up/Down'
+  | 'Touch/No Touch'
+  | 'In/Out'
+  | 'Asians'
+  | 'Reset Call/Reset Put'
+  | 'High/Low Ticks'
+  | 'Only Ups/Only Downs'
+  | 'Multipliers'
+  | 'Accumulators';
 
 export interface TradeSubtypeDef {
   category: TradeCategoryName;
@@ -109,24 +163,6 @@ export interface TradeSubtypeDef {
 }
 
 export const TRADE_SUBTYPES: TradeSubtypeDef[] = [
-  {
-    category: 'Up/Down',
-    subtype: 'Rise/Fall',
-    legs: [
-      { value: 'CALL', label: 'Rise' },
-      { value: 'PUT', label: 'Fall' },
-    ],
-    usesPrediction: false,
-  },
-  {
-    category: 'Up/Down',
-    subtype: 'Higher/Lower',
-    legs: [
-      { value: 'HIGHER', label: 'Higher' },
-      { value: 'LOWER', label: 'Lower' },
-    ],
-    usesPrediction: true,
-  },
   {
     category: 'Digits',
     subtype: 'Matches/Differs',
@@ -155,7 +191,97 @@ export const TRADE_SUBTYPES: TradeSubtypeDef[] = [
     usesPrediction: true,
   },
   {
-    category: 'Options',
+    category: 'Up/Down',
+    subtype: 'Rise/Fall',
+    legs: [
+      { value: 'CALL', label: 'Rise' },
+      { value: 'PUT', label: 'Fall' },
+    ],
+    usesPrediction: false,
+  },
+  {
+    category: 'Up/Down',
+    subtype: 'Higher/Lower',
+    legs: [
+      { value: 'HIGHER', label: 'Higher' },
+      { value: 'LOWER', label: 'Lower' },
+    ],
+    usesPrediction: true,
+  },
+  {
+    category: 'Touch/No Touch',
+    subtype: 'Touch/No Touch',
+    legs: [
+      { value: 'ONETOUCH', label: 'Touch' },
+      { value: 'NOTOUCH', label: 'No Touch' },
+    ],
+    usesPrediction: true,
+  },
+  {
+    category: 'In/Out',
+    subtype: 'In/Out',
+    legs: [
+      { value: 'EXPIRYRANGE', label: 'Stays In' },
+      { value: 'EXPIRYMISS', label: 'Goes Out' },
+    ],
+    usesPrediction: true,
+  },
+  {
+    category: 'In/Out',
+    subtype: 'Ends In/Out',
+    legs: [
+      { value: 'ENDSIN', label: 'Ends In' },
+      { value: 'ENDSOUT', label: 'Ends Out' },
+    ],
+    usesPrediction: true,
+  },
+  {
+    category: 'Asians',
+    subtype: 'Asians',
+    legs: [
+      { value: 'ASIANU', label: 'Asian Up' },
+      { value: 'ASIAND', label: 'Asian Down' },
+    ],
+    usesPrediction: false,
+  },
+  {
+    category: 'Reset Call/Reset Put',
+    subtype: 'Reset Call/Reset Put',
+    legs: [
+      { value: 'RESETCALL', label: 'Reset Call' },
+      { value: 'RESETPUT', label: 'Reset Put' },
+    ],
+    usesPrediction: false,
+  },
+  {
+    category: 'High/Low Ticks',
+    subtype: 'High/Low Ticks',
+    legs: [
+      { value: 'TICKHIGH', label: 'High Tick' },
+      { value: 'TICKLOW', label: 'Low Tick' },
+    ],
+    usesPrediction: false,
+  },
+  {
+    category: 'Only Ups/Only Downs',
+    subtype: 'Only Ups/Only Downs',
+    legs: [
+      { value: 'RUNHIGH', label: 'Only Ups' },
+      { value: 'RUNLOW', label: 'Only Downs' },
+    ],
+    usesPrediction: false,
+  },
+  {
+    category: 'Multipliers',
+    subtype: 'Multipliers',
+    legs: [
+      { value: 'MULTUP', label: 'Up' },
+      { value: 'MULTDOWN', label: 'Down' },
+    ],
+    usesPrediction: false,
+  },
+  {
+    category: 'Accumulators',
     subtype: 'Accumulators',
     legs: [
       { value: 'ACCU', label: 'Accumulators' },
@@ -163,15 +289,6 @@ export const TRADE_SUBTYPES: TradeSubtypeDef[] = [
     ],
     usesPrediction: false,
     isAccu: true,
-  },
-  {
-    category: 'Multipliers',
-    subtype: 'Up/Down',
-    legs: [
-      { value: 'MULTUP', label: 'Up' },
-      { value: 'MULTDOWN', label: 'Down' },
-    ],
-    usesPrediction: false,
   },
 ];
 
@@ -237,6 +354,29 @@ export interface RunOnceAssignment {
   value: string;
 }
 
+export interface AddedVisualBlock {
+  id: string;
+  section: 'purchase' | 'restart' | 'canvas';
+  kind: 'if' | 'set' | 'purchase' | 'notify' | 'stop';
+  label: string;
+  left?: string;
+  op?: 'EQ' | 'NEQ' | 'GT' | 'LT' | 'GTE' | 'LTE';
+  right?: string;
+  value?: string;
+  contract?: string;
+  x?: number;
+  y?: number;
+}
+
+export interface ImportedProcedureGroup {
+  id: string;
+  title: string;
+  kind: 'procedure' | 'custom';
+  lines: string[];
+  x: number;
+  y: number;
+}
+
 export interface BotXmlWorkspaceState {
   strategyName: string;
   strategyType: string;
@@ -278,6 +418,10 @@ export interface BotXmlWorkspaceState {
   restartElseEnabled: boolean;
   quantumPredictionId?: string | null;
   quantumExpiresAt?: string | null;
+  customBlocks?: AddedVisualBlock[];
+  importedGroups?: ImportedProcedureGroup[];
+  blockPositions?: Record<string, { x: number; y: number }>;
+  rawImportedXml?: string | null;
 }
 
 export function createDefaultXmlWorkspaceState(): BotXmlWorkspaceState {
@@ -349,7 +493,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: 'Martingale',
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '2.0',
     desc: 'Doubles accumulator stake after a barrier knockout and resets on take-profit target.',
@@ -359,7 +503,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: 'Martingale on Stat Reset',
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '2.0',
     desc: 'Compounds accumulator targets and scales stake following statistical barrier resets.',
@@ -369,7 +513,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: "D'Alembert",
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '1.25',
     desc: 'Steps accumulator stake up linearly by initial unit after a knockout and steps down on win.',
@@ -379,7 +523,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: "D'Alembert on Stat Reset",
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '1.25',
     desc: 'Measured linear recovery progression synced to accumulator range statistical resets.',
@@ -389,7 +533,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: 'Reverse Martingale',
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '1.6',
     desc: 'Scales stake during winning accumulator runs to press profitable momentum.',
@@ -399,7 +543,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: 'Reverse Martingale on Stat Reset',
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '1.6',
     desc: 'Positive progression on accumulator wins that resets safely after statistical stat cycles.',
@@ -409,7 +553,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: "Reverse D'Alembert",
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '1.2',
     desc: 'Adds one stake unit per consecutive accumulator win and resets on knockout.',
@@ -419,7 +563,7 @@ export const QUICK_STRATEGIES: QuickStrategyDef[] = [
     name: "Reverse D'Alembert on Stat Reset",
     category: 'Accumulators',
     contractType: 'ACCU',
-    tradeCategory: 'Options',
+    tradeCategory: 'Accumulators',
     tradeSubtype: 'Accumulators',
     defaultFactor: '1.2',
     desc: 'Combines linear positive accumulator stepping with automated statistical cap resets.',
@@ -519,12 +663,19 @@ export function inferTradeCategoryFromContract(ct: string): {
   tradeSubtype: string;
 } {
   const u = String(ct || '').toUpperCase();
-  if (u === 'ACCU') return { tradeCategory: 'Options', tradeSubtype: 'Accumulators' };
-  if (u === 'MULTUP' || u === 'MULTDOWN') return { tradeCategory: 'Multipliers', tradeSubtype: 'Up/Down' };
+  if (u === 'ACCU') return { tradeCategory: 'Accumulators', tradeSubtype: 'Accumulators' };
+  if (u === 'MULTUP' || u === 'MULTDOWN') return { tradeCategory: 'Multipliers', tradeSubtype: 'Multipliers' };
   if (u === 'DIGITMATCH' || u === 'DIGITDIFF') return { tradeCategory: 'Digits', tradeSubtype: 'Matches/Differs' };
   if (u === 'DIGITEVEN' || u === 'DIGITODD') return { tradeCategory: 'Digits', tradeSubtype: 'Even/Odd' };
   if (u === 'DIGITOVER' || u === 'DIGITUNDER') return { tradeCategory: 'Digits', tradeSubtype: 'Over/Under' };
   if (u === 'HIGHER' || u === 'LOWER') return { tradeCategory: 'Up/Down', tradeSubtype: 'Higher/Lower' };
+  if (u === 'ONETOUCH' || u === 'NOTOUCH' || u === 'TOUCH') return { tradeCategory: 'Touch/No Touch', tradeSubtype: 'Touch/No Touch' };
+  if (u === 'EXPIRYRANGE' || u === 'EXPIRYMISS') return { tradeCategory: 'In/Out', tradeSubtype: 'In/Out' };
+  if (u === 'ENDSIN' || u === 'ENDSOUT') return { tradeCategory: 'In/Out', tradeSubtype: 'Ends In/Out' };
+  if (u === 'ASIANU' || u === 'ASIAND') return { tradeCategory: 'Asians', tradeSubtype: 'Asians' };
+  if (u === 'RESETCALL' || u === 'RESETPUT') return { tradeCategory: 'Reset Call/Reset Put', tradeSubtype: 'Reset Call/Reset Put' };
+  if (u === 'TICKHIGH' || u === 'TICKLOW') return { tradeCategory: 'High/Low Ticks', tradeSubtype: 'High/Low Ticks' };
+  if (u === 'RUNHIGH' || u === 'RUNLOW') return { tradeCategory: 'Only Ups/Only Downs', tradeSubtype: 'Only Ups/Only Downs' };
   return { tradeCategory: 'Up/Down', tradeSubtype: 'Rise/Fall' };
 }
 
@@ -532,15 +683,27 @@ export function inferMarketFromSymbol(sym: string): {
   market: BlockMarketName;
   submarket: string;
 } {
-  const found = BLOCK_SYMBOLS.find((s) => s.symbol === sym);
+  const normSym = sym.toUpperCase() === 'STPRNG' ? 'STPIDX' : sym;
+  const found = BLOCK_SYMBOLS.find((s) => s.symbol.toUpperCase() === normSym.toUpperCase());
   if (found) return { market: found.market, submarket: found.submarket };
   if (sym.startsWith('frxX')) return { market: 'Commodities', submarket: 'Metals' };
-  if (sym.startsWith('frx')) return { market: 'Forex', submarket: 'Major Pairs' };
-  if (sym.startsWith('cry')) return { market: 'Cryptocurrencies', submarket: 'Cryptocurrencies' };
-  if (sym.startsWith('OTC_')) return { market: 'Stock Indices', submarket: 'American Indices' };
+  if (sym.startsWith('frxUSDTRY') || sym.startsWith('frxUSDZAR') || sym.startsWith('frxUSDMXN')) {
+    return { market: 'Forex', submarket: 'Forex Exotic Pairs' };
+  }
+  if (sym.startsWith('frx')) return { market: 'Forex', submarket: 'Forex Major Pairs' };
+  if (sym.startsWith('cry')) return { market: 'Cryptocurrencies', submarket: 'Crypto' };
+  if (sym.startsWith('OTC_')) return { market: 'Stocks', submarket: 'Stock Indices' };
+  if (['AAPL', 'AMZN', 'TSLA', 'MSFT'].includes(sym)) return { market: 'Stocks', submarket: 'US Stocks' };
+  if (['BARC', 'BP', 'VOD'].includes(sym)) return { market: 'Stocks', submarket: 'UK Stocks' };
+  if (['BMW', 'SIE', 'AIR'].includes(sym)) return { market: 'Stocks', submarket: 'European Stocks' };
   if (sym.startsWith('BOOM') || sym.startsWith('CRASH')) return { market: 'Derived', submarket: 'Crash/Boom Indices' };
   if (sym.startsWith('JD')) return { market: 'Derived', submarket: 'Jump Indices' };
+  if (sym.startsWith('RB')) return { market: 'Derived', submarket: 'Range Break Indices' };
   if (sym.startsWith('STP')) return { market: 'Derived', submarket: 'Step Indices' };
+  if (['WLDAUD', 'WLDEUR', 'WLDGBP', 'WLDUSD'].includes(sym)) return { market: 'Derived', submarket: 'Forex Basket' };
+  if (['WLDXAU', 'WLDXAG', 'WLDCMP'].includes(sym)) return { market: 'Derived', submarket: 'Commodities Basket' };
+  if (['USOUSD', 'NATGAS'].includes(sym)) return { market: 'Commodities', submarket: 'Energy' };
+  if (['COFFEEUSD', 'COCOAUSD', 'COTTONUSD', 'SUGARUSD'].includes(sym)) return { market: 'Commodities', submarket: 'Soft Commodities' };
   return { market: 'Derived', submarket: 'Continuous Indices' };
 }
 
@@ -685,9 +848,9 @@ ${notifyItemsXml}
 function normalizeMarketName(raw?: string | null): BlockMarketName | undefined {
   if (!raw) return undefined;
   const low = raw.trim().toLowerCase();
-  if (low === 'derived' || low === 'synthetic_index' || low === 'synthetics' || low === 'volidx') return 'Derived';
+  if (low === 'derived' || low === 'synthetic_index' || low === 'synthetics' || low === 'volidx' || low === 'basket_index') return 'Derived';
   if (low === 'forex' || low === 'fx') return 'Forex';
-  if (low === 'stock indices' || low === 'indices' || low === 'stock_indices') return 'Stock Indices';
+  if (low === 'stocks' || low === 'stock indices' || low === 'indices' || low === 'stock_indices') return 'Stocks';
   if (low === 'commodities' || low === 'commodity') return 'Commodities';
   if (low === 'cryptocurrencies' || low === 'cryptocurrency' || low === 'crypto') return 'Cryptocurrencies';
   const exact = BLOCK_MARKETS.find((m) => m.toLowerCase() === low);
@@ -709,18 +872,28 @@ function normalizeSubmarketName(raw?: string | null, market?: BlockMarketName): 
     forex_basket: 'Forex Basket',
     commodity_basket: 'Commodities Basket',
     step_index: 'Step Indices',
-    major_pairs: 'Major Pairs',
-    minor_pairs: 'Minor Pairs',
-    americas: 'American Indices',
-    american_indices: 'American Indices',
-    europe: 'European Indices',
-    european_indices: 'European Indices',
-    asia: 'Asian Indices',
-    asian_indices: 'Asian Indices',
+    major_pairs: 'Forex Major Pairs',
+    'major pairs': 'Forex Major Pairs',
+    minor_pairs: 'Forex Minor Pairs',
+    'minor pairs': 'Forex Minor Pairs',
+    exotic_pairs: 'Forex Exotic Pairs',
+    'exotic pairs': 'Forex Exotic Pairs',
+    us_stocks: 'US Stocks',
+    uk_stocks: 'UK Stocks',
+    eu_stocks: 'European Stocks',
+    americas: 'Stock Indices',
+    american_indices: 'Stock Indices',
+    europe: 'Stock Indices',
+    european_indices: 'Stock Indices',
+    asia: 'Stock Indices',
+    asian_indices: 'Stock Indices',
     metals: 'Metals',
     energy: 'Energy',
-    non_financial: 'Cryptocurrencies',
-    cryptocurrencies: 'Cryptocurrencies',
+    soft_commodities: 'Soft Commodities',
+    non_financial: 'Crypto',
+    non_stable_coin: 'Crypto',
+    cryptocurrencies: 'Crypto',
+    crypto: 'Crypto',
   };
   if (map[low]) return map[low];
   if (market && BLOCK_SUBMARKETS[market]) {
@@ -776,10 +949,31 @@ function normalizeTradeTypeAndCategory(
     return { tradeCategory: 'Digits', tradeSubtype: 'Over/Under' };
   }
   if (sub.includes('accu')) {
-    return { tradeCategory: 'Options', tradeSubtype: 'Accumulators' };
+    return { tradeCategory: 'Accumulators', tradeSubtype: 'Accumulators' };
   }
   if (sub.includes('mult')) {
-    return { tradeCategory: 'Multipliers', tradeSubtype: 'Up/Down' };
+    return { tradeCategory: 'Multipliers', tradeSubtype: 'Multipliers' };
+  }
+  if (sub.includes('touch')) {
+    return { tradeCategory: 'Touch/No Touch', tradeSubtype: 'Touch/No Touch' };
+  }
+  if (sub.includes('ends')) {
+    return { tradeCategory: 'In/Out', tradeSubtype: 'Ends In/Out' };
+  }
+  if (sub.includes('in/out') || sub.includes('inout') || sub.includes('stays')) {
+    return { tradeCategory: 'In/Out', tradeSubtype: 'In/Out' };
+  }
+  if (sub.includes('asian')) {
+    return { tradeCategory: 'Asians', tradeSubtype: 'Asians' };
+  }
+  if (sub.includes('reset')) {
+    return { tradeCategory: 'Reset Call/Reset Put', tradeSubtype: 'Reset Call/Reset Put' };
+  }
+  if (sub.includes('tick')) {
+    return { tradeCategory: 'High/Low Ticks', tradeSubtype: 'High/Low Ticks' };
+  }
+  if (sub.includes('only')) {
+    return { tradeCategory: 'Only Ups/Only Downs', tradeSubtype: 'Only Ups/Only Downs' };
   }
   if (sub.includes('higher') || sub.includes('lower')) {
     return { tradeCategory: 'Up/Down', tradeSubtype: 'Higher/Lower' };
@@ -789,18 +983,27 @@ function normalizeTradeTypeAndCategory(
   }
   const cat = String(rawCat || '').trim().toLowerCase();
   if (cat.includes('digit')) return { tradeCategory: 'Digits', tradeSubtype: 'Matches/Differs' };
-  if (cat.includes('accu') || cat === 'options') return { tradeCategory: 'Options', tradeSubtype: 'Accumulators' };
-  if (cat.includes('mult')) return { tradeCategory: 'Multipliers', tradeSubtype: 'Up/Down' };
+  if (cat.includes('accu') || cat === 'options') return { tradeCategory: 'Accumulators', tradeSubtype: 'Accumulators' };
+  if (cat.includes('mult')) return { tradeCategory: 'Multipliers', tradeSubtype: 'Multipliers' };
+  if (cat.includes('touch')) return { tradeCategory: 'Touch/No Touch', tradeSubtype: 'Touch/No Touch' };
+  if (cat.includes('in/out') || cat.includes('inout')) return { tradeCategory: 'In/Out', tradeSubtype: 'In/Out' };
+  if (cat.includes('asian')) return { tradeCategory: 'Asians', tradeSubtype: 'Asians' };
+  if (cat.includes('reset')) return { tradeCategory: 'Reset Call/Reset Put', tradeSubtype: 'Reset Call/Reset Put' };
+  if (cat.includes('high/low')) return { tradeCategory: 'High/Low Ticks', tradeSubtype: 'High/Low Ticks' };
+  if (cat.includes('only')) return { tradeCategory: 'Only Ups/Only Downs', tradeSubtype: 'Only Ups/Only Downs' };
   if (cat.includes('up') || cat.includes('callput')) return { tradeCategory: 'Up/Down', tradeSubtype: 'Rise/Fall' };
   return {};
 }
 
 export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspaceState): Partial<BotXmlWorkspaceState> {
   const rawInput = String(xmlText || '').trim();
-  const xml = !rawInput.toLowerCase().startsWith('<xml')
-    ? `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">${rawInput}</xml>`
+  const normalizedRoot = /^<workspace\b/i.test(rawInput) && /<\/workspace>\s*$/i.test(rawInput)
+    ? rawInput.replace(/^<workspace\b([^>]*)>/i, '<xml$1>').replace(/<\/workspace>\s*$/i, '</xml>')
     : rawInput;
-  const out: Partial<BotXmlWorkspaceState> = {};
+  const xml = !normalizedRoot.toLowerCase().startsWith('<xml')
+    ? `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">${normalizedRoot}</xml>`
+    : normalizedRoot;
+  const out: Partial<BotXmlWorkspaceState> = { rawImportedXml: rawInput };
 
   const parseWithRegexFallback = (): Partial<BotXmlWorkspaceState> => {
     const getField = (name: string): string | undefined => {
@@ -1375,6 +1578,43 @@ export function parseBotWorkspaceXml(xmlText: string, baseState: BotXmlWorkspace
     if (qPredEl?.textContent?.trim()) {
       out.quantumPredictionId = qPredEl.textContent.trim();
       out.quantumExpiresAt = qExpEl?.textContent?.trim() || null;
+    }
+
+    // Collect top-level procedure blocks & custom strategy blocks so ANY DBot XML visualizes cleanly
+    const importedGroups: ImportedProcedureGroup[] = [];
+    const rootTopBlocks = Array.from(doc.documentElement.children).filter(
+      (c) => c.tagName.toLowerCase() === 'block'
+    );
+    let procOffsetY = 0;
+    for (const tb of rootTopBlocks) {
+      const t = (tb.getAttribute('type') || '').toLowerCase();
+      if (['trade_definition', 'trade', 'before_purchase', 'during_purchase', 'after_purchase'].includes(t)) {
+        continue;
+      }
+      const procName = getDirectFields(tb).get('NAME') || t;
+      const innerStmts = Array.from(tb.getElementsByTagName('block'))
+        .slice(0, 6)
+        .map((subB) => {
+          const st = subB.getAttribute('type') || 'block';
+          const sf = Array.from(subB.children)
+            .filter((c) => c.tagName.toLowerCase() === 'field')
+            .map((f) => `${f.getAttribute('name')}: ${(f.textContent || '').trim()}`)
+            .filter(Boolean)
+            .join(', ');
+          return sf ? `${st} (${sf})` : st;
+        });
+      importedGroups.push({
+        id: tb.getAttribute('id') || `proc-${importedGroups.length}`,
+        title: procName,
+        kind: t.startsWith('procedures_') ? 'procedure' : 'custom',
+        lines: innerStmts.length > 0 ? innerStmts : [t],
+        x: Number(tb.getAttribute('x')) || 520,
+        y: Number(tb.getAttribute('y')) || 340 + procOffsetY,
+      });
+      procOffsetY += 110;
+    }
+    if (importedGroups.length > 0) {
+      out.importedGroups = importedGroups;
     }
 
     void tradeDefBlock;

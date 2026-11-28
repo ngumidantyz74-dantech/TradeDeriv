@@ -31,6 +31,20 @@ const ALLOWED_DIGITAL_OR_BOT_CONTRACTS = new Set([
   'PUTE',
   'HIGHER',
   'LOWER',
+  'ONETOUCH',
+  'NOTOUCH',
+  'EXPIRYRANGE',
+  'EXPIRYMISS',
+  'ENDSIN',
+  'ENDSOUT',
+  'ASIANU',
+  'ASIAND',
+  'RESETCALL',
+  'RESETPUT',
+  'TICKHIGH',
+  'TICKLOW',
+  'RUNHIGH',
+  'RUNLOW',
   'ACCU',
   'MULTUP',
   'MULTDOWN',
@@ -314,6 +328,11 @@ function parseAndValidateXmlStructure(rawXml: string): {
     .replace(/<!--[\s\S]*?-->/g, '')
     .trim();
 
+  // Normalize <workspace>...</workspace> wrapper to <xml>...</xml>
+  if (/^<workspace\b/i.test(cleaned) && /<\/workspace>\s*$/i.test(cleaned)) {
+    cleaned = cleaned.replace(/^<workspace\b([^>]*)>/i, '<xml$1>').replace(/<\/workspace>\s*$/i, '</xml>');
+  }
+
   // Support valid partial Deriv DBot workspace snippets (e.g. Digitiff.xml starting at <statement name="TRADE_OPTIONS">)
   if (!/^<xml\b/i.test(cleaned) && /^<(?:statement|block|variables)\b/i.test(cleaned)) {
     cleaned = `<xml xmlns="https://developers.google.com/blockly/xml" is_dbot="true">${cleaned}</xml>`;
@@ -403,25 +422,24 @@ function parseAndValidateXmlStructure(rawXml: string): {
     }
   }
 
-  const hasTradeDef = blockTypes.has('trade_definition') || blockTypes.has('trade');
-  const hasTradeOpts =
+  const hasAnyBotBlock =
+    blockTypes.has('trade_definition') ||
+    blockTypes.has('trade') ||
+    blockTypes.has('trade_definition_market') ||
+    blockTypes.has('trade_definition_tradetype') ||
+    blockTypes.has('trade_definition_contracttype') ||
     blockTypes.has('trade_definition_tradeoptions') ||
     blockTypes.has('trade_definition_accumulator') ||
-    blockTypes.has('tradeoptions');
-  const hasTradeSnippetCore =
-    blockTypes.has('trade_definition_market') && blockTypes.has('trade_definition_contracttype');
-  const hasBefore = blockTypes.has('before_purchase');
-  const hasAfter = blockTypes.has('after_purchase');
+    blockTypes.has('tradeoptions') ||
+    blockTypes.has('before_purchase') ||
+    blockTypes.has('after_purchase') ||
+    blockTypes.has('purchase') ||
+    blockTypes.size > 0;
 
-  if (!hasTradeOpts || (!hasTradeSnippetCore && (!hasTradeDef || !hasBefore || !hasAfter))) {
-    const missing: string[] = [];
-    if (!hasTradeDef && !hasTradeSnippetCore) missing.push('trade_definition');
-    if (!hasTradeOpts) missing.push('trade_definition_tradeoptions');
-    if (!hasBefore && !hasTradeSnippetCore) missing.push('before_purchase');
-    if (!hasAfter && !hasTradeSnippetCore) missing.push('after_purchase');
+  if (!hasAnyBotBlock) {
     return {
       ok: false,
-      error: `Unsupported or incomplete Deriv Bot XML: missing required block(s) [${missing.join(', ')}].`,
+      error: 'Unsupported or incomplete Deriv Bot XML: no Blockly <block> definitions found.',
       blockTypes,
       fields,
       quantumMeta,
@@ -772,14 +790,31 @@ router.post('/quantum/validate-xml', requireDb, requireAuth, async (req: AuthReq
     return;
   }
 
-  const symbol = parsed.fields.get('SYMBOL_LIST') || '1HZ100V';
+  const symbol = parsed.fields.get('SYMBOL_LIST') || parsed.fields.get('SYMBOL') || '1HZ100V';
   const rawTypeList = (parsed.fields.get('TYPE_LIST') || '').toUpperCase();
   const rawPurchase = (parsed.fields.get('PURCHASE_LIST') || parsed.fields.get('THEN_PURCHASE') || '').toUpperCase();
   const varSide = (parsed.fields.get('VAR:tradeside') || '').toUpperCase();
+  const rawTradeType = (parsed.fields.get('TRADETYPE_LIST') || parsed.fields.get('TRADETYPECAT_LIST') || '').toLowerCase();
+  const tradeTypeDefaultContract = (() => {
+    if (rawTradeType.includes('matches') || rawTradeType.includes('differs')) return 'DIGITMATCH';
+    if (rawTradeType.includes('over') || rawTradeType.includes('under')) return 'DIGITOVER';
+    if (rawTradeType.includes('even') || rawTradeType.includes('odd')) return 'DIGITEVEN';
+    if (rawTradeType.includes('higher') || rawTradeType.includes('lower')) return 'HIGHER';
+    if (rawTradeType.includes('touch')) return 'ONETOUCH';
+    if (rawTradeType.includes('ends')) return 'ENDSIN';
+    if (rawTradeType.includes('inout') || rawTradeType.includes('stays')) return 'EXPIRYRANGE';
+    if (rawTradeType.includes('asian')) return 'ASIANU';
+    if (rawTradeType.includes('reset')) return 'RESETCALL';
+    if (rawTradeType.includes('tick')) return 'TICKHIGH';
+    if (rawTradeType.includes('only')) return 'RUNHIGH';
+    if (rawTradeType.includes('mult')) return 'MULTUP';
+    if (rawTradeType.includes('accu')) return 'ACCU';
+    return 'CALL';
+  })();
   const resolvedContract =
     rawPurchase ||
     (rawTypeList && rawTypeList !== 'BOTH' ? rawTypeList : varSide) ||
-    (parsed.blockTypes.has('trade_definition_accumulator') ? 'ACCU' : '');
+    (parsed.blockTypes.has('trade_definition_accumulator') ? 'ACCU' : tradeTypeDefaultContract);
   const stake = Number(
     parsed.fields.get('AMOUNT') ||
       parsed.fields.get('VAR:initialstake') ||

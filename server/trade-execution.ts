@@ -880,6 +880,18 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       'LOWER',
       'ONETOUCH',
       'NOTOUCH',
+      'EXPIRYRANGE',
+      'EXPIRYMISS',
+      'ENDSIN',
+      'ENDSOUT',
+      'ASIANU',
+      'ASIAND',
+      'RESETCALL',
+      'RESETPUT',
+      'TICKHIGH',
+      'TICKLOW',
+      'RUNHIGH',
+      'RUNLOW',
     ].includes(contractType)
   ) {
     const settleDelay =
@@ -1110,10 +1122,10 @@ function adjustDigitForDesiredOutcome(
     const offset = Number.isFinite(barrier) && Math.abs(barrier) > 0 && Math.abs(barrier) < 20 ? Math.abs(barrier) : step * 18;
     return Number((price + (shouldWin ? -(offset + step * 5) : Math.abs(step * 10))).toFixed(dec));
   }
-  if (contractType === 'CALL' || contractType === 'CALLE' || contractType === 'ONETOUCH') {
+  if (contractType === 'CALL' || contractType === 'CALLE' || contractType === 'ONETOUCH' || contractType === 'ASIANU' || contractType === 'RESETCALL' || contractType === 'TICKHIGH' || contractType === 'RUNHIGH' || contractType === 'EXPIRYRANGE' || contractType === 'ENDSIN') {
     return Number((price + (shouldWin ? Math.abs(step * 12) : -Math.abs(step * 12))).toFixed(dec));
   }
-  if (contractType === 'PUT' || contractType === 'PUTE' || contractType === 'NOTOUCH') {
+  if (contractType === 'PUT' || contractType === 'PUTE' || contractType === 'NOTOUCH' || contractType === 'ASIAND' || contractType === 'RESETPUT' || contractType === 'TICKLOW' || contractType === 'RUNLOW' || contractType === 'EXPIRYMISS' || contractType === 'ENDSOUT') {
     return Number((price + (shouldWin ? -Math.abs(step * 12) : Math.abs(step * 12))).toFixed(dec));
   }
 

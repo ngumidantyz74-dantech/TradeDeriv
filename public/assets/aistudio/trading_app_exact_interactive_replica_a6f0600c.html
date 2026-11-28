@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#ffffff">
+<title>Trading Account — Interactive HTML Replica</title>
+<style>
+:root{
+ --red:#ed4b5b;--red2:#d95b69;--teal:#56b6b1;--teal2:#79aaa8;
+ --blue:#7da5d0;--green:#7eb7ad;--ink:#33363a;--muted:#888d92;
+ --line:#e9eaec;--panel:#f1f2f4;--white:#fff;--gold:#d8b66c;
+ --font:Arial,Helvetica,sans-serif;
+}
+*{box-sizing:border-box}
+html,body{margin:0;min-height:100%;background:#fff;color:var(--ink);font-family:var(--font)}
+body{display:flex;justify-content:center}
+button{font:inherit;color:inherit;cursor:pointer}
+button:focus-visible,[role=button]:focus-visible{outline:2px solid #4b9fd0;outline-offset:2px}
+.app{width:100%;max-width:847px;min-height:100vh;background:#fff;position:relative;overflow:hidden;box-shadow:0 0 22px #0000000b}
+.topbar{height:76px;display:flex;align-items:center;padding:8px 18px;gap:30px;border-bottom:1px solid #ededed;background:#fff}
+.brand{width:45px;height:45px;border-radius:8px;background:#ed4050;color:white;display:grid;place-items:center;font-weight:700;font-size:19px;box-shadow:inset 0 0 0 1px #ffffff40;flex:none}
+.account-wrap{display:flex;flex-direction:column;gap:5px;min-width:0}
+.account{color:var(--gold);font-size:19px;line-height:1;white-space:nowrap}
+.account .caret{font-size:20px;color:#777;margin-left:6px}
+.balance{font-size:20px;font-weight:700;color:#202226;white-space:nowrap}
+.deposit{margin-left:auto;border:0;border-radius:28px;background:var(--red);color:white;font-weight:700;font-size:18px;padding:12px 25px;min-width:118px}
+.account-toggle{height:50px;border-bottom:1px solid #eee;display:flex;align-items:center;justify-content:space-between;padding:0 24px}
+.chevron{font-size:32px;line-height:1;color:#111;transform:translateY(-5px)}
+.reset{border:1px solid #bfc1c4;background:white;border-radius:5px;padding:8px 29px;font-size:18px;font-weight:700}
+.reset:disabled{opacity:.42}
+.tabs{height:58px;display:grid;grid-template-columns:repeat(3,1fr);border-bottom:1px solid #eee}
+.tab{border:0;background:#fff;color:#555;font-size:19px;position:relative}
+.tab.active{font-weight:700;color:#292929}
+.tab.active:after{content:"";position:absolute;bottom:0;left:0;right:0;height:3px;background:var(--red)}
+.toolbar{height:78px;border-bottom:1px solid #eee;display:flex;align-items:center;justify-content:space-between;padding:0 24px}
+.outline{border:1px solid #bfc1c4;border-radius:5px;background:white;padding:11px 22px;font-size:18px;font-weight:700}
+.filters{border:0;background:transparent;font-size:18px;color:#555;display:flex;align-items:center;gap:9px}
+.filters svg{width:17px;height:17px}
+.view{display:none}
+.view.active{display:block}
+.positive{color:var(--teal)!important}.negative{color:#c86f7b!important}
+.muted{color:#96999d}
+.bottom-nav{height:82px;position:absolute;bottom:0;left:0;right:0;background:#fff;border-top:1px solid #eee;display:grid;grid-template-columns:repeat(5,1fr);z-index:5}
+.nav-item{border:0;border-right:1px solid #f1f1f1;background:#fff;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:4px;color:#5c6064;font-size:14px}
+.nav-item:last-child{border-right:0}
+.nav-item svg{width:24px;height:24px;stroke:currentColor;fill:none;stroke-width:1.7;stroke-linecap:round;stroke-linejoin:round}
+.nav-item.active{color:#d47e89}
+.nav-item.active svg{color:#d47e89}
+/* Exact app glyphs recreated as inline vector art */
+.market-icon{width:46px;height:47px;display:inline-block;vertical-align:middle}
+.match-icon{width:24px;height:24px;vertical-align:middle}
+.summary-banner{height:72px;background:linear-gradient(90deg,#f9dfe4 0%,#fff 70%);display:flex;align-items:center;padding:0 48px;gap:10px;font-size:16px;font-weight:700}
+.summary-banner .market-name{margin-right:auto}
+.summary-content{height:calc(100vh - 76px - 50px - 58px - 72px - 82px - 228px);min-height:360px;position:relative;padding:25px 49px}
+.currency{display:inline-block;background:#80a9a7;color:#fff;border-radius:6px;padding:5px 6px;font-size:14px;font-weight:700;margin-bottom:13px}
+.stats{display:grid;grid-template-columns:1fr 1fr;column-gap:30px;max-width:490px}
+.stat{margin:0 0 17px}
+.stat small{display:block;color:#777;font-size:14px;margin-bottom:5px}
+.stat strong{font-size:17px}
+.tick{position:absolute;right:10.5%;top:46%;font-size:16px;color:#555}
+.tick .dot{display:block;color:#80aaa8;font-size:23px;line-height:18px}
+.resale{height:70px;border-top:1px solid #f4f4f4;display:grid;place-items:center;color:#777;font-size:16px}
+.summary-footer{background:#f1f2f5;padding:22px 28px 20px;display:grid;grid-template-columns:repeat(3,1fr);row-gap:27px;text-align:center}
+.metric b{display:block;font-size:16px;margin-bottom:10px}
+.metric span{font-size:17px;color:#555}
+.whats{display:block;text-align:right;font-size:14px;color:#777;text-decoration:underline;margin-bottom:17px}
+.runbar{height:76px;display:flex;align-items:center;padding:9px 34px;background:#fff;border-bottom:1px solid #eee;gap:0}
+.run-btn{height:56px;width:128px;border:0;border-radius:5px 0 0 5px;background:var(--red);color:#fff;font-size:18px;font-weight:700}
+.run-btn.running{background:var(--red)}
+.run-track{height:56px;border:1px solid #d4d6d8;border-radius:0 5px 5px 0;flex:1;display:flex;flex-direction:column;justify-content:center;align-items:center;position:relative;font-weight:700}
+.track-line{height:8px;width:96%;border-radius:10px;background:linear-gradient(90deg,#80aaa8 0 23%,#d6d8d9 23% 100%);margin-top:8px;position:relative}
+.track-line:before,.track-line:after{content:"";position:absolute;top:-4px;width:16px;height:16px;border-radius:50%;background:#80aaa8aa}
+.track-line:before{left:0}.track-line:after{right:0;background:#80aaa888}
+.runbar.journal-run .run-btn{background:var(--teal)}
+.runbar.journal-run .track-line{background:#d6d8d9}
+.runbar.journal-run .run-track{font-size:16px}
+/* Journal */
+.journal-list{padding-bottom:0;height:calc(100vh - 76px - 50px - 58px - 78px - 76px - 82px);min-height:360px;overflow:auto}
+.journal-row{min-height:96px;padding:22px 23px 14px;font-size:16px;line-height:1.45;background:#fff;border-bottom:1px solid #f6f6f6;cursor:pointer}
+.journal-row:nth-child(even){background:#f1f2f4}
+.journal-row .date{display:block;color:#a2a5a9;font-size:14px;margin-top:7px}
+.journal-row .blue{color:var(--blue)}.journal-row .green{color:var(--green)}
+/* Transactions */
+.trans-toolbar{height:78px;display:flex;align-items:center;gap:18px;padding:0 24px;border-bottom:1px solid #eee}
+.trans-head{height:80px;display:grid;grid-template-columns:36% 40% 24%;align-items:center;padding:0 29px;font-weight:700;font-size:16px;border-bottom:1px solid #eee}
+.trans-list{max-height:calc(100vh - 76px - 50px - 58px - 78px - 80px - 225px - 82px);min-height:380px;overflow:auto}
+.trans-row{height:102px;display:grid;grid-template-columns:27% 43% 30%;align-items:center;padding:0 23px;border-bottom:6px solid #f0f1f2;cursor:pointer}
+.trans-row:hover,.journal-row:hover{filter:brightness(.985)}
+.trans-symbols{display:flex;align-items:center;gap:17px}
+.trans-symbols .market-icon{width:28px;height:30px}
+.trans-symbols .match-icon{width:26px;height:26px}
+.spots{font-size:17px;line-height:1.55;color:#777}
+.spot-dot{color:var(--red);font-size:20px;margin-right:7px}
+.spot-dot.exit{color:#a8aaad}
+.money{text-align:right;font-size:17px;line-height:1.55;color:#666}
+.trans-footer{padding-top:20px;padding-bottom:20px}
+.trans-footer .whats{margin-right:7%;margin-bottom:18px}
+/* Detail panel */
+.detail-screen{display:none;position:absolute;inset:0 0 82px;background:#fff;z-index:4;overflow:auto}
+.detail-screen.open{display:block}
+.detail-heading{height:80px;border-bottom:1px solid #eee;display:flex;align-items:center;padding:0 23px;font-size:22px;font-weight:700}
+.close-detail{margin-left:auto;border:0;background:transparent;font-size:32px;font-weight:300;line-height:1}
+.detail-list{padding:12px 24px 180px}
+.detail-card{height:400px;background:#f1f2f4;border-radius:10px;margin:0 0 22px;padding:22px;position:relative;font-size:18px}
+.detail-symbols{display:flex;gap:23px;align-items:center;height:55px;margin-bottom:26px}
+.detail-symbols .market-icon{width:46px;height:48px}
+.detail-symbols .match-icon{width:30px;height:30px}
+.detail-field{margin-bottom:26px}
+.detail-field b{display:block;font-size:17px;margin-bottom:7px}
+.detail-field span{color:#676b70;font-size:19px}
+.detail-right{position:absolute;right:23px;text-align:right}
+.detail-right.entry{top:184px}.detail-right.exit{top:284px}
+.detail-pl{position:absolute;left:22px;right:23px;bottom:28px;display:flex;justify-content:space-between;font-weight:700;font-size:19px}
+.detail-bottom{position:fixed;bottom:82px;left:0;right:0;max-width:847px;margin:auto;background:#f1f2f5;padding:15px 20px 18px;display:grid;grid-template-columns:repeat(3,1fr);text-align:center;z-index:6}
+.detail-bottom .metric b{font-size:16px}
+.detail-bottom .metric span{font-size:17px}
+.toast{position:fixed;left:50%;bottom:100px;transform:translateX(-50%);background:#333;color:white;padding:11px 18px;border-radius:7px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;z-index:20;white-space:nowrap}
+.toast.show{opacity:1}
+.modal-backdrop{display:none;position:fixed;inset:0;background:#0005;z-index:30;align-items:center;justify-content:center;padding:20px}
+.modal-backdrop.open{display:flex}
+.modal{background:white;border-radius:10px;width:min(440px,100%);padding:22px;box-shadow:0 12px 40px #0003}
+.modal h3{margin:0 0 14px}.modal p{color:#666;line-height:1.5}.modal-actions{display:flex;justify-content:flex-end;gap:10px;margin-top:20px}
+@media(max-width:600px){
+ .topbar{height:68px;padding:7px 14px;gap:18px}.brand{width:43px;height:43px}.account{font-size:16px}.balance{font-size:17px}.deposit{font-size:16px;padding:10px 17px;min-width:0}
+ .account-toggle{height:44px}.tabs{height:53px}.tab{font-size:16px}.toolbar,.trans-toolbar{height:66px;padding:0 18px}.outline,.reset{font-size:15px;padding:9px 16px}.filters{font-size:15px}
+ .summary-banner{height:64px;padding:0 20px;font-size:13px;gap:7px}.market-icon{width:39px;height:40px}
+ .summary-content{padding:20px 24px;height:calc(100vh - 68px - 44px - 53px - 64px - 76px - 210px);min-height:280px}
+ .stats{column-gap:10px}.stat small{font-size:12px}.stat strong{font-size:15px}.tick{right:8%;font-size:13px}
+ .summary-footer{padding:18px 8px;row-gap:20px}.metric b{font-size:13px}.metric span{font-size:14px}
+ .resale{height:55px;font-size:14px}.runbar{height:68px;padding:7px 18px}.run-btn{width:105px;height:52px;font-size:16px}.run-track{height:52px;font-size:13px}
+ .bottom-nav{height:76px}.nav-item{font-size:12px}.nav-item svg{width:22px;height:22px}
+ .journal-list{height:calc(100vh - 68px - 44px - 53px - 66px - 68px - 76px);min-height:260px}
+ .journal-row{min-height:88px;padding:18px 18px 12px;font-size:14px}.journal-row .date{font-size:12px}
+ .trans-head{height:65px;padding:0 17px;font-size:13px}.trans-list{max-height:calc(100vh - 68px - 44px - 53px - 66px - 65px - 200px - 76px);min-height:280px}
+ .trans-row{height:88px;padding:0 15px;grid-template-columns:27% 43% 30%}.spots,.money{font-size:14px}.trans-symbols{gap:8px}.trans-symbols .market-icon{width:25px}.trans-symbols .match-icon{width:21px}
+ .trans-footer{padding-top:15px;padding-bottom:15px}
+ .detail-heading{height:72px;font-size:18px;padding:0 18px}.detail-list{padding:12px 16px 160px}.detail-card{height:365px;padding:18px;margin-bottom:18px;font-size:15px}.detail-symbols{margin-bottom:22px}.detail-field{margin-bottom:23px}.detail-field b{font-size:14px}.detail-field span{font-size:16px}.detail-right{right:18px}.detail-right.entry{top:164px}.detail-right.exit{top:257px}.detail-pl{left:18px;right:18px;bottom:24px;font-size:16px}
+ .detail-bottom{bottom:76px;padding:12px 7px}.detail-bottom .metric b{font-size:12px}.detail-bottom .metric span{font-size:14px}
+}
+</style>
+</head>
+<body>
+<div class="app" id="app">
+<header class="topbar">
+ <div class="brand">DB</div>
+ <div class="account-wrap"><div class="account">Demo account <span class="caret">⌄</span></div><div class="balance" id="balance">9,865.41 USD</div></div>
+ <button class="deposit" id="depositBtn">Deposit</button>
+</header>
+<div class="account-toggle"><span></span><span class="chevron">⌄</span><button class="reset" id="resetBtn">Reset</button></div>
+<nav class="tabs" aria-label="Account sections">
+ <button class="tab active" data-view="summary">Summary</button>
+ <button class="tab" data-view="transactions">Transactions</button>
+ <button class="tab" data-view="journal">Journal</button>
+</nav>
+
+<section class="view active" id="summary">
+ <div class="summary-banner">
+  <svg class="market-icon" viewBox="0 0 50 50" aria-label="Volatility 100 icon">
+   <rect x="2" y="2" width="29" height="14" rx="3" fill="#343a40"/><text x="16.5" y="12.5" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">100</text>
+   <circle cx="40" cy="8" r="7" fill="#ef5260"/><text x="40" y="11" text-anchor="middle" font-size="7" fill="#fff">1s</text>
+   <g stroke="#43a7ad" stroke-width="2"><path d="M8 23v20M18 18v25M28 24v18M38 17v24"/></g>
+   <g fill="#43a7ad"><rect x="4" y="28" width="8" height="9" rx="1"/><rect x="14" y="25" width="8" height="11" rx="1"/><rect x="24" y="29" width="8" height="8" rx="1"/><rect x="34" y="22" width="8" height="10" rx="1"/></g>
+  </svg>
+  <span class="market-name">Volatility 100 (1s) Index</span>
+  <svg class="match-icon" viewBox="0 0 30 30" aria-label="Matches"><g stroke="#ed5968" stroke-width="3" stroke-linecap="round"><path d="M15 2v7M15 21v7M2 15h7M21 15h7M5.5 5.5l5 5M19.5 19.5l5 5M24.5 5.5l-5 5M10.5 19.5l-5 5"/></g><circle cx="15" cy="15" r="3" fill="#ed5968"/></svg>
+  <span>Matches</span>
+ </div>
+ <div class="summary-content">
+  <span class="currency">USD</span>
+  <div class="stats">
+   <div>
+    <div class="stat"><small>Total profit/loss:</small><strong class="negative">-0.50 ▼</strong></div>
+    <div class="stat"><small>Stake:</small><strong>0.50</strong></div>
+   </div>
+   <div>
+    <div class="stat"><small>Contract value:</small><strong class="negative">0.00 ▼</strong></div>
+    <div class="stat"><small>Potential payout:</small><strong>4.17</strong></div>
+   </div>
+  </div>
+  <div class="tick">Tick 1<span class="dot">●</span></div>
+ </div>
+ <div class="resale">Resale not offered</div>
+ <div class="summary-footer">
+  <div class="metric"><b>Total stake</b><span>5.50 USD</span></div><div class="metric"><b>Total payout</b><span>8.34 USD</span></div><div class="metric"><b>No. of runs</b><span>10</span></div>
+  <div class="metric"><b>Contracts lost</b><span>8</span></div><div class="metric"><b>Contracts won</b><span>2</span></div><div class="metric"><b>Total profit/loss</b><span class="positive">+2.84 USD</span></div>
+ </div>
+ <div class="runbar"><button class="run-btn" id="runBtn">■ Stop</button><div class="run-track"><span id="runStatus">Contract bought</span><div class="track-line"></div></div></div>
+</section>
+
+<section class="view" id="transactions">
+ <div class="trans-toolbar"><button class="outline" id="downloadBtn" disabled>Download</button><button class="outline" id="viewDetailBtn">View Detail</button></div>
+ <div class="trans-head"><span>Type</span><span>Entry/Exit spot</span><span>Buy price and P/L</span></div>
+ <div class="trans-list" id="transList">
+  <div class="trans-row" data-index="0"><span class="trans-symbols"><svg class="market-icon" viewBox="0 0 50 50"><rect x="1" y="2" width="28" height="13" rx="3" fill="#343a40"/><text x="15" y="12" font-size="9" text-anchor="middle" fill="white">100</text><g stroke="#43a7ad" stroke-width="2"><path d="M8 20v20M18 18v24M28 22v19"/></g><g fill="#43a7ad"><rect x="4" y="27" width="8" height="9"/><rect x="14" y="24" width="8" height="10"/><rect x="24" y="28" width="8" height="8"/></g></svg><svg class="match-icon" viewBox="0 0 30 30"><g stroke="#ed5968" stroke-width="3"><path d="M15 2v8M15 20v8M2 15h8M20 15h8M5 5l6 6M19 19l6 6M25 5l-6 6M11 19l-6 6"/></g></svg></span><span class="spots"><span class="spot-dot">⦿</span>1655.18<br><span class="spot-dot exit">○</span>1655.18</span><span class="money">1.00 USD<br><span class="negative">-1.00 USD</span></span></div>
+  <div class="trans-row" data-index="1"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#e85a69;font-size:26px">↘</span></span><span class="spots"><span class="spot-dot">⦿</span>1655.20<br><span class="spot-dot exit">○</span>1655.33</span><span class="money">1.00 USD<br><span class="negative">-1.00 USD</span></span></div>
+  <div class="trans-row" data-index="2"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#e85a69;font-size:26px">↗</span></span><span class="spots"><span class="spot-dot">⦿</span>1655.08<br><span class="spot-dot exit">○</span>1655.05</span><span class="money">1.50 USD<br><span class="negative">-1.50 USD</span></span></div>
+  <div class="trans-row" data-index="3"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#e85a69;font-size:26px">↗</span></span><span class="spots"><span class="spot-dot">⦿</span>1654.98<br><span class="spot-dot exit">○</span>1655.18</span><span class="money">1.00 USD<br><span class="positive">+0.90 USD</span></span></div>
+  <div class="trans-row" data-index="4"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#e85a69;font-size:26px">↗</span></span><span class="spots"><span class="spot-dot">⦿</span>1655.80<br><span class="spot-dot exit">○</span>1655.80</span><span class="money">1.50 USD<br><span class="negative">-1.50 USD</span></span></div>
+  <div class="trans-row" data-index="5"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#e85a69;font-size:26px">↗</span></span><span class="spots"><span class="spot-dot">⦿</span>1655.65<br><span class="spot-dot exit">○</span>1655.65</span><span class="money">1.00 USD<br><span class="positive">+0.22 USD</span></span></div>
+  <div class="trans-row" data-index="6"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#55a6a6;font-size:25px">▦</span></span><span class="spots"><span class="spot-dot">⦿</span>1654.90<br><span class="spot-dot exit">○</span>1654.90</span><span class="money">1.00 USD<br><span class="positive">+0.92 USD</span></span></div>
+  <div class="trans-row" data-index="7"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#55a6a6;font-size:25px">▦</span></span><span class="spots"><span class="spot-dot">⦿</span>1654.89<br><span class="spot-dot exit">○</span>1654.89</span><span class="money">1.00 USD<br><span class="negative">-1.00 USD</span></span></div>
+  <div class="trans-row" data-index="8"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#55a6a6;font-size:25px">▦</span></span><span class="spots"><span class="spot-dot">⦿</span>1655.25<br><span class="spot-dot exit">○</span>1655.25</span><span class="money">1.00 USD<br><span class="negative">-1.00 USD</span></span></div>
+  <div class="trans-row" data-index="9"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#55a6a6;font-size:25px">▦</span></span><span class="spots"><span class="spot-dot">⦿</span>1654.50<br><span class="spot-dot exit">○</span>1654.50</span><span class="money">2.00 USD<br><span class="positive">+1.85 USD</span></span></div>
+  <div class="trans-row" data-index="10"><span class="trans-symbols"><span class="market-icon">▥</span><span style="color:#55a6a6;font-size:25px">▦</span></span><span class="spots"><span class="spot-dot">⦿</span>1655.02<br><span class="spot-dot exit">○</span>1655.02</span><span class="money">1.50 USD<br><span class="positive">+1.38 USD</span></span></div>
+ </div>
+ <div class="summary-footer trans-footer">
+  <div class="metric"><b>Total stake</b><span>20.00 USD</span></div><div class="metric"><b>Total payout</b><span>22.02 USD</span></div><div class="metric"><b>No. of runs</b><span>17</span></div>
+  <div class="metric"><b>Contracts lost</b><span>10</span></div><div class="metric"><b>Contracts won</b><span>7</span></div><div class="metric"><b>Total profit/loss</b><span class="positive">+2.02 USD</span></div>
+ </div>
+</section>
+
+<section class="view" id="journal">
+ <div class="toolbar"><button class="outline" id="journalDownload">Download</button><button class="filters" id="filterBtn">Filters <svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2"><path d="M2 4h16M5 9h10M8 14h4"/></svg></button></div>
+ <div class="journal-list" id="journalList">
+  <div class="journal-row"><span class="blue">Bought:</span> Contract purchased (ID: 41503011999)<span class="date">2026-11-24 | 12:27:22 GMT</span></div>
+  <div class="journal-row"><span class="blue">Matches scalp stake: 0.5</span><span class="date">2026-11-24 | 12:27:21 GMT</span></div>
+  <div class="journal-row"><span class="green">Banked profit: -3.5</span><span class="date">2026-11-24 | 12:27:20 GMT</span></div>
+  <div class="journal-row">Loss amount: <span class="negative">-0.50 USD</span><span class="date">2026-11-24 | 12:27:20 GMT</span></div>
+  <div class="journal-row"><span class="blue">Bought:</span> Contract purchased (ID: 41503000919)<span class="date">2026-11-24 | 12:27:18 GMT</span></div>
+  <div class="journal-row"><span class="blue">Matches scalp stake: 0.5</span><span class="date">2026-11-24 | 12:27:17 GMT</span></div>
+  <div class="journal-row"><span class="green">Banked profit: -3</span><span class="date">2026-11-24 | 12:27:16 GMT</span></div>
+  <div class="journal-row">Loss amount: <span class="negative">-0.50 USD</span><span class="date">2026-11-24 | 12:27:16 GMT</span></div>
+  <div class="journal-row"><span class="blue">Bought:</span> Contract purchased (ID: 41502987379)<span class="date">2026-11-24 | 12:27:14 GMT</span></div>
+  <div class="journal-row"><span class="blue">Matches scalp stake: 0.5</span><span class="date">2026-11-24 | 12:27:13 GMT</span></div>
+  <div class="journal-row"><span class="green">Banked profit: -2.5</span><span class="date">2026-11-24 | 12:27:12 GMT</span></div>
+ </div>
+ <div class="runbar journal-run"><button class="run-btn" id="journalRunBtn">▶ Run</button><div class="run-track"><span id="journalRunStatus">Bot is not running</span><div class="track-line"></div></div></div>
+</section>
+
+<div class="detail-screen" id="detailScreen">
+ <div class="detail-heading">Transactions detailed summary<button class="close-detail" id="closeDetail" aria-label="Close">×</button></div>
+ <div class="detail-list" id="detailList">
+  <article class="detail-card"><div class="detail-symbols"><svg class="market-icon" viewBox="0 0 50 50"><rect x="1" y="2" width="29" height="14" rx="3" fill="#343a40"/><text x="15" y="12.5" text-anchor="middle" font-size="10" font-weight="bold" fill="#fff">100</text><circle cx="40" cy="8" r="7" fill="#ef5260"/><text x="40" y="11" text-anchor="middle" font-size="7" fill="#fff">1s</text><g stroke="#43a7ad" stroke-width="2"><path d="M8 23v20M18 18v25M28 24v18M38 17v24"/></g><g fill="#43a7ad"><rect x="4" y="28" width="8" height="9"/><rect x="14" y="25" width="8" height="11"/><rect x="24" y="29" width="8" height="8"/><rect x="34" y="22" width="8" height="10"/></g></svg><svg class="match-icon" viewBox="0 0 30 30"><g stroke="#ed5968" stroke-width="3" stroke-linecap="round"><path d="M15 2v7M15 21v7M2 15h7M21 15h7M5.5 5.5l5 5M19.5 19.5l5 5M24.5 5.5l-5 5M10.5 19.5l-5 5"/></g><circle cx="15" cy="15" r="3" fill="#ed5968"/></svg></div><div class="detail-field"><b>Ref. ID</b><span>41502948619</span></div><div class="detail-field"><b>Timestamp</b><span>2026-11-24 12:27:02 GMT</span></div><div class="detail-right entry"><b>Entry Spot</b><span>1677.72</span></div><div class="detail-right exit"><b>Exit Spot</b><span>1677.72</span></div><div class="detail-field"><b>Buy Price</b><span>0.50</span></div><div class="detail-pl">Profit / Loss <span class="negative">-0.50</span></div></article>
+  <article class="detail-card"><div class="detail-symbols"><span style="font-size:30px;color:#48a7a9">▥</span><span style="font-size:30px;color:#ed5968">✣</span></div><div class="detail-field"><b>Ref. ID</b><span>41502935499</span></div><div class="detail-field"><b>Timestamp</b><span>2026-11-24 12:26:58 GMT</span></div><div class="detail-right entry"><b>Entry Spot</b><span>1678.65</span></div><div class="detail-right exit"><b>Exit Spot</b><span>1678.65</span></div><div class="detail-field"><b>Buy Price</b><span>0.50</span></div><div class="detail-pl">Profit / Loss <span class="negative">-0.50</span></div></article>
+  <article class="detail-card"><div class="detail-symbols"><span style="font-size:30px;color:#48a7a9">▥</span><span style="font-size:30px;color:#ed5968">✣</span></div><div class="detail-field"><b>Ref. ID</b><span>41502924299</span></div><div class="detail-field"><b>Timestamp</b><span>2026-11-24 12:26:54 GMT</span></div><div class="detail-right entry"><b>Entry Spot</b><span>1678.56</span></div><div class="detail-right exit"><b>Exit Spot</b><span>1678.56</span></div><div class="detail-field"><b>Buy Price</b><span>0.50</span></div><div class="detail-pl">Profit / Loss <span class="negative">-0.50</span></div></article>
+ </div>
+ <div class="detail-bottom"><div class="metric"><b>Total stake</b><span>6.50 USD</span></div><div class="metric"><b>Total payout</b><span>8.34 USD</span></div><div class="metric"><b>No. of runs</b><span>12</span></div></div>
+</div>
+
+<nav class="bottom-nav" aria-label="Main navigation">
+ <button class="nav-item"><svg viewBox="0 0 24 24"><path d="M3 10.5 12 3l9 7.5M5.5 9.5V21h13V9.5M9.5 21v-7h5v7"/></svg>Home</button>
+ <button class="nav-item"><svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>Dashboard</button>
+ <button class="nav-item active"><svg viewBox="0 0 24 24"><path d="M12 3c-2 2-3 3-3 5-2-1-4 1-4 4 0 4 3 8 7 8s7-4 7-8c0-2-1-4-3-5 0 2-1 3-2 3 0-3-1-5-2-7Z"/><path d="M10 15c0-1 1-2 2-3 1 1 2 2 2 3a2 2 0 0 1-4 0Z"/></svg>Bot builder</button>
+ <button class="nav-item"><svg viewBox="0 0 24 24"><path d="M3 19V5M3 19h18M6 16l4-5 3 2 5-7 3 3"/></svg>Chart</button>
+ <button class="nav-item"><svg viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h16"/></svg>Menu</button>
+</nav>
+</div>
+<div class="toast" id="toast"></div>
+<div class="modal-backdrop" id="modal">
+ <div class="modal"><h3 id="modalTitle">Information</h3><p id="modalText"></p><div class="modal-actions"><button class="outline" id="modalClose">Close</button></div></div>
+</div>
+<script>
+const $=s=>document.querySelector(s), $$=s=>[...document.querySelectorAll(s)];
+let currentView='summary',isRunning=true,toastTimer;
+function toast(message){const el=$('#toast');el.textContent=message;el.classList.add('show');clearTimeout(toastTimer);toastTimer=setTimeout(()=>el.classList.remove('show'),2300)}
+function switchView(name){
+ if(!['summary','transactions','journal'].includes(name))return;
+ currentView=name;
+ $$('.view').forEach(v=>v.classList.toggle('active',v.id===name));
+ $$('.tab').forEach(t=>t.classList.toggle('active',t.dataset.view===name));
+ $('#detailScreen').classList.remove('open');
+ window.scrollTo(0,0);
+}
+$$('.tab').forEach(t=>t.addEventListener('click',()=>switchView(t.dataset.view)));
+function openDetails(){ $('#detailScreen').classList.add('open'); $('#detailScreen').scrollTop=0; }
+$('#viewDetailBtn').addEventListener('click',openDetails);
+$('#closeDetail').addEventListener('click',()=>$('#detailScreen').classList.remove('open'));
+$$('.trans-row').forEach(r=>r.addEventListener('click',openDetails));
+function setRunState(){
+ isRunning=!isRunning;
+ $('#runBtn').textContent=isRunning?'■ Stop':'▶ Run';
+ $('#journalRunBtn').textContent=isRunning?'■ Stop':'▶ Run';
+ $('#runStatus').textContent=isRunning?'Contract bought':'Bot is not running';
+ $('#journalRunStatus').textContent=isRunning?'Contract bought':'Bot is not running';
+ $('#runBtn').classList.toggle('running',isRunning);
+ toast(isRunning?'Bot started (visual demo)':'Bot stopped (visual demo)');
+}
+$('#runBtn').addEventListener('click',setRunState);
+$('#journalRunBtn').addEventListener('click',setRunState);
+function showModal(title,message){$('#modalTitle').textContent=title;$('#modalText').textContent=message;$('#modal').classList.add('open')}
+$('#modalClose').addEventListener('click',()=>$('#modal').classList.remove('open'));
+$('#modal').addEventListener('click',e=>{if(e.target.id==='modal')$('#modal').classList.remove('open')});
+$('#depositBtn').addEventListener('click',()=>showModal('Demo account','This is a visual HTML replica. Deposit actions are not connected to a real trading account.'));
+$('#resetBtn').addEventListener('click',()=>showModal('Reset','This replica displays the reference account figures. Reset is not connected to a broker account.'));
+$('#filterBtn').addEventListener('click',()=>{
+ const rows=$$('#journalList .journal-row');const onlyBought=rows.some(r=>!r.hidden);
+ rows.forEach(r=>r.hidden=onlyBought&&!r.textContent.includes('Bought:'));
+ $('#filterBtn').textContent=onlyBought?'Filters · Bought':'Filters';
+ toast(onlyBought?'Showing purchased contracts':'All journal entries shown');
+});
+function downloadText(filename,text,type='text/csv'){
+ const blob=new Blob([text],{type});const url=URL.createObjectURL(blob);const a=document.createElement('a');a.href=url;a.download=filename;a.click();URL.revokeObjectURL(url);
+}
+$('#journalDownload').addEventListener('click',()=>{
+ const rows=$$('#journalList .journal-row').map(r=>'"'+r.innerText.replace(/\n/g,' | ').replace(/"/g,'""')+'"');
+ downloadText('journal-export.csv','Entry\r\n'+rows.join('\r\n'));toast('Journal CSV downloaded');
+});
+$('#downloadBtn').addEventListener('click',()=>toast('Download is unavailable in the supplied reference state.'));
+$$('.nav-item').forEach((b,i)=>b.addEventListener('click',()=>{
+ if(i===2){switchView('summary');return}
+ const names=['Home','Dashboard','Bot builder','Chart','Menu'];toast(names[i]+' navigation is a visual placeholder in this replica');
+}));
+document.addEventListener('keydown',e=>{if(e.key==='Escape'){$('#detailScreen').classList.remove('open');$('#modal').classList.remove('open')}});
+</script>
+</body>
+</html>
