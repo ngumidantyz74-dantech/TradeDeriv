@@ -242,6 +242,7 @@ export interface BotJournalEntry {
 
 export interface BotTelemetry {
   running: boolean;
+  runId?: string;
   runState?: 'idle' | 'buying' | 'bought' | 'won' | 'lost';
   strategyName: string;
   symbol: string;

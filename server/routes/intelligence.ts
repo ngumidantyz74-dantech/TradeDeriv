@@ -237,10 +237,17 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
   let best: AnalyserSignalResult | null = null;
 
   for (const sym of candidates) {
-    const prices = await derivWs.fetchTickHistory(sym, 80).catch(() => []);
+    const existingBuf = derivWs.getSparkline(sym, 80);
+    const prices =
+      existingBuf.length >= 15
+        ? existingBuf
+        : await Promise.race([
+            derivWs.fetchTickHistory(sym, 80).catch(() => []),
+            new Promise<number[]>((resolve) => setTimeout(() => resolve([]), 900)),
+          ]);
     const tick = derivWs.getLatestTick(sym);
     const meta = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === sym);
-    const buf = prices.length >= 10 ? prices : derivWs.getSparkline(sym, 40);
+    const buf = prices.length >= 10 ? prices : existingBuf.length > 0 ? existingBuf : derivWs.getSparkline(sym, 40);
     const latestPrice = tick?.quote ?? buf[buf.length - 1] ?? meta?.base_price ?? 1000;
     const pip = tick?.pipSize ?? meta?.pip_size ?? 0.01;
     const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : pip < 0.01 ? 3 : 2;

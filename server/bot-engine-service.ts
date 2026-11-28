@@ -86,6 +86,7 @@ interface InternalBotSession extends BotTelemetry {
   connectedAccountId: number | null;
   unsubscribeTick: (() => void) | null;
   isExecutingTrade: boolean;
+  executingStartedAt: number;
   lastTradeAt: number;
   winStreak: number;
   lossStreak: number;
@@ -188,6 +189,24 @@ function handleBotTradeSettled(session: InternalBotSession, pnl: number): void {
     : session.realizedPnl.toFixed(2);
   appendJournal(session, 'session_profit', `Session profit: ${spStr}`);
   derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
+
+  // Stop immediately when session risk targets are met without waiting on another tick
+  let stopReason: string | null = null;
+  if (session.takeProfit > 0 && session.realizedPnl >= session.takeProfit) {
+    stopReason = `Take Profit target ($${session.takeProfit.toFixed(2)}) reached`;
+  } else if (session.stopLoss > 0 && session.realizedPnl <= -session.stopLoss) {
+    stopReason = `Stop Loss limit (-$${session.stopLoss.toFixed(2)}) reached`;
+  } else if (session.maxLosses > 0 && session.losses >= session.maxLosses) {
+    stopReason = `Reached max ${session.maxLosses} losses cap`;
+  } else if (session.maxTrades > 0 && session.tradesPlaced >= session.maxTrades) {
+    stopReason = `Completed max ${session.maxTrades} bot trades`;
+  }
+  if (stopReason) {
+    const finalReason = stopReason;
+    queueMicrotask(() => {
+      stopBotSession(session.userId, finalReason, session.accountMode).catch(() => {});
+    });
+  }
 }
 
 function applyProgressionStake(session: InternalBotSession, won: boolean): boolean {
@@ -500,7 +519,10 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     return;
   }
 
-  if (session.isExecutingTrade) return;
+  if (session.isExecutingTrade) {
+    if (Date.now() - session.executingStartedAt < 18000) return;
+    session.isExecutingTrade = false;
+  }
   if (session.executionSpeed === 'normal' && Date.now() - session.lastTradeAt < 1800) {
     return;
   }
@@ -518,6 +540,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   }
 
   session.isExecutingTrade = true;
+  session.executingStartedAt = Date.now();
   session.runState = 'buying';
   try {
     const targetSymbol = session.symbol;
@@ -669,7 +692,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
             }
             return;
           }
-          if (row.execution_mode === 'virtual' && Date.now() - startedAtMs >= expectedMs + 6000) {
+          if (row.execution_mode === 'virtual' && Date.now() - startedAtMs >= expectedMs + 2500) {
             await settleVirtualDigitalOrder(Number(order.id)).catch(() => {});
           } else if (attempts >= 180 || !session.running) {
             clearInterval(checkInterval);
@@ -710,6 +733,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     }
   } finally {
     session.isExecutingTrade = false;
+    session.executingStartedAt = 0;
   }
 }
 
@@ -777,7 +801,14 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   await bulkCloseOrders(cfg.userId, 'bot', targetMode).catch(() => {});
 
   await derivWs.ensureSymbolSubscribed(cfg.symbol);
-  const seedPrices = await derivWs.fetchTickHistory(cfg.symbol, 25);
+  const bufferedPrices = derivWs.getSparkline(cfg.symbol, 25);
+  const seedPrices =
+    bufferedPrices.length >= 10
+      ? bufferedPrices
+      : await Promise.race([
+          derivWs.fetchTickHistory(cfg.symbol, 25).catch(() => bufferedPrices),
+          new Promise<number[]>((resolve) => setTimeout(() => resolve(bufferedPrices), 1200)),
+        ]);
   const latestTick = derivWs.getLatestTick(cfg.symbol) || {
     symbol: cfg.symbol,
     quote: seedPrices[seedPrices.length - 1] || 1000,
@@ -827,9 +858,20 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
   const resolvedExecutionMode: 'virtual' | 'deriv' =
     matchingAcc && !resolvedIsDbLocked ? 'deriv' : 'virtual';
 
-  const initialTradeSide = String(cfg.tradeSide || cfg.contractType || 'CALL').toUpperCase();
+  const rawCt = String(cfg.contractType || '').toUpperCase().trim();
+  const normalizedCt = !rawCt || rawCt === 'BOTH' ? 'CALL' : rawCt;
+  const rawSide = String(cfg.tradeSide || normalizedCt).toUpperCase().trim();
+  const initialTradeSide = !rawSide || rawSide === 'BOTH' ? normalizedCt : rawSide;
+  const normalizedSideMode: 'both' | 'single' =
+    String(cfg.contractSideMode || '').trim().toLowerCase() === 'single' ? 'single' : 'both';
+
   const runId = `run_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
-  const clampedStake = Number(Math.max(0.35, cfg.baseStake || 1).toFixed(2));
+  const rawStake = Number(cfg.baseStake);
+  const clampedStake = Number(Math.max(0.35, Number.isFinite(rawStake) && rawStake > 0 ? rawStake : 1).toFixed(2));
+  const safeMartingale = Number.isFinite(Number(cfg.martingale)) && Number(cfg.martingale) > 0 ? Number(cfg.martingale) : 2.0;
+  const safeTakeProfit = Number.isFinite(Number(cfg.takeProfit)) && Number(cfg.takeProfit) >= 0 ? Number(cfg.takeProfit) : 25;
+  const safeStopLoss = Number.isFinite(Number(cfg.stopLoss)) && Number(cfg.stopLoss) >= 0 ? Number(cfg.stopLoss) : 50;
+  const safeMaxTrades = Number.isFinite(Number(cfg.maxTrades)) && Number(cfg.maxTrades) > 0 ? Number(cfg.maxTrades) : 50;
 
   const session: InternalBotSession = {
     userId: cfg.userId,
@@ -838,14 +880,14 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     strategyName: cfg.strategyName || 'Deriv Bot',
     strategyType: cfg.strategyType || 'Martingale',
     symbol: cfg.symbol,
-    contractType: cfg.contractType || 'DIGITOVER',
+    contractType: normalizedCt,
     baseStake: clampedStake,
     currentStake: clampedStake,
     martingaleStep: 0,
-    martingaleFactor: Number(cfg.martingale || 2.0),
-    takeProfit: Number(cfg.takeProfit || 25),
-    stopLoss: Number(cfg.stopLoss || 50),
-    maxTrades: Number(cfg.maxTrades || 50),
+    martingaleFactor: safeMartingale,
+    takeProfit: safeTakeProfit,
+    stopLoss: safeStopLoss,
+    maxTrades: safeMaxTrades,
     tickCount: 0,
     tradesPlaced: 0,
     wins: 0,
@@ -855,10 +897,10 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     lastSignal: 'Evaluating entry signal',
     recentPrices: seedPrices.slice(-20),
     barrier: cfg.barrier ?? '2',
-    duration: Number(cfg.duration || 1),
+    duration: Number.isFinite(Number(cfg.duration)) && Number(cfg.duration) > 0 ? Number(cfg.duration) : 1,
     durationUnit: cfg.durationUnit || 't',
-    multiplier: Number(cfg.multiplier || 100),
-    growthRate: Number(cfg.growthRate || 0.02),
+    multiplier: Number.isFinite(Number(cfg.multiplier)) && Number(cfg.multiplier) > 0 ? Number(cfg.multiplier) : 100,
+    growthRate: Number.isFinite(Number(cfg.growthRate)) && Number(cfg.growthRate) > 0 ? Number(cfg.growthRate) : 0.02,
     executionMode: resolvedExecutionMode,
     connectedAccountId: resolvedConnectedAccountId,
     accountMode: targetMode,
@@ -866,6 +908,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     analyserSync: true,
     unsubscribeTick: null,
     isExecutingTrade: false,
+    executingStartedAt: 0,
     lastTradeAt: 0,
     winStreak: 0,
     lossStreak: 0,
@@ -875,7 +918,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     sellTickCount: Number(cfg.sellTickCount || 0),
     maxLosses: Number(cfg.maxLosses || 0),
     consecutiveErrors: 0,
-    contractSideMode: cfg.contractSideMode === 'single' ? 'single' : 'both',
+    contractSideMode: normalizedSideMode,
     currentTradeSide: initialTradeSide,
     conditionType: cfg.conditionType || 'any_tick',
     conditionDigit: Number(cfg.conditionDigit ?? 2),
@@ -931,7 +974,12 @@ export async function stopBotSession(
     const session = activeSessions.get(key);
     if (!session) continue;
     session.running = false;
-    session.runState = 'idle';
+    const isManualOrReplace =
+      reason.toLowerCase().includes('stopped by trader') ||
+      reason.toLowerCase().includes('replaced by');
+    if (isManualOrReplace || (session.runState !== 'won' && session.runState !== 'lost')) {
+      session.runState = 'idle';
+    }
     session.lastSignal = reason;
     if (session.unsubscribeTick) {
       session.unsubscribeTick();

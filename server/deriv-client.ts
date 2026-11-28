@@ -124,6 +124,7 @@ export class DerivWebSocketClient {
   private tickHistoryBuffers = new Map<string, number[]>();
   private exchangePairsState = new Map<string, LiveExchangePair>();
   private dbCheckedSymbols = new Set<string>();
+  private contractsForCache = new Map<string, { ts: number; data: any }>();
 
   constructor() {
     this.seedInitialPricesFromCatalog();
@@ -391,8 +392,10 @@ export class DerivWebSocketClient {
     await this.ensureSymbolSubscribed(symbol);
     const existing = this.latestTicks.get(symbol);
     const nowEpoch = Math.floor(Date.now() / 1000);
-    if (existing && existing.source === 'deriv_ws' && nowEpoch - existing.epoch <= 4) {
-      return existing;
+    if (existing && (existing.source === 'deriv_ws' || existing.source === 'live_pulse') && nowEpoch - existing.epoch <= 4) {
+      if (existing.source === 'deriv_ws' || !this.isConnected) {
+        return existing;
+      }
     }
     try {
       const resp = await this.request<{
@@ -405,7 +408,7 @@ export class DerivWebSocketClient {
           end: 'latest',
           style: 'ticks',
         },
-        4500
+        existing ? 1800 : 4000
       );
       const prices = resp?.history?.prices;
       const times = resp?.history?.times;
@@ -693,7 +696,33 @@ export class DerivWebSocketClient {
 
     return new Promise<T>((resolve, reject) => {
       const socket = new WebSocket(url);
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        try {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+          }
+        } catch {
+          // ignore
+        }
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const succeed = (val: T) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      };
+
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         try {
           socket.terminate();
         } catch {
@@ -714,9 +743,7 @@ export class DerivWebSocketClient {
           const data = JSON.parse(raw.toString());
           if (!authorized && data.req_id === 1) {
             if (data.error) {
-              clearTimeout(timer);
-              socket.close();
-              reject(new Error(data.error.message || 'Deriv token authorization failed'));
+              fail(new Error(data.error.message || 'Deriv token authorization failed'));
               return;
             }
             authorized = true;
@@ -725,26 +752,127 @@ export class DerivWebSocketClient {
             return;
           }
           if (authorized && data.req_id === 2) {
-            clearTimeout(timer);
-            socket.close();
             if (data.error) {
-              reject(new Error(data.error.message || 'Deriv API call rejected'));
+              fail(new Error(data.error.message || 'Deriv API call rejected'));
             } else if (data && typeof data === 'object' && authorizePayload) {
-              resolve({ ...data, _authorize: authorizePayload } as T);
+              succeed({ ...data, _authorize: authorizePayload } as T);
             } else {
-              resolve(data as T);
+              succeed(data as T);
             }
           }
         } catch (err) {
-          clearTimeout(timer);
-          socket.close();
-          reject(err instanceof Error ? err : new Error('Failed to parse Deriv response'));
+          fail(err instanceof Error ? err : new Error('Failed to parse Deriv response'));
         }
       });
 
+      socket.on('close', (code) => {
+        fail(new Error(`Deriv authorized socket closed prematurely (${code})`));
+      });
+
       socket.on('error', (err) => {
+        fail(err instanceof Error ? err : new Error('Deriv socket error'));
+      });
+    });
+  }
+
+  public async executeProposalAndBuyWithToken(
+    token: string,
+    proposalPayload: Record<string, unknown>,
+    stake: number,
+    timeoutMs = 10000
+  ): Promise<{ proposal: any; buy: any }> {
+    const appId = getWsFeedAppId();
+    const base = this.lastWorkingEndpoint || config.derivWsUrl;
+    const url = `${base}?app_id=${encodeURIComponent(appId)}&l=EN&brand=deriv`;
+
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(url);
+      let settled = false;
+      let authorized = false;
+      let proposalData: any = null;
+
+      const cleanup = () => {
         clearTimeout(timer);
-        reject(err instanceof Error ? err : new Error('Deriv socket error'));
+        try {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+          }
+        } catch {
+          // ignore
+        }
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const succeed = (val: { proposal: any; buy: any }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          socket.terminate();
+        } catch {
+          // ignore
+        }
+        reject(new Error('Deriv proposal/buy timed out'));
+      }, timeoutMs);
+
+      socket.on('open', () => {
+        socket.send(JSON.stringify({ authorize: token, req_id: 1 }));
+      });
+
+      socket.on('message', (raw) => {
+        try {
+          const data = JSON.parse(raw.toString());
+          if (!authorized && data.req_id === 1) {
+            if (data.error) {
+              fail(new Error(data.error.message || 'Deriv token authorization failed'));
+              return;
+            }
+            authorized = true;
+            socket.send(JSON.stringify({ ...proposalPayload, req_id: 2 }));
+            return;
+          }
+          if (authorized && data.req_id === 2) {
+            if (data.error) {
+              fail(new Error(data.error.message || 'Deriv proposal rejected'));
+              return;
+            }
+            const propId = data?.proposal?.id;
+            if (!propId) {
+              fail(new Error('Deriv did not return a valid proposal ID'));
+              return;
+            }
+            proposalData = data.proposal;
+            socket.send(JSON.stringify({ buy: propId, price: stake, req_id: 3 }));
+            return;
+          }
+          if (authorized && data.req_id === 3) {
+            if (data.error) {
+              fail(new Error(data.error.message || 'Deriv contract purchase rejected'));
+              return;
+            }
+            succeed({ proposal: proposalData, buy: data.buy });
+          }
+        } catch (err) {
+          fail(err instanceof Error ? err : new Error('Failed to parse Deriv trade response'));
+        }
+      });
+
+      socket.on('close', (code) => {
+        fail(new Error(`Deriv trading socket closed (${code})`));
+      });
+
+      socket.on('error', (err) => {
+        fail(err instanceof Error ? err : new Error('Deriv socket error'));
       });
     });
   }
@@ -913,13 +1041,22 @@ export class DerivWebSocketClient {
   }
 
   public async getContractsFor(symbol: string, currency = 'USD'): Promise<any> {
-    return this.request(
+    const cacheKey = `${symbol}:${currency}`;
+    const hit = this.contractsForCache.get(cacheKey);
+    if (hit && Date.now() - hit.ts < 300_000) {
+      return hit.data;
+    }
+    const resp = await this.request(
       {
         contracts_for: symbol,
         currency,
       },
-      6000
+      4500
     );
+    if (resp?.contracts_for) {
+      this.contractsForCache.set(cacheKey, { ts: Date.now(), data: resp });
+    }
+    return resp;
   }
 
   public async getProposal(payload: Record<string, unknown>, token?: string | null): Promise<any> {
@@ -948,7 +1085,33 @@ export class OtpDerivClient {
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const socket = new WebSocket(otpWsUrl);
+      let settled = false;
+      const cleanup = () => {
+        clearTimeout(timer);
+        try {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+          }
+        } catch {
+          // ignore
+        }
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const succeed = (val: T) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      };
+
       const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
         try {
           socket.terminate();
         } catch {
@@ -965,25 +1128,175 @@ export class OtpDerivClient {
         try {
           const data = JSON.parse(raw.toString());
           if (data.req_id === 101) {
-            clearTimeout(timer);
-            socket.close();
             if (data.error) {
-              reject(new Error(data.error.message || 'Deriv OTP execution failed'));
+              fail(new Error(data.error.message || 'Deriv OTP execution failed'));
             } else {
-              resolve(data as T);
+              succeed(data as T);
             }
           }
         } catch (err) {
-          clearTimeout(timer);
-          socket.close();
-          reject(err instanceof Error ? err : new Error('Invalid OTP response'));
+          fail(err instanceof Error ? err : new Error('Invalid OTP response'));
         }
       });
 
-      socket.on('error', (err) => {
-        clearTimeout(timer);
-        reject(err instanceof Error ? err : new Error('OTP WebSocket error'));
+      socket.on('close', (code) => {
+        fail(new Error(`OTP WebSocket closed prematurely (${code})`));
       });
+
+      socket.on('error', (err) => {
+        fail(err instanceof Error ? err : new Error('OTP WebSocket error'));
+      });
+    });
+  }
+
+  public static async executeProposalAndBuy(
+    otpWsUrl: string,
+    proposalPayload: Record<string, unknown>,
+    stake: number,
+    timeoutMs = 10000
+  ): Promise<{ proposal: any; buy: any }> {
+    return new Promise((resolve, reject) => {
+      const socket = new WebSocket(otpWsUrl);
+      let settled = false;
+      let proposalData: any = null;
+
+      const cleanup = () => {
+        clearTimeout(timer);
+        try {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+          }
+        } catch {
+          // ignore
+        }
+      };
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        reject(err);
+      };
+      const succeed = (val: { proposal: any; buy: any }) => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        resolve(val);
+      };
+
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        try {
+          socket.terminate();
+        } catch {
+          // ignore
+        }
+        reject(new Error('OTP proposal/buy timed out'));
+      }, timeoutMs);
+
+      socket.on('open', () => {
+        socket.send(JSON.stringify({ ...proposalPayload, req_id: 101 }));
+      });
+
+      socket.on('message', (raw) => {
+        try {
+          const data = JSON.parse(raw.toString());
+          if (data.req_id === 101) {
+            if (data.error) {
+              fail(new Error(data.error.message || 'Deriv proposal rejected'));
+              return;
+            }
+            const propId = data?.proposal?.id;
+            if (!propId) {
+              fail(new Error('Deriv did not return a valid proposal ID'));
+              return;
+            }
+            proposalData = data.proposal;
+            socket.send(JSON.stringify({ buy: propId, price: stake, req_id: 102 }));
+            return;
+          }
+          if (data.req_id === 102) {
+            if (data.error) {
+              fail(new Error(data.error.message || 'Deriv contract purchase rejected'));
+              return;
+            }
+            succeed({ proposal: proposalData, buy: data.buy });
+          }
+        } catch (err) {
+          fail(err instanceof Error ? err : new Error('Invalid OTP trade response'));
+        }
+      });
+
+      socket.on('close', (code) => {
+        fail(new Error(`OTP trading socket closed (${code})`));
+      });
+
+      socket.on('error', (err) => {
+        fail(err instanceof Error ? err : new Error('OTP WebSocket error'));
+      });
+    });
+  }
+
+  public static async waitForContractSettlement(
+    otpWsUrl: string,
+    contractId: string | number,
+    onUpdate?: (poc: any) => void,
+    maxWaitMs = 20000
+  ): Promise<any | null> {
+    return new Promise((resolve) => {
+      const socket = new WebSocket(otpWsUrl);
+      let finished = false;
+      let latestPoc: any = null;
+
+      const finish = (poc: any | null) => {
+        if (finished) return;
+        finished = true;
+        clearTimeout(timer);
+        try {
+          if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
+            socket.close();
+          }
+        } catch {
+          // ignore
+        }
+        resolve(poc);
+      };
+
+      const timer = setTimeout(() => finish(latestPoc), maxWaitMs);
+
+      socket.on('open', () => {
+        socket.send(
+          JSON.stringify({
+            proposal_open_contract: 1,
+            contract_id: Number(contractId),
+            subscribe: 1,
+            req_id: 103,
+          })
+        );
+      });
+
+      socket.on('message', (raw) => {
+        try {
+          const data = JSON.parse(raw.toString());
+          if (data.error) {
+            finish(latestPoc);
+            return;
+          }
+          const poc = data?.proposal_open_contract;
+          if (!poc) return;
+          latestPoc = poc;
+          if (onUpdate) onUpdate(poc);
+          const settled = Boolean(poc.is_sold) || poc.status === 'won' || poc.status === 'lost' || poc.status === 'sold';
+          if (settled) {
+            finish(poc);
+          }
+        } catch {
+          // ignore malformed frame
+        }
+      });
+
+      socket.on('close', () => finish(latestPoc));
+      socket.on('error', () => finish(latestPoc));
     });
   }
 }

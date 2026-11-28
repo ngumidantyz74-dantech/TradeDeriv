@@ -190,6 +190,7 @@ export const BotBuilderPage: React.FC = () => {
     setTradePreset,
     ticks,
     orders,
+    loadingAuth,
     theme,
     toggleTheme,
     hideBalances,
@@ -341,17 +342,35 @@ export const BotBuilderPage: React.FC = () => {
   const [qsSelected, setQsSelected] = useState<QuickStrategyDef>(QUICK_STRATEGIES[0]);
 
   const [telemetry, setTelemetry] = useState<BotTelemetry | null>(null);
-  const [sessionResetAt, setSessionResetAt] = useState<number>(() => Date.now());
+  const [resetAfterOrderId, setResetAfterOrderId] = useState<number | null>(null);
   const [dismissedOutcomeKey, setDismissedOutcomeKey] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const fileRef = useRef<HTMLInputElement | null>(null);
 
-  // Reset telemetry cleanly whenever active user or accountMode changes
+  // Reset telemetry and order-ID session cursor whenever active user or accountMode changes
   useEffect(() => {
     setTelemetry(null);
-    setSessionResetAt(Date.now());
+    setResetAfterOrderId(null);
     setDismissedOutcomeKey('');
   }, [user?.id, accountMode]);
+
+  // Initialize order-ID cursor once initial auth/orders settle without relying on client clock
+  useEffect(() => {
+    if (loadingAuth || resetAfterOrderId !== null) return;
+    const activeRunId = telemetry?.runId || '';
+    const nonActiveIds = orders
+      .filter((o) => {
+        if (o.source !== 'bot') return false;
+        const mode = o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo');
+        if (mode !== accountMode) return false;
+        if (activeRunId && getOrderRunKey(o.notes) === activeRunId) return false;
+        return true;
+      })
+      .map((o) => Number(o.id))
+      .filter((id) => Number.isFinite(id));
+    const maxId = nonActiveIds.length > 0 ? Math.max(...nonActiveIds) : 0;
+    setResetAfterOrderId(maxId);
+  }, [loadingAuth, orders, accountMode, telemetry?.runId, resetAfterOrderId]);
 
   // Embedded Lightweight Chart refs (for Deriv Bot Chart tab)
   const chartContainerRef = useRef<HTMLDivElement | null>(null);
@@ -419,11 +438,13 @@ export const BotBuilderPage: React.FC = () => {
     }
   }, [accountMode]);
 
+  const isBotRunning = Boolean(telemetry?.running);
+
   useEffect(() => {
     pollStatus();
-    const timer = setInterval(pollStatus, 1400);
+    const timer = setInterval(pollStatus, isBotRunning ? 850 : 1800);
     return () => clearInterval(timer);
-  }, [pollStatus]);
+  }, [pollStatus, isBotRunning]);
 
   // Keep header balance & session transactions synced immediately after every bot trade / settlement
   useEffect(() => {
@@ -431,7 +452,15 @@ export const BotBuilderPage: React.FC = () => {
     if ((telemetry.tradesPlaced || 0) === 0 && !telemetry.running) return;
     refreshOrders();
     refreshAll();
-  }, [telemetry?.tradesPlaced, telemetry?.wins, telemetry?.losses, telemetry?.running, refreshOrders, refreshAll]);
+  }, [
+    telemetry?.tradesPlaced,
+    telemetry?.wins,
+    telemetry?.losses,
+    telemetry?.runState,
+    telemetry?.running,
+    refreshOrders,
+    refreshAll,
+  ]);
 
   // Embedded Lightweight Chart when botView === 'chart'
   useEffect(() => {
@@ -556,12 +585,24 @@ export const BotBuilderPage: React.FC = () => {
       const resolvedSellTicks = Number(getAssignmentVal(xmlState.assignments, 'Tick Count', xmlState.sellTickCount || '0')) || 0;
       const resolvedMaxLosses = Number(xmlState.maxLosses || '0') || undefined;
 
+      if (resetAfterOrderId === null) {
+        const modeIds = orders
+          .filter((o) => {
+            if (o.source !== 'bot') return false;
+            const mode = o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo');
+            return mode === accountMode;
+          })
+          .map((o) => Number(o.id))
+          .filter((id) => Number.isFinite(id));
+        setResetAfterOrderId(modeIds.length > 0 ? Math.max(...modeIds) : 0);
+      }
+
       const payload = {
         strategyName: overrides?.strategyName ?? xmlState.strategyName,
         strategyType: overrides?.strategyType ?? xmlState.strategyType,
         symbol: overrides?.symbol ?? symbol,
         contractType: overrides?.contractType ?? contractType,
-        contractSideMode: overrides?.contractSideMode ?? (xmlState.contractTypeSelection === 'Both' ? 'Both' : 'Single'),
+        contractSideMode: overrides?.contractSideMode ?? (xmlState.contractTypeSelection === 'Both' ? 'both' : 'single'),
         tradeSide: overrides?.tradeSide ?? tradeSide,
         winStep: Number(overrides?.winStep ?? winStep) || 0,
         maxWinSteps: Number(overrides?.maxWinSteps ?? maxWinSteps) || 3,
@@ -857,7 +898,7 @@ export const BotBuilderPage: React.FC = () => {
         strategyType: qsSelected.key,
         symbol: qsStep2Symbol,
         contractType: qsSelected.contractType,
-        contractSideMode: qsSelected.contractType === 'ACCU' ? 'Single' : 'Both',
+        contractSideMode: qsSelected.contractType === 'ACCU' ? 'single' : 'both',
         tradeSide: qsSelected.contractType,
         baseStake: Number(qsStep2Stake) || 1,
         martingale: Number(qsStep2Factor) || 2.1,
@@ -876,11 +917,15 @@ export const BotBuilderPage: React.FC = () => {
         if (o.source !== 'bot') return false;
         const mode = o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo');
         if (mode !== accountMode) return false;
-        const openedMs = new Date(o.opened_at).getTime();
-        if (sessionResetAt > 0 && Number.isFinite(openedMs) && openedMs < sessionResetAt) return false;
-        return true;
+        if (telemetry?.runId && getOrderRunKey(o.notes) === telemetry.runId) {
+          return true;
+        }
+        if (resetAfterOrderId !== null) {
+          return Number(o.id) > resetAfterOrderId;
+        }
+        return false;
       }),
-    [orders, accountMode, sessionResetAt]
+    [orders, accountMode, telemetry?.runId, resetAfterOrderId]
   );
 
   const closedBotOrders = useMemo(
@@ -982,7 +1027,15 @@ export const BotBuilderPage: React.FC = () => {
 
   const handleResetSummaryStats = () => {
     if (telemetry?.running) return;
-    setSessionResetAt(Date.now());
+    const modeIds = orders
+      .filter((o) => {
+        if (o.source !== 'bot') return false;
+        const mode = o.account_mode || (o.execution_mode === 'deriv' ? 'real' : 'demo');
+        return mode === accountMode;
+      })
+      .map((o) => Number(o.id))
+      .filter((id) => Number.isFinite(id));
+    setResetAfterOrderId(modeIds.length > 0 ? Math.max(...modeIds) : 0);
     setDismissedOutcomeKey('');
     setTelemetry(null);
   };
@@ -2125,6 +2178,10 @@ export const BotBuilderPage: React.FC = () => {
                     <X className="w-2.5 h-2.5" strokeWidth={2.5} />
                   </button>
                 </>
+              ) : telemetry?.running && runState === 'won' ? (
+                <span className="text-[#2A9D8F] text-[12.5px]">Won</span>
+              ) : telemetry?.running && runState === 'lost' ? (
+                <span className="text-[#FF444F] text-[12.5px]">Lost</span>
               ) : runState === 'bought' ? (
                 <span className="text-[#111319] dark:text-white text-[12.5px]">Contract bought</span>
               ) : runState === 'buying' ? (
@@ -2140,11 +2197,11 @@ export const BotBuilderPage: React.FC = () => {
                 className={`h-full rounded-full transition-all duration-300 ${
                   runState === 'bought'
                     ? 'bg-[#80aaa8] w-1/2'
-                    : showOutcomePill && runState === 'won'
+                    : (showOutcomePill || telemetry?.running) && runState === 'won'
                       ? 'bg-[#4bb5ad] w-full'
                       : runState === 'buying'
                         ? 'bg-[#80aaa8] w-1/4'
-                        : showOutcomePill && runState === 'lost'
+                        : (showOutcomePill || telemetry?.running) && runState === 'lost'
                           ? 'bg-[#ed4b5b] w-full'
                           : 'w-0'
                 }`}
@@ -2158,7 +2215,7 @@ export const BotBuilderPage: React.FC = () => {
                 className={`absolute left-1/2 -translate-x-1/2 top-1/2 -translate-y-1/2 w-2.5 h-2.5 rounded-full ${
                   runState === 'bought'
                     ? 'bg-[#ed4b5b]/45'
-                    : showOutcomePill && runState === 'won'
+                    : (showOutcomePill || telemetry?.running) && runState === 'won'
                       ? 'bg-[#4bb5ad]/60'
                       : 'bg-transparent'
                 }`}

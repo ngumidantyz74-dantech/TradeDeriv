@@ -293,11 +293,20 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
   const entryPrice = tick?.quote || 1000.0;
   const pipSize = tick?.pipSize || 0.01;
 
-  const lots = Number(Math.max(0.01, Math.min(100, input.lots ?? (input.stake ? input.stake / 100 : 0.02))).toFixed(2));
-  const stake = Number(Math.max(0.35, input.stake ?? lots * 100).toFixed(2));
-  const multiplier = Number(input.multiplier || 100);
+  const rawLots = Number(input.lots);
+  const rawStake = Number(input.stake);
+  const lots = Number(
+    Math.max(
+      0.01,
+      Math.min(100, Number.isFinite(rawLots) && rawLots > 0 ? rawLots : Number.isFinite(rawStake) && rawStake > 0 ? rawStake / 100 : 0.02)
+    ).toFixed(2)
+  );
+  const stake = Number(
+    Math.max(0.35, Number.isFinite(rawStake) && rawStake > 0 ? rawStake : lots * 100).toFixed(2)
+  );
+  const multiplier = Number.isFinite(Number(input.multiplier)) && Number(input.multiplier) > 0 ? Number(input.multiplier) : 100;
   const contractType = normalizeContractType(input.side, input.contractType);
-  const duration = Number(input.duration || 5);
+  const duration = Number.isFinite(Number(input.duration)) && Number(input.duration) > 0 ? Number(input.duration) : 5;
   const durationUnit = input.durationUnit || 't';
 
   if (input.source !== 'bot') {
@@ -446,7 +455,10 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       accountMode = creds.account.is_virtual ? 'demo' : 'real';
       try {
         const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
-        const symbolField = isOAuth2 ? { underlying_symbol: input.symbol } : { symbol: input.symbol };
+        const digitBarrierTypes = new Set(['DIGITOVER', 'DIGITUNDER', 'DIGITMATCH', 'DIGITDIFF']);
+        const priceBarrierTypes = new Set(['ONETOUCH', 'NOTOUCH', 'EXPIRYRANGE', 'EXPIRYMISS', 'ENDSIN', 'ENDSOUT']);
+        const needsPriceBarrier = contractType === 'HIGHER' || contractType === 'LOWER' || priceBarrierTypes.has(contractType);
+        const needsDigitBarrier = digitBarrierTypes.has(contractType);
 
         let effectiveType =
           contractType === 'HIGHER' ? 'CALL' : contractType === 'LOWER' ? 'PUT' : contractType;
@@ -455,26 +467,16 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         let effectiveDurationUnit = durationUnit;
 
         try {
-          const cfResp = await derivWs.request<{
-            contracts_for?: {
-              available?: Array<{
-                contract_type: string;
-                multiplier_range?: number[];
-                min_contract_duration?: string;
-                max_contract_duration?: string;
-              }>;
-            };
-          }>({ contracts_for: input.symbol, currency: creds.account.currency }, 4500);
-
+          const cfResp = await derivWs.getContractsFor(input.symbol, creds.account.currency);
           const available = cfResp?.contracts_for?.available || [];
 
           if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
-            const multContract = available.find((c) => c.contract_type === effectiveType);
+            const multContract = available.find((c: any) => c.contract_type === effectiveType);
             if (!multContract) {
               effectiveType = effectiveType === 'MULTUP' ? 'CALL' : 'PUT';
             } else if (multContract.multiplier_range && multContract.multiplier_range.length > 0) {
               if (!multContract.multiplier_range.includes(effectiveMult)) {
-                effectiveMult = multContract.multiplier_range.reduce((prev, curr) =>
+                effectiveMult = multContract.multiplier_range.reduce((prev: number, curr: number) =>
                   Math.abs(curr - effectiveMult) < Math.abs(prev - effectiveMult) ? curr : prev
                 );
               }
@@ -482,9 +484,9 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
           }
 
           if (effectiveType !== 'MULTUP' && effectiveType !== 'MULTDOWN') {
-            const matchingContracts = available.filter((c) => c.contract_type === effectiveType);
+            const matchingContracts = available.filter((c: any) => c.contract_type === effectiveType);
             const chosenContract =
-              matchingContracts.find((c) => {
+              matchingContracts.find((c: any) => {
                 const minD = parseDerivDuration(c.min_contract_duration);
                 return minD && minD.unit === effectiveDurationUnit;
               }) || matchingContracts[0];
@@ -524,58 +526,106 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
           }
         }
 
-        const proposalPayload: Record<string, unknown> = {
-          proposal: 1,
-          amount: stake,
-          basis: 'stake',
-          contract_type: effectiveType,
-          currency: creds.account.currency,
-          ...symbolField,
-        };
+        const buildProposalPayload = (useUnderlyingKey: boolean): Record<string, unknown> => {
+          const symbolField = useUnderlyingKey
+            ? { underlying_symbol: input.symbol }
+            : { symbol: input.symbol };
 
-        if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
-          proposalPayload.multiplier = effectiveMult;
-          const limitOrder: Record<string, number> = {};
-          if (tpUsd && tpUsd >= 0.5) limitOrder.take_profit = Number(tpUsd.toFixed(2));
-          if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
-          if (Object.keys(limitOrder).length > 0) proposalPayload.limit_order = limitOrder;
-        } else if (effectiveType === 'ACCU') {
-          proposalPayload.growth_rate = growthRate || 0.02;
-          if (tpUsd && tpUsd >= 0.5) {
-            proposalPayload.limit_order = { take_profit: Number(tpUsd.toFixed(2)) };
+          const payload: Record<string, unknown> = {
+            proposal: 1,
+            amount: stake,
+            basis: 'stake',
+            contract_type: effectiveType,
+            currency: creds.account.currency,
+            ...symbolField,
+          };
+
+          if (effectiveType === 'MULTUP' || effectiveType === 'MULTDOWN') {
+            payload.multiplier = effectiveMult;
+            const limitOrder: Record<string, number> = {};
+            if (tpUsd && tpUsd >= 0.5) limitOrder.take_profit = Number(tpUsd.toFixed(2));
+            if (slUsd && slUsd >= 0.5 && slUsd < stake) limitOrder.stop_loss = Number(slUsd.toFixed(2));
+            if (Object.keys(limitOrder).length > 0) payload.limit_order = limitOrder;
+          } else if (effectiveType === 'ACCU') {
+            payload.growth_rate = growthRate || 0.02;
+            if (tpUsd && tpUsd >= 0.5) {
+              payload.limit_order = { take_profit: Number(tpUsd.toFixed(2)) };
+            }
+          } else {
+            payload.duration = effectiveDuration;
+            payload.duration_unit = effectiveDurationUnit;
+            if (needsDigitBarrier) {
+              const rawNum = Number(input.barrier);
+              let d = Number.isFinite(rawNum)
+                ? Math.floor(rawNum)
+                : effectiveType === 'DIGITUNDER'
+                  ? 7
+                  : effectiveType === 'DIGITOVER'
+                    ? 2
+                    : 4;
+              if (effectiveType === 'DIGITOVER') d = Math.min(8, Math.max(0, d));
+              else if (effectiveType === 'DIGITUNDER') d = Math.min(9, Math.max(1, d));
+              else d = Math.min(9, Math.max(0, d));
+              payload.barrier = String(d);
+            } else if (needsPriceBarrier) {
+              const rawB = String(input.barrier ?? '').trim();
+              if (!rawB || /^[0-9]$/.test(rawB)) {
+                payload.barrier = contractType === 'LOWER' ? '-0.50' : '+0.50';
+              } else {
+                payload.barrier = rawB;
+              }
+            }
           }
-        } else {
-          proposalPayload.duration = effectiveDuration;
-          proposalPayload.duration_unit = effectiveDurationUnit;
-          if (input.barrier !== undefined && input.barrier !== null && input.barrier !== '') {
-            proposalPayload.barrier = String(input.barrier);
-          }
-        }
+          return payload;
+        };
 
         let buyResult: any;
         if (isOAuth2) {
-          const otpResp = await derivRestRequest<any>(
-            `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
-            creds.token,
-            { method: 'POST' }
-          );
-          const otpUrl = extractDerivOtpWsUrl(otpResp);
-          if (!otpUrl) {
-            throw new Error(
-              `Failed to mint Deriv OTP trading socket (keys: ${Object.keys(otpResp || {}).join(', ') || 'empty'})`
+          const mintOtpUrl = async () => {
+            const otpResp = await derivRestRequest<any>(
+              `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+              creds.token,
+              { method: 'POST' }
             );
+            const url = extractDerivOtpWsUrl(otpResp);
+            if (!url) {
+              throw new Error(
+                `Failed to mint Deriv OTP trading socket (keys: ${Object.keys(otpResp || {}).join(', ') || 'empty'})`
+              );
+            }
+            return url;
+          };
+
+          const otpUrl = await mintOtpUrl();
+          const preferUnderlying = !otpUrl.includes('/websockets/v3');
+          try {
+            buyResult = await OtpDerivClient.executeProposalAndBuy(
+              otpUrl,
+              buildProposalPayload(preferUnderlying),
+              stake,
+              10000
+            );
+          } catch (firstErr) {
+            const msg = firstErr instanceof Error ? firstErr.message.toLowerCase() : '';
+            if (msg.includes('underlying_symbol') || msg.includes('symbol')) {
+              const retryOtpUrl = await mintOtpUrl();
+              buyResult = await OtpDerivClient.executeProposalAndBuy(
+                retryOtpUrl,
+                buildProposalPayload(!preferUnderlying),
+                stake,
+                10000
+              );
+            } else {
+              throw firstErr;
+            }
           }
-          const prop = await OtpDerivClient.requestOnOtpUrl(otpUrl, proposalPayload);
-          buyResult = await OtpDerivClient.requestOnOtpUrl(otpUrl, {
-            buy: prop.proposal.id,
-            price: stake,
-          });
         } else {
-          const prop = await derivWs.requestWithToken(creds.token, proposalPayload);
-          buyResult = await derivWs.requestWithToken(creds.token, {
-            buy: prop.proposal.id,
-            price: stake,
-          });
+          buyResult = await derivWs.executeProposalAndBuyWithToken(
+            creds.token,
+            buildProposalPayload(false),
+            stake,
+            10000
+          );
         }
 
         if (buyResult?.buy?.contract_id) {
@@ -814,7 +864,21 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     }
   }
 
-  const storedBarrier = isAccu ? String(growthRate) : input.barrier ?? null;
+  const hasStoredBarrier = [
+    'DIGITOVER',
+    'DIGITUNDER',
+    'DIGITMATCH',
+    'DIGITDIFF',
+    'HIGHER',
+    'LOWER',
+    'ONETOUCH',
+    'NOTOUCH',
+    'EXPIRYRANGE',
+    'EXPIRYMISS',
+    'ENDSIN',
+    'ENDSOUT',
+  ].includes(contractType);
+  const storedBarrier = isAccu ? String(growthRate) : hasStoredBarrier ? input.barrier ?? null : null;
   const storedNotes = input.isAnalyserSynced
     ? `${input.notes ? `${input.notes} | ` : ''}analyser_sync`
     : input.notes || '';
@@ -923,9 +987,159 @@ async function monitorDerivOpenContract(
   userId: number,
   connectedAccountId: number
 ): Promise<void> {
+  const finalizeSettlement = async (order: any, creds: NonNullable<Awaited<ReturnType<typeof getDecryptedAccountToken>>>, isOAuth2: boolean, poc: any) => {
+    const currentSpot = Number(poc.current_spot ?? poc.exit_tick ?? order.current_price ?? order.entry_price);
+    const livePnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(order.stake) : 0)).toFixed(2));
+    const exitPrice = Number(poc.exit_tick ?? poc.current_spot ?? currentSpot ?? order.entry_price);
+    const payout = Number(
+      poc.sell_price !== undefined
+        ? poc.sell_price
+        : poc.status === 'won' || livePnl >= 0
+          ? Number(order.stake) + Math.max(0, livePnl)
+          : 0
+    );
+    const finalPnl = Number(poc.profit !== undefined ? poc.profit : (payout - Number(order.stake)).toFixed(2));
+
+    const closedOrder = await queryOne<any>(
+      `UPDATE virtual_orders
+       SET status = 'CLOSED', exit_price = $1, current_price = $1, payout = $2, pnl = $3, closed_at = NOW()
+       WHERE id = $4
+       RETURNING ${ORDER_SELECT_COLS}`,
+      [exitPrice, Number(payout.toFixed(2)), Number(finalPnl.toFixed(2)), orderId]
+    );
+
+    const settledAccMode = creds.account.is_virtual ? 'demo' : 'real';
+    if (creds.account.balance_locked_by_admin) {
+      if (payout > 0) {
+        await creditSettledPayoutToUser(userId, settledAccMode, Number(payout.toFixed(2)), creds.account.id, 'options');
+      }
+    } else {
+      let liveBal: number | null =
+        poc.balance_after !== undefined ? Number(poc.balance_after) : null;
+      if (liveBal === null) {
+        try {
+          const balResp = isOAuth2
+            ? await derivRestRequest<any>('/trading/v1/options/accounts', creds.token)
+            : await derivWs.requestWithToken(creds.token, { balance: 1 }, 4500);
+          if (isOAuth2) {
+            const list = balResp?.data || balResp?.accounts || [];
+            const found = list.find((item: any) => String(item.account_id) === String(creds.account.deriv_login_id));
+            if (found && found.balance !== undefined) liveBal = Number(found.balance);
+          } else if (balResp?.balance?.balance !== undefined) {
+            liveBal = Number(balResp.balance.balance);
+          }
+        } catch {
+          // fallback to credit if live fetch unavailable
+        }
+      }
+      if (liveBal !== null && Number.isFinite(liveBal)) {
+        await execute(
+          'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
+          [liveBal, creds.account.id]
+        );
+        if (creds.account.is_virtual) {
+          const u = await queryOne<{ demo_wallets_json: string; virtual_workspace_balance: number }>(
+            'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
+            [userId]
+          );
+          const dw = (() => {
+            try {
+              return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
+            } catch {
+              return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          dw.options = liveBal;
+          await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(dw),
+            userId,
+          ]);
+          invalidateAuthUserCache(userId);
+          derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
+          derivWs.emitUserEvent(userId, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
+        } else {
+          const u = await queryOne<{ real_wallets_json: string }>(
+            'SELECT real_wallets_json FROM users WHERE id = $1',
+            [userId]
+          );
+          const rw = (() => {
+            try {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
+            } catch {
+              return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
+            }
+          })();
+          rw.options = liveBal;
+          await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
+            JSON.stringify(rw),
+            userId,
+          ]);
+          invalidateAuthUserCache(userId);
+          derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
+          derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
+        }
+      } else if (payout > 0) {
+        await creditSettledPayoutToUser(userId, settledAccMode, Number(payout.toFixed(2)), creds.account.id, 'options');
+      }
+    }
+
+    untrackOpenMtmOrder(orderId);
+    if (closedOrder) {
+      derivWs.emitUserEvent(userId, 'order_closed', closedOrder);
+    }
+  };
+
+  // Fast single-socket OAuth2 streaming settlement first (avoids minting many OTPs on short tick contracts)
+  try {
+    const initialOrder = await queryOne<any>(`SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1`, [orderId]);
+    if (!initialOrder || initialOrder.status !== 'OPEN') return;
+    const initialCreds = await getDecryptedAccountToken(connectedAccountId, userId);
+    if (!initialCreds) return;
+    const isOAuth2 = initialCreds.token.startsWith('ory_at_') || initialCreds.token.length > 40;
+    if (isOAuth2) {
+      const otpResp = await derivRestRequest<any>(
+        `/trading/v1/options/accounts/${initialCreds.account.deriv_login_id}/otp`,
+        initialCreds.token,
+        { method: 'POST' }
+      );
+      const otpUrl = extractDerivOtpWsUrl(otpResp);
+      if (otpUrl) {
+        let lastEmitAt = 0;
+        const streamedPoc = await OtpDerivClient.waitForContractSettlement(
+          otpUrl,
+          derivContractId,
+          (poc) => {
+            const settled = Boolean(poc.is_sold) || poc.status === 'won' || poc.status === 'lost' || poc.status === 'sold';
+            if (!settled && Date.now() - lastEmitAt >= 650) {
+              lastEmitAt = Date.now();
+              const spot = Number(poc.current_spot ?? poc.exit_tick ?? initialOrder.current_price ?? initialOrder.entry_price);
+              const pnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(initialOrder.stake) : 0)).toFixed(2));
+              derivWs.emitUserEvent(userId, 'order_updated', { id: orderId, current_price: spot, pnl });
+            }
+          },
+          20000
+        );
+        if (streamedPoc) {
+          const settled =
+            Boolean(streamedPoc.is_sold) ||
+            streamedPoc.status === 'won' ||
+            streamedPoc.status === 'lost' ||
+            streamedPoc.status === 'sold';
+          if (settled) {
+            await finalizeSettlement(initialOrder, initialCreds, true, streamedPoc);
+            return;
+          }
+        }
+      }
+    }
+  } catch {
+    // fall through to polling loop
+  }
+
   const maxAttempts = 120;
+  let consecutiveFailures = 0;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await new Promise((r) => setTimeout(r, attempt === 0 ? 1100 : 1400));
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 900 : 1300));
     try {
       const order = await queryOne<any>(
         `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1`,
@@ -958,6 +1172,7 @@ async function monitorDerivOpenContract(
 
       const poc = pocResp?.proposal_open_contract;
       if (!poc) continue;
+      consecutiveFailures = 0;
 
       const currentSpot = Number(poc.current_spot ?? poc.exit_tick ?? order.current_price ?? order.entry_price);
       const livePnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(order.stake) : 0)).toFixed(2));
@@ -977,106 +1192,13 @@ async function monitorDerivOpenContract(
         continue;
       }
 
-      const exitPrice = Number(poc.exit_tick ?? poc.current_spot ?? currentSpot ?? order.entry_price);
-      const payout = Number(
-        poc.sell_price !== undefined
-          ? poc.sell_price
-          : poc.status === 'won' || livePnl >= 0
-            ? Number(order.stake) + Math.max(0, livePnl)
-            : 0
-      );
-      const finalPnl = Number(poc.profit !== undefined ? poc.profit : (payout - Number(order.stake)).toFixed(2));
-
-      const closedOrder = await queryOne<any>(
-        `UPDATE virtual_orders
-         SET status = 'CLOSED', exit_price = $1, current_price = $1, payout = $2, pnl = $3, closed_at = NOW()
-         WHERE id = $4
-         RETURNING ${ORDER_SELECT_COLS}`,
-        [exitPrice, Number(payout.toFixed(2)), Number(finalPnl.toFixed(2)), orderId]
-      );
-
-      const settledAccMode = creds.account.is_virtual ? 'demo' : 'real';
-      if (creds.account.balance_locked_by_admin) {
-        if (payout > 0) {
-          await creditSettledPayoutToUser(userId, settledAccMode, Number(payout.toFixed(2)), creds.account.id, 'options');
-        }
-      } else {
-        let liveBal: number | null =
-          poc.balance_after !== undefined ? Number(poc.balance_after) : null;
-        if (liveBal === null) {
-          try {
-            const balResp = isOAuth2
-              ? await derivRestRequest<any>('/trading/v1/options/accounts', creds.token)
-              : await derivWs.requestWithToken(creds.token, { balance: 1 }, 4500);
-            if (isOAuth2) {
-              const list = balResp?.data || balResp?.accounts || [];
-              const found = list.find((item: any) => String(item.account_id) === String(creds.account.deriv_login_id));
-              if (found && found.balance !== undefined) liveBal = Number(found.balance);
-            } else if (balResp?.balance?.balance !== undefined) {
-              liveBal = Number(balResp.balance.balance);
-            }
-          } catch {
-            // fallback to credit if live fetch unavailable
-          }
-        }
-        if (liveBal !== null && Number.isFinite(liveBal)) {
-          await execute(
-            'UPDATE connected_accounts SET balance = $1, last_known_balance = $1, updated_at = NOW() WHERE id = $2',
-            [liveBal, creds.account.id]
-          );
-          if (creds.account.is_virtual) {
-            const u = await queryOne<{ demo_wallets_json: string; virtual_workspace_balance: number }>(
-              'SELECT demo_wallets_json, virtual_workspace_balance FROM users WHERE id = $1',
-              [userId]
-            );
-            const dw = (() => {
-              try {
-                return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.demo_wallets_json || '{}') };
-              } catch {
-                return { main_usd: Number(u?.virtual_workspace_balance ?? 10000), options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-              }
-            })();
-            dw.options = liveBal;
-            await execute('UPDATE users SET demo_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-              JSON.stringify(dw),
-              userId,
-            ]);
-            invalidateAuthUserCache(userId);
-            derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
-            derivWs.emitUserEvent(userId, 'balance_updated', { demo_wallets: dw, demoWallets: dw });
-          } else {
-            const u = await queryOne<{ real_wallets_json: string }>(
-              'SELECT real_wallets_json FROM users WHERE id = $1',
-              [userId]
-            );
-            const rw = (() => {
-              try {
-                return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0, ...JSON.parse(u?.real_wallets_json || '{}') };
-              } catch {
-                return { options: 0, mt5_standard: 0, mt5_gold: 0, exchange_usdt: 0 };
-              }
-            })();
-            rw.options = liveBal;
-            await execute('UPDATE users SET real_wallets_json = $1, updated_at = NOW() WHERE id = $2', [
-              JSON.stringify(rw),
-              userId,
-            ]);
-            invalidateAuthUserCache(userId);
-            derivWs.emitUserEvent(userId, 'account_updated', { accountId: creds.account.id, balance: liveBal });
-            derivWs.emitUserEvent(userId, 'balance_updated', { real_wallets: rw, realWallets: rw });
-          }
-        } else if (payout > 0) {
-          await creditSettledPayoutToUser(userId, settledAccMode, Number(payout.toFixed(2)), creds.account.id, 'options');
-        }
-      }
-
-      untrackOpenMtmOrder(orderId);
-      if (closedOrder) {
-        derivWs.emitUserEvent(userId, 'order_closed', closedOrder);
-      }
+      await finalizeSettlement(order, creds, isOAuth2, poc);
       return;
     } catch {
-      // retry next cycle
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 8) {
+        return;
+      }
     }
   }
 }
