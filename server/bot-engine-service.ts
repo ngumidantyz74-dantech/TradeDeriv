@@ -558,7 +558,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     const duration = session.duration;
     const durationUnit = session.durationUnit;
 
-    // Silent behind-the-scenes analyser guidance (never surfaced in DBOT UI or journal)
+    // Silent behind-the-scenes analyser guidance (bot digits & direction always depend on Analyser)
     let linkedPredictionId: string | null = session.quantumPredictionId;
     try {
       const activeQp = await queryOne<{
@@ -580,48 +580,73 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 
       const sig = await computeLiveAnalyserSignal(session.symbol);
       const currCt = decision.contractType.toUpperCase();
+      const qpForSymbol = activeQp && activeQp.instrument === session.symbol ? activeQp : null;
+      const qpCt = qpForSymbol ? String(qpForSymbol.contract_type || '').toUpperCase() : '';
+      const qpDigit =
+        qpForSymbol && qpForSymbol.barrier !== null && qpForSymbol.barrier !== '' && /^\d$/.test(String(qpForSymbol.barrier).trim())
+          ? String(qpForSymbol.barrier).trim()
+          : null;
+      const guideCt = qpCt || sig.contractType.toUpperCase();
 
-      if (session.contractSideMode === 'both') {
-        const qpCt = activeQp && activeQp.instrument === session.symbol
-          ? String(activeQp.contract_type || '').toUpperCase()
-          : '';
-        const guideCt = qpCt || sig.contractType.toUpperCase();
-
-        if (currCt === 'CALL' || currCt === 'PUT') {
-          const picked = guideCt === 'PUT' || sig.direction === 'BEARISH' ? 'PUT' : 'CALL';
-          decision = { ...decision, contractType: picked, side: picked };
-        } else if (currCt === 'HIGHER' || currCt === 'LOWER') {
-          const picked = guideCt === 'PUT' || guideCt === 'LOWER' || sig.direction === 'BEARISH' ? 'LOWER' : 'HIGHER';
-          decision = { ...decision, contractType: picked, side: picked };
-        } else if (currCt === 'DIGITEVEN' || currCt === 'DIGITODD') {
+      if (currCt === 'DIGITMATCH' || currCt === 'DIGITDIFF') {
+        const picked =
+          session.contractSideMode === 'both'
+            ? qpCt === 'DIGITMATCH' || qpCt === 'DIGITDIFF'
+              ? qpCt
+              : sig.contractType === 'DIGITMATCH' || sig.contractType === 'DIGITDIFF'
+                ? sig.contractType
+                : currCt
+            : currCt;
+        const analyserDigit =
+          picked === 'DIGITMATCH'
+            ? (qpCt === 'DIGITMATCH' && qpDigit ? qpDigit : String(sig.hotDigit))
+            : (qpCt === 'DIGITDIFF' && qpDigit ? qpDigit : String(sig.coldDigit));
+        decision = {
+          ...decision,
+          contractType: picked,
+          side: picked === 'DIGITMATCH' ? 'MATCH' : 'DIFF',
+          barrier: analyserDigit,
+        };
+      } else if (currCt === 'DIGITOVER' || currCt === 'DIGITUNDER') {
+        const picked =
+          session.contractSideMode === 'both'
+            ? qpCt === 'DIGITOVER' || qpCt === 'DIGITUNDER'
+              ? qpCt
+              : sig.under7Pct > sig.over2Pct
+                ? 'DIGITUNDER'
+                : 'DIGITOVER'
+            : currCt;
+        const analyserBarrier =
+          picked === 'DIGITUNDER'
+            ? (qpCt === 'DIGITUNDER' && qpDigit ? qpDigit : String(sig.bestUnderBarrier))
+            : (qpCt === 'DIGITOVER' && qpDigit ? qpDigit : String(sig.bestOverBarrier));
+        decision = {
+          ...decision,
+          contractType: picked,
+          side: picked === 'DIGITUNDER' ? 'UNDER' : 'OVER',
+          barrier: analyserBarrier,
+        };
+      } else if (currCt === 'DIGITEVEN' || currCt === 'DIGITODD') {
+        if (session.contractSideMode === 'both') {
           const picked = qpCt === 'DIGITODD' || (!qpCt && sig.oddPct > sig.evenPct) ? 'DIGITODD' : 'DIGITEVEN';
           decision = {
             ...decision,
             contractType: picked,
             side: picked === 'DIGITEVEN' ? 'EVEN' : 'ODD',
           };
-        } else if (currCt === 'DIGITOVER' || currCt === 'DIGITUNDER') {
-          const picked = qpCt === 'DIGITUNDER' || (!qpCt && sig.under7Pct > sig.over2Pct) ? 'DIGITUNDER' : 'DIGITOVER';
-          const defaultBarrier = picked === 'DIGITUNDER' ? '7' : '2';
-          decision = {
-            ...decision,
-            contractType: picked,
-            side: picked === 'DIGITUNDER' ? 'UNDER' : 'OVER',
-            barrier:
-              activeQp && activeQp.instrument === session.symbol && activeQp.barrier
-                ? String(activeQp.barrier)
-                : decision.barrier || defaultBarrier,
-          };
-        } else if (currCt === 'DIGITMATCH' || currCt === 'DIGITDIFF') {
-          if (activeQp && activeQp.instrument === session.symbol && (qpCt === 'DIGITMATCH' || qpCt === 'DIGITDIFF')) {
-            decision = {
-              ...decision,
-              contractType: qpCt,
-              side: qpCt === 'DIGITMATCH' ? 'MATCH' : 'DIFF',
-              barrier: activeQp.barrier ? String(activeQp.barrier) : decision.barrier,
-            };
-          }
-        } else if (currCt === 'MULTUP' || currCt === 'MULTDOWN') {
+        }
+      } else if (currCt === 'CALL' || currCt === 'PUT') {
+        if (session.contractSideMode === 'both') {
+          const picked = guideCt === 'PUT' || sig.direction === 'BEARISH' ? 'PUT' : 'CALL';
+          decision = { ...decision, contractType: picked, side: picked };
+        }
+      } else if (currCt === 'HIGHER' || currCt === 'LOWER') {
+        if (session.contractSideMode === 'both') {
+          const picked = guideCt === 'PUT' || guideCt === 'LOWER' || sig.direction === 'BEARISH' ? 'LOWER' : 'HIGHER';
+          decision = { ...decision, contractType: picked, side: picked };
+        }
+      } else if (currCt === 'MULTUP' || currCt === 'MULTDOWN') {
+        if (session.contractSideMode === 'both') {
           const picked = guideCt === 'PUT' || guideCt === 'MULTDOWN' || sig.direction === 'BEARISH' ? 'MULTDOWN' : 'MULTUP';
           decision = {
             ...decision,
@@ -634,7 +659,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       // Keep running seamlessly with XML decision on transient analyser read error
     }
 
-    session.lastSignal = `${decision.contractType} @ ${tick.quote.toFixed(2)}`;
+    session.lastSignal = `${decision.contractType}${decision.barrier ? ` ${decision.barrier}` : ''} @ ${tick.quote.toFixed(2)}`;
     appendJournal(session, 'stake', 'Trade info');
     derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
 

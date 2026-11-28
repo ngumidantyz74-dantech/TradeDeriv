@@ -478,6 +478,8 @@ export const BotInstrumentIcon: React.FC<{
       OTC_FTSE: 'UK',
       OTC_GDAXI: 'DE40',
       OTC_N225: 'JP',
+      OTC_FCHI: 'FR40',
+      OTC_AS51: 'AU200',
     };
     return (
       <div className={boxCls} aria-hidden="true">
@@ -796,18 +798,20 @@ export const BotContractTypeIcon: React.FC<{
 }> = ({ contractType, side, barrier, className = 'w-4 h-4 shrink-0' }) => {
   const ct = String(contractType || '').toUpperCase().trim();
   const s = String(side || '').toUpperCase().trim();
-  const rawKey = ct || s;
+  const ctToken = ct.split(/[\s(]+/)[0] || '';
+  const sToken = s.split(/[\s(]+/)[0] || '';
+  const rawKey = ctToken || sToken;
   const barrierStr = barrier !== undefined && barrier !== null ? String(barrier).trim() : '';
   const isPriceBarrier = /^[+-]\d+(\.\d+)?$/.test(barrierStr) || /^\d+\.\d+$/.test(barrierStr);
 
   let resolvedKey = rawKey;
-  if (s === 'HIGHER' || ((rawKey === 'CALL' || rawKey === 'CALLE') && isPriceBarrier)) {
+  if (sToken === 'HIGHER' || ((rawKey === 'CALL' || rawKey === 'CALLE') && isPriceBarrier)) {
     resolvedKey = 'HIGHER';
-  } else if (s === 'LOWER' || ((rawKey === 'PUT' || rawKey === 'PUTE') && isPriceBarrier)) {
+  } else if (sToken === 'LOWER' || ((rawKey === 'PUT' || rawKey === 'PUTE') && isPriceBarrier)) {
     resolvedKey = 'LOWER';
   }
 
-  const renderer = CONTRACT_TYPE_SVG_MAP[resolvedKey];
+  const renderer = CONTRACT_TYPE_SVG_MAP[resolvedKey] || CONTRACT_TYPE_SVG_MAP[sToken];
   if (renderer) {
     return <>{renderer(className)}</>;
   }

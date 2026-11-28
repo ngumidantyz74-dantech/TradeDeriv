@@ -1,0 +1,184 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Editable Symbol Set — Vector Reconstruction</title>
+<style>
+  :root{
+    --red:#ed465b;
+    --teal:#86acad;
+    --gray:#8d9695;
+    --ink:#303638;
+    --line:#e9eded;
+    --paper:#ffffff;
+    --soft:#f7f9f9;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:#f4f6f6;color:var(--ink);font:15px/1.5 Arial,Helvetica,sans-serif}
+  .wrap{max-width:980px;margin:0 auto;padding:28px 20px 54px}
+  header{margin-bottom:22px}
+  h1{font-size:24px;line-height:1.2;margin:0 0 7px;font-weight:700;letter-spacing:-.35px}
+  .sub{margin:0;color:#687274;font-size:14px}
+  .toolbar{display:flex;flex-wrap:wrap;gap:14px 20px;align-items:center;padding:15px 17px;background:#fff;border:1px solid var(--line);border-radius:12px;margin:20px 0}
+  .control{display:flex;align-items:center;gap:9px;color:#596466;font-size:13px}
+  .control strong{font-weight:600;color:#354043}
+  input[type=color]{width:34px;height:28px;padding:2px;border:1px solid #dce2e2;border-radius:6px;background:#fff;cursor:pointer}
+  input[type=range]{width:118px;accent-color:var(--red)}
+  .value{min-width:34px;font-variant-numeric:tabular-nums}
+  .grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:16px}
+  .card{background:var(--paper);border:1px solid var(--line);border-radius:13px;overflow:hidden}
+  .cardhead{padding:14px 16px 10px;display:flex;justify-content:space-between;align-items:center;gap:12px}
+  .cardhead h2{font-size:15px;margin:0;font-weight:700}
+  .num{font-size:11px;color:#8a9698;letter-spacing:.08em}
+  .stage{height:220px;display:grid;place-items:center;background:#fff;border-top:1px solid #f0f2f2;border-bottom:1px solid #f0f2f2}
+  svg.symbol{width:var(--symbol-size,132px);height:var(--symbol-size,132px);overflow:visible;display:block}
+  .cardfoot{padding:11px 15px 14px;display:flex;justify-content:space-between;align-items:center;gap:10px}
+  .desc{font-size:12px;color:#788385}
+  button{border:1px solid #dce3e3;background:#fff;border-radius:7px;padding:7px 10px;font-size:12px;color:#465153;cursor:pointer}
+  button:hover{background:#f4f7f7}
+  .note{margin-top:17px;color:#7a8587;font-size:12px}
+  @media(max-width:620px){.wrap{padding:20px 12px 36px}.grid{grid-template-columns:1fr}.stage{height:205px}.toolbar{gap:12px}}
+</style>
+</head>
+<body>
+<main class="wrap">
+  <header>
+    <h1>Editable vector symbols</h1>
+    <p class="sub">Four symbols reconstructed from the supplied screenshots as native SVG paths and shapes.</p>
+  </header>
+
+  <section class="toolbar" aria-label="Global symbol controls">
+    <label class="control"><strong>Red</strong><input id="red" type="color" value="#ed465b"></label>
+    <label class="control"><strong>Teal</strong><input id="teal" type="color" value="#86acad"></label>
+    <label class="control"><strong>Grey</strong><input id="gray" type="color" value="#8d9695"></label>
+    <label class="control"><strong>Display size</strong><input id="size" type="range" min="72" max="190" value="132"><span class="value" id="sizeValue">132 px</span></label>
+    <button type="button" id="reset">Reset appearance</button>
+  </section>
+
+  <section class="grid">
+    <article class="card">
+      <div class="cardhead"><h2>01 · Radial mark(FOR MATCHES DIFFERS)</h2><span class="num">SYMBOL 01</span></div>
+      <div class="stage">
+        <svg class="symbol" viewBox="0 0 120 120" role="img" aria-label="Red radial six-arm symbol with teal top and bottom accents">
+          <g fill="none" stroke="var(--red)" stroke-width="10" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M52 57 L34 39"/>
+            <path d="M48 60 L20 60"/>
+            <path d="M52 63 L34 81"/>
+            <path d="M68 63 L86 81"/>
+            <path d="M72 60 L100 60"/>
+            <path d="M68 57 L86 39"/>
+          </g>
+          <g fill="none" stroke="var(--teal)" stroke-width="8" stroke-linecap="round">
+            <path d="M60 8 V22"/>
+            <path d="M60 98 V112"/>
+          </g>
+        </svg>
+      </div>
+      <div class="cardfoot"><span class="desc">Radial red strokes · teal vertical accents</span><button class="download" data-index="0">Download SVG</button></div>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><h2>02 · Rising arrow(RISING))</h2><span class="num">SYMBOL 02</span></div>
+      <div class="stage">
+        <svg class="symbol" viewBox="0 0 120 120" role="img" aria-label="Red arrow pointing diagonally up and right with grey tail marker">
+          <path d="M22 91 L91 22 M59 22 H91 V54" fill="none" stroke="var(--red)" stroke-width="10" stroke-linecap="square" stroke-linejoin="miter"/>
+          <path d="M9 99 L20 94 L17 106 Z" fill="var(--gray)"/>
+        </svg>
+      </div>
+      <div class="cardfoot"><span class="desc">Diagonal red arrow · small grey tail marker</span><button class="download" data-index="1">Download SVG</button></div>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><h2>03 · Rising arrow with baseline(OVER UNDER TRADE 
+          S)</h2><span class="num">SYMBOL 03</span></div>
+      <div class="stage">
+        <svg class="symbol" viewBox="0 0 120 120" role="img" aria-label="Red rising arrow above teal horizontal baseline with dark red lower-left accent">
+          <path d="M31 61 L83 13 M57 13 H83 V39" fill="none" stroke="var(--red)" stroke-width="9" stroke-linecap="square" stroke-linejoin="miter"/>
+          <path d="M8 78 H108" fill="none" stroke="var(--teal)" stroke-width="9" stroke-linecap="square"/>
+          <path d="M19 88 Q25 83 31 86 L26 92 Q21 94 17 91 Z" fill="var(--red)" opacity=".82"/>
+        </svg>
+      </div>
+      <div class="cardfoot"><span class="desc">Arrow · teal horizontal bar · red lower accent</span><button class="download" data-index="2">Download SVG</button></div>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><h2>04 · Four-square mark(EVEN ODD TRADES)</h2><span class="num">SYMBOL 04</span></div>
+      <div class="stage">
+        <svg class="symbol" viewBox="0 0 120 120" role="img" aria-label="Four squares in a two by two grid, red and teal alternating">
+          <g>
+            <rect x="17" y="17" width="34" height="34" rx="1.5" fill="var(--red)"/>
+            <rect x="69" y="17" width="34" height="34" rx="1.5" fill="var(--teal)"/>
+            <rect x="17" y="69" width="34" height="34" rx="1.5" fill="var(--teal)"/>
+            <rect x="69" y="69" width="34" height="34" rx="1.5" fill="var(--red)"/>
+          </g>
+        </svg>
+      </div>
+      <div class="cardfoot"><span class="desc">2 × 2 grid · alternating red and teal squares</span><button class="download" data-index="3">Download SVG</button></div>
+    </article>
+
+    <article class="card">
+      <div class="cardhead"><h2>05 · Falling arrow(FALLING))</h2><span class="num">SYMBOL 05</span></div>
+      <div class="stage">
+        <svg class="symbol" viewBox="0 0 120 120" role="img" aria-label="Red arrow pointing diagonally down and to the right with a small grey marker">
+          <path d="M22 22 L91 91 M59 91 H91 V59" fill="none" stroke="var(--red)" stroke-width="10" stroke-linecap="square" stroke-linejoin="miter"/>
+          <path d="M9 11 L20 16 L17 4 Z" fill="var(--gray)"/>
+        </svg>
+      </div>
+      <div class="cardfoot"><span class="desc">Diagonal red falling arrow · small grey tail marker</span><button class="download" data-index="4">Download SVG</button></div>
+    </article>
+  </section>
+  <p class="note">All artwork is vector-based and editable in this HTML file. Adjust the shared colours and display size above, or edit each SVG's paths, strokes and coordinates directly in the source.</p>
+</main>
+<script>
+(() => {
+  const root = document.documentElement;
+  const red = document.getElementById('red');
+  const teal = document.getElementById('teal');
+  const gray = document.getElementById('gray');
+  const size = document.getElementById('size');
+  const sizeValue = document.getElementById('sizeValue');
+  const defaults = {red:'#ed465b',teal:'#86acad',gray:'#8d9695',size:'132'};
+  function update(){
+    root.style.setProperty('--red',red.value);
+    root.style.setProperty('--teal',teal.value);
+    root.style.setProperty('--gray',gray.value);
+    root.style.setProperty('--symbol-size',size.value+'px');
+    sizeValue.textContent=size.value+' px';
+  }
+  [red,teal,gray,size].forEach(el=>el.addEventListener('input',update));
+  document.getElementById('reset').addEventListener('click',()=>{
+    red.value=defaults.red;teal.value=defaults.teal;gray.value=defaults.gray;size.value=defaults.size;update();
+  });
+  document.querySelectorAll('.download').forEach(button=>{
+    button.addEventListener('click',()=>{
+      const source=document.querySelectorAll('svg.symbol')[Number(button.dataset.index)];
+      const clone=source.cloneNode(true);
+      clone.setAttribute('xmlns','http://www.w3.org/2000/svg');
+      clone.removeAttribute('class');
+      clone.setAttribute('width','240');
+      clone.setAttribute('height','240');
+      clone.querySelectorAll('*').forEach(el=>{
+        ['stroke','fill'].forEach(attr=>{
+          const value=el.getAttribute(attr);
+          if(value && value.startsWith('var(')){
+            const key=value.match(/--[a-z]+/)[0];
+            el.setAttribute(attr,getComputedStyle(root).getPropertyValue(key).trim());
+          }
+        });
+        const stroke=el.getAttribute('stroke');
+        if(stroke==='var(--red)')el.setAttribute('stroke',red.value);
+      });
+      let svg=clone.outerHTML;
+      svg=svg.replaceAll('var(--red)',red.value).replaceAll('var(--teal)',teal.value).replaceAll('var(--gray)',gray.value);
+      const blob=new Blob([svg],{type:'image/svg+xml'});
+      const url=URL.createObjectURL(blob);
+      const a=document.createElement('a');a.href=url;a.download='symbol-'+(Number(button.dataset.index)+1)+'.svg';a.click();
+      URL.revokeObjectURL(url);
+    });
+  });
+  update();
+})();
+</script>
+</body>
+</html>

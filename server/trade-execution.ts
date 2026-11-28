@@ -1493,10 +1493,10 @@ function computeCalibratedMockWinProbability(
   const ct = String(contractType || '').toUpperCase();
   const safeCfg = Math.min(96, Math.max(5, Number.isFinite(configuredWinPct) ? configuredWinPct : 72));
   const bias = (safeCfg - 50) / 100;
-  const analyserBoost = isAnalyserSynced ? 0.05 : 0;
+  const analyserBoost = isAnalyserSynced ? 0.04 : 0;
 
   if (ct === 'DIGITMATCH') {
-    return Math.min(0.28, Math.max(0.11, 0.13 + Math.max(0, bias) * 0.40 + analyserBoost));
+    return Math.min(0.175, Math.max(0.10, 0.12 + Math.max(0, bias) * 0.12 + (isAnalyserSynced ? 0.025 : 0)));
   }
   if (ct === 'DIGITDIFF') {
     return Math.min(0.92, Math.max(0.78, 0.86 + Math.max(0, bias) * 0.14 + analyserBoost * 0.4));
@@ -1504,18 +1504,18 @@ function computeCalibratedMockWinProbability(
   if (ct === 'DIGITOVER') {
     const cleanB = Math.min(8, Math.max(0, Number.isFinite(barrier) ? barrier : 2));
     const fairOdds = (9 - cleanB) / 10;
-    return Math.min(0.82, Math.max(0.20, fairOdds + Math.max(0, bias) * 0.42 + analyserBoost));
+    return Math.min(0.74, Math.max(0.20, fairOdds + Math.max(0, bias) * 0.35 + analyserBoost));
   }
   if (ct === 'DIGITUNDER') {
     const cleanB = Math.min(9, Math.max(1, Number.isFinite(barrier) ? barrier : 7));
     const fairOdds = cleanB / 10;
-    return Math.min(0.82, Math.max(0.20, fairOdds + Math.max(0, bias) * 0.42 + analyserBoost));
+    return Math.min(0.74, Math.max(0.20, fairOdds + Math.max(0, bias) * 0.35 + analyserBoost));
   }
   if (ct === 'ONETOUCH') {
     return Math.min(0.66, Math.max(0.32, 0.48 + Math.max(0, bias) * 0.35 + analyserBoost));
   }
-  // CALL, PUT, DIGITEVEN, DIGITODD (~1.95x): calibrated for reliable positive expectancy when bot/analyser-synced
-  return Math.min(0.78, Math.max(0.45, 0.54 + Math.max(0, bias) * 0.65 + analyserBoost));
+  // CALL, PUT, DIGITEVEN, DIGITODD, HIGHER, LOWER: calibrated for 70-75% win target
+  return Math.min(0.73, Math.max(0.45, 0.54 + Math.max(0, bias) * 0.50 + analyserBoost));
 }
 
 export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
@@ -1535,34 +1535,93 @@ export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
     analyserWinRatePct?: number;
     manualOptionsWinRatePct?: number;
   }>('trading_engine', {
-    botWinRatePct: 76,
-    analyserWinRatePct: 82,
+    botWinRatePct: 73,
+    analyserWinRatePct: 74,
     manualOptionsWinRatePct: 68,
   });
 
   const isAnalyserSynced = String(order.notes || '').includes('analyser_sync');
   const targetWinPct = isAnalyserSynced
-    ? Number(engineCfg.analyserWinRatePct ?? 82)
+    ? Number(engineCfg.analyserWinRatePct ?? 74)
     : order.source === 'bot'
-      ? Number(engineCfg.botWinRatePct ?? 76)
+      ? Number(engineCfg.botWinRatePct ?? 73)
       : Number(engineCfg.manualOptionsWinRatePct ?? 68);
 
+  const payoutMult = computeDigitalPayoutMult(order.contract_type, barrier);
+  const potentialProfit = Number((Number(order.stake || 0) * (payoutMult - 1)).toFixed(2));
   const calibratedProb = computeCalibratedMockWinProbability(
     order.contract_type,
     barrier,
     targetWinPct,
     isAnalyserSynced
   );
-  const shouldWin = Math.random() < calibratedProb;
+
+  let effectiveProb = calibratedProb;
+  let forceLoss = false;
+
+  const runTagMatch = order.source === 'bot' ? String(order.notes || '').match(/run:([^\s|]+)/i) : null;
+  if (runTagMatch) {
+    const runTag = `run:${runTagMatch[1]}`;
+    const agg = await queryOne<{
+      total_stake: string | number | null;
+      realized_pnl: string | number | null;
+      settled_count: string | number | null;
+      wins: string | number | null;
+    }>(
+      `SELECT
+         COALESCE(SUM(stake), 0) AS total_stake,
+         COALESCE(SUM(CASE WHEN status = 'CLOSED' THEN pnl ELSE 0 END), 0) AS realized_pnl,
+         COUNT(*) FILTER (WHERE status = 'CLOSED') AS settled_count,
+         COUNT(*) FILTER (WHERE status = 'CLOSED' AND pnl > 0) AS wins
+       FROM virtual_orders
+       WHERE user_id = $1 AND account_mode = $2 AND source = 'bot'
+         AND (notes = $3 OR notes LIKE $4)`,
+      [order.user_id, order.account_mode, runTag, `${runTag} |%`]
+    ).catch(() => null);
+
+    if (agg) {
+      const runTotalStake = Math.max(Number(order.stake || 0), Number(agg.total_stake || 0));
+      const realizedPnl = Number(agg.realized_pnl || 0);
+      const settledCount = Number(agg.settled_count || 0);
+      const wins = Number(agg.wins || 0);
+      const ifWinRoi = runTotalStake > 0 ? (realizedPnl + potentialProfit) / runTotalStake : 0;
+      const ifWinRate = (wins + 1) / (settledCount + 1);
+
+      if (payoutMult >= 4.0) {
+        if (settledCount >= 1 && ifWinRoi > 0.75) {
+          forceLoss = true;
+        } else if (realizedPnl <= 0 && runTotalStake > 0 && ifWinRoi >= 0.35 && ifWinRoi <= 0.75) {
+          effectiveProb = Math.max(calibratedProb, 0.42);
+        }
+      } else if (payoutMult < 1.3) {
+        if (settledCount >= 2 && ifWinRoi > 0.75) {
+          forceLoss = true;
+        }
+      } else {
+        if (settledCount >= 2 && (ifWinRoi > 0.75 || (settledCount >= 3 && ifWinRate > 0.75))) {
+          forceLoss = true;
+        } else if (
+          settledCount >= 2 &&
+          runTotalStake > 0 &&
+          realizedPnl / runTotalStake < 0.60 &&
+          ifWinRoi <= 0.75 &&
+          ifWinRate <= 0.75
+        ) {
+          effectiveProb = Math.max(calibratedProb, 0.73);
+        }
+      }
+    }
+  }
+
+  const shouldWin = !forceLoss && Math.random() < effectiveProb;
   const baseForExit =
     ['CALL', 'PUT', 'HIGHER', 'LOWER'].includes(order.contract_type)
       ? Number(order.entry_price || exitPrice)
       : exitPrice;
   exitPrice = adjustDigitForDesiredOutcome(baseForExit, pipSize, order.contract_type, barrier, shouldWin);
 
-  const payoutMult = computeDigitalPayoutMult(order.contract_type, barrier);
-  const pnl = shouldWin ? Number((order.stake * (payoutMult - 1)).toFixed(2)) : -Number(order.stake.toFixed(2));
-  const payout = shouldWin ? Number((order.stake + pnl).toFixed(2)) : 0;
+  const pnl = shouldWin ? potentialProfit : -Number(Number(order.stake || 0).toFixed(2));
+  const payout = shouldWin ? Number((Number(order.stake || 0) + pnl).toFixed(2)) : 0;
 
   const closedOrder = await queryOne<any>(
     `UPDATE virtual_orders

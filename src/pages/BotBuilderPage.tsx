@@ -156,6 +156,20 @@ function getContractDisplayLabel(ct: string): string {
   return u || 'Options';
 }
 
+function estimateContractPayout(contractType?: string | null, stakeRaw?: number | string | null, barrierRaw?: string | number | null): number {
+  const stake = Number(stakeRaw || 0);
+  if (!Number.isFinite(stake) || stake <= 0) return 0;
+  const ct = String(contractType || '').toUpperCase().trim();
+  const b = Number(barrierRaw ?? 5);
+  let mult = 1.95;
+  if (ct === 'DIGITMATCH') mult = 9.09;
+  else if (ct === 'DIGITDIFF') mult = 1.11;
+  else if (ct === 'DIGITOVER') mult = 9.5 / Math.max(1, 9 - (Number.isFinite(b) ? b : 2));
+  else if (ct === 'DIGITUNDER') mult = 9.5 / Math.max(1, Number.isFinite(b) ? b : 7);
+  else if (ct === 'HIGHER' || ct === 'LOWER') mult = 2.15;
+  return Number((stake * mult).toFixed(2));
+}
+
 
 function formatGmtStamp(iso?: string | null): string {
   const d = iso ? new Date(iso) : new Date();
@@ -1512,7 +1526,11 @@ export const BotBuilderPage: React.FC = () => {
                             <p className="font-mono-num font-bold text-[13px] mt-0.5 text-[#111319] dark:text-white">
                               {(
                                 Number(latestBotOrder.payout || 0) ||
-                                Number(latestBotOrder.stake || 0) * 1.95
+                                estimateContractPayout(
+                                  latestBotOrder.contract_type,
+                                  latestBotOrder.stake,
+                                  latestBotOrder.barrier
+                                )
                               ).toFixed(2)}
                             </p>
                           </div>

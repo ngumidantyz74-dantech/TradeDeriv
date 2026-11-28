@@ -36,6 +36,7 @@ import {
   getStoredToken,
 } from '../lib/api';
 import { getCanonicalBalances } from '../lib/balances';
+import { BotInstrumentIcon, BotContractTypeIcon } from '../components/DerivBadges';
 import type { QuantumPrediction } from '../types';
 
 type QuantumNavTab = 'analysis' | 'transactions' | 'journal' | 'summary' | 'settings' | 'about';
@@ -1226,8 +1227,23 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
                         const pnl = Number(o.pnl || 0);
                         return (
                           <tr key={o.id} className="hover:bg-[#10182A]">
-                            <td className="py-2.5 pr-3 font-semibold text-white">{o.symbol}</td>
-                            <td className="py-2.5 pr-3 text-slate-300">{o.contract_type}</td>
+                            <td className="py-2.5 pr-3 font-semibold text-white">
+                              <div className="inline-flex items-center gap-2">
+                                <BotInstrumentIcon symbol={o.symbol} size="sm" />
+                                <span>{o.symbol}</span>
+                              </div>
+                            </td>
+                            <td className="py-2.5 pr-3 text-slate-300">
+                              <div className="inline-flex items-center gap-2">
+                                <BotContractTypeIcon
+                                  contractType={o.contract_type}
+                                  side={o.side}
+                                  barrier={o.barrier}
+                                  className="w-4 h-4 shrink-0"
+                                />
+                                <span>{o.contract_type}</span>
+                              </div>
+                            </td>
                             <td className="py-2.5 pr-3 font-mono-num">${Number(o.stake).toFixed(2)}</td>
                             <td className="py-2.5 pr-3 font-mono-num text-slate-400">
                               {Number(o.entry_price).toFixed(2)} / {Number(o.exit_price ?? o.current_price ?? o.entry_price).toFixed(2)}

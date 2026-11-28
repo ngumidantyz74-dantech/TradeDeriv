@@ -218,6 +218,11 @@ export interface AnalyserSignalResult {
   direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE';
   reason: string;
   lastDigit: number;
+  coldDigit: number;
+  hotDigit: number;
+  bestOverBarrier: number;
+  bestUnderBarrier: number;
+  predictedDigit: number;
   evenPct: number;
   oddPct: number;
   risePct: number;
@@ -261,10 +266,38 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
     for (const d of digits) digitCounts[d]++;
     let minDigit = 0;
     let minCount = Number.POSITIVE_INFINITY;
+    let hotDigit = 0;
+    let maxCount = -1;
     for (let d = 0; d <= 9; d++) {
       if (digitCounts[d] < minCount) {
         minCount = digitCounts[d];
         minDigit = d;
+      }
+      if (digitCounts[d] > maxCount) {
+        maxCount = digitCounts[d];
+        hotDigit = d;
+      }
+    }
+
+    let bestOverBarrier = 2;
+    let bestOverEdge = -Infinity;
+    for (const b of [1, 2, 3, 4]) {
+      const pct = (digits.filter((d) => d > b).length / total) * 100;
+      const edge = pct - (9 - b) * 10;
+      if (edge > bestOverEdge) {
+        bestOverEdge = edge;
+        bestOverBarrier = b;
+      }
+    }
+
+    let bestUnderBarrier = 7;
+    let bestUnderEdge = -Infinity;
+    for (const b of [5, 6, 7, 8]) {
+      const pct = (digits.filter((d) => d < b).length / total) * 100;
+      const edge = pct - b * 10;
+      if (edge > bestUnderEdge) {
+        bestUnderEdge = edge;
+        bestUnderBarrier = b;
       }
     }
 
@@ -307,12 +340,13 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
     // Pick highest statistical confluence edge
     let contractType = 'DIGITOVER';
     let side = 'OVER';
-    let barrier = '2';
+    let barrier = String(bestOverBarrier);
     let direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE' = directionalBias;
     let confidence = 78;
-    let reason = `Over 2 probability ${over2Pct}% across last ${total} ticks`;
+    let reason = `Over ${bestOverBarrier} probability ${over2Pct}% across last ${total} ticks`;
 
     const coldDiffPct = Number((((total - minCount) / total) * 100).toFixed(1));
+    const hotMatchPct = Number(((maxCount / total) * 100).toFixed(1));
 
     if (Math.abs(risePct - fallPct) >= 14 && (rsi14 >= 58 || rsi14 <= 42)) {
       const bullish = risePct >= fallPct;
@@ -325,17 +359,17 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
     } else if (under7Pct >= over2Pct && under7Pct >= 66) {
       contractType = 'DIGITUNDER';
       side = 'UNDER';
-      barrier = '7';
+      barrier = String(bestUnderBarrier);
       direction = directionalBias;
       confidence = Math.min(93, Math.round(64 + (under7Pct - 55) * 0.9));
-      reason = `Under 7 bias at ${under7Pct}% with RSI(14) ${rsi14}`;
+      reason = `Under ${bestUnderBarrier} bias at ${under7Pct}% with RSI(14) ${rsi14}`;
     } else if (over2Pct >= 66) {
       contractType = 'DIGITOVER';
       side = 'OVER';
-      barrier = '2';
+      barrier = String(bestOverBarrier);
       direction = directionalBias;
       confidence = Math.min(93, Math.round(64 + (over2Pct - 55) * 0.9));
-      reason = `Over 2 strength at ${over2Pct}% (last digit ${lastDigit})`;
+      reason = `Over ${bestOverBarrier} strength at ${over2Pct}% (last digit ${lastDigit})`;
     } else if (Math.abs(evenPct - oddPct) >= 12) {
       const pickEven = evenPct >= oddPct;
       contractType = pickEven ? 'DIGITEVEN' : 'DIGITODD';
@@ -344,6 +378,13 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
       direction = directionalBias;
       confidence = Math.min(90, Math.round(68 + Math.abs(evenPct - oddPct) * 0.65));
       reason = `${pickEven ? 'Even' : 'Odd'} parity cluster (${Math.max(evenPct, oddPct)}%)`;
+    } else if (hotMatchPct >= 16) {
+      contractType = 'DIGITMATCH';
+      side = 'MATCH';
+      barrier = String(hotDigit);
+      direction = 'DIGIT_EDGE';
+      confidence = Math.min(91, Math.round(54 + (hotMatchPct - 10) * 3));
+      reason = `Digit ${hotDigit} spike (${maxCount}/${total} ticks · ${hotMatchPct}%)`;
     } else if (coldDiffPct >= 92) {
       contractType = 'DIGITDIFF';
       side = 'DIFF';
@@ -361,6 +402,17 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
       reason = `${bullish ? 'Bullish' : 'Bearish'} tick momentum (${Math.max(risePct, fallPct)}% directional)`;
     }
 
+    const predictedDigit =
+      contractType === 'DIGITMATCH'
+        ? hotDigit
+        : contractType === 'DIGITDIFF'
+          ? minDigit
+          : contractType === 'DIGITOVER'
+            ? bestOverBarrier
+            : contractType === 'DIGITUNDER'
+              ? bestUnderBarrier
+              : lastDigit;
+
     const candidate: AnalyserSignalResult = {
       symbol: sym,
       displayName: meta?.display_name || sym,
@@ -374,6 +426,11 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
       direction,
       reason,
       lastDigit,
+      coldDigit: minDigit,
+      hotDigit,
+      bestOverBarrier,
+      bestUnderBarrier,
+      predictedDigit,
       evenPct,
       oddPct,
       risePct,
