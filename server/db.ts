@@ -1243,6 +1243,11 @@ export async function addNotification(userId: number, title: string, message: st
     [userId, title, message, category]
   );
 
+  // Never send Brevo emails on bot start/stop or individual trade events (daily 8 PM digest handles P/L reporting)
+  if (category === 'bot' || category === 'trading') {
+    return;
+  }
+
   // Fire-and-forget Brevo transactional email copy for active users with valid real email
   void (async () => {
     try {

@@ -21,6 +21,7 @@ import {
 } from './server/db.ts';
 import { derivWs } from './server/deriv-client.ts';
 import { startMtmPositionMonitor } from './server/trade-execution.ts';
+import { startDailyPnlEmailScheduler } from './server/daily-pnl-email.ts';
 
 import authRoutes from './server/routes/auth.ts';
 import derivRoutes, { handleDerivOAuthCallback } from './server/routes/deriv.ts';
@@ -43,6 +44,7 @@ async function bootstrapServer() {
 
   derivWs.startMarketFeed();
   startMtmPositionMonitor();
+  startDailyPnlEmailScheduler();
 
   const app = express();
   app.set('trust proxy', 1);

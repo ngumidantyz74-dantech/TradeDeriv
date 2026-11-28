@@ -230,25 +230,14 @@ export const BotBuilderPage: React.FC = () => {
   const [menuOpen, setMenuOpen] = useState<boolean>(false);
   const [utcNow, setUtcNow] = useState<string>(() => formatGmtStamp());
 
-  // Load Strategy Modal (Screenshots 152508 & 152544) + Quantum Analyser Sync
+  // Load Strategy Modal (Screenshots 152508 & 152544)
   const [loadModalOpen, setLoadModalOpen] = useState<boolean>(false);
-  const [loadModalTab, setLoadModalTab] = useState<'local' | 'drive' | 'quantum'>('local');
-  const [quantumSignals, setQuantumSignals] = useState<Array<{
-    prediction_id: string;
-    instrument: string;
-    contract_type: string;
-    barrier?: string | number | null;
-    stake?: number;
-    duration?: number;
-    duration_unit?: string;
-    probability?: number;
-    predicted_condition?: string;
-    expires_at: string;
-  }>>([]);
-  const [loadingQuantumSignals, setLoadingQuantumSignals] = useState<boolean>(false);
+  const [loadModalTab, setLoadModalTab] = useState<'local' | 'drive'>('local');
+  const [previewZoom, setPreviewZoom] = useState<number>(55);
+  const [resetConfirmOpen, setResetConfirmOpen] = useState<boolean>(false);
+  const [importToast, setImportToast] = useState<string | null>(null);
   const [xmlImportError, setXmlImportError] = useState<string | null>(null);
   const [validatingXml, setValidatingXml] = useState<boolean>(false);
-  const [quantumNowMs, setQuantumNowMs] = useState<number>(() => Date.now());
   const [pendingXmlImport, setPendingXmlImport] = useState<{
     fileName: string;
     symbol?: string;
@@ -260,13 +249,6 @@ export const BotBuilderPage: React.FC = () => {
     takeProfit?: string;
     stopLoss?: string;
     parsedState?: Partial<BotXmlWorkspaceState>;
-    isQuantum?: boolean;
-    quantumPrediction?: {
-      prediction_id: string;
-      expires_at: string;
-      probability?: number;
-      remainingSeconds?: number;
-    } | null;
   } | null>(null);
 
   // Saved Bots List (Dashboard "Your bots:" - session memory only, zero browser storage caching)
@@ -408,14 +390,8 @@ export const BotBuilderPage: React.FC = () => {
       if (tradePreset.duration !== undefined) next.duration = String(tradePreset.duration);
       if (tradePreset.durationUnit) next.durationUnit = tradePreset.durationUnit;
       if (tradePreset.strategyType) next.strategyType = tradePreset.strategyType;
-      if (tradePreset.quantumPredictionId) {
-        next.quantumPredictionId = tradePreset.quantumPredictionId;
-        next.quantumExpiresAt = tradePreset.quantumExpiresAt || null;
-        next.strategyName = `Quantum_${tradePreset.quantumPredictionId}`;
-      } else {
-        next.quantumPredictionId = null;
-        next.quantumExpiresAt = null;
-      }
+      next.quantumPredictionId = null;
+      next.quantumExpiresAt = null;
       return next;
     });
     setBotView('builder');
@@ -423,121 +399,10 @@ export const BotBuilderPage: React.FC = () => {
   }, [tradePreset, updateXmlState, setTradePreset]);
 
   useEffect(() => {
-    if (!xmlState.quantumPredictionId && !pendingXmlImport?.quantumPrediction && !(loadModalOpen && loadModalTab === 'quantum')) return;
-    const id = setInterval(() => setQuantumNowMs(Date.now()), 1000);
-    return () => clearInterval(id);
-  }, [xmlState.quantumPredictionId, pendingXmlImport?.quantumPrediction, loadModalOpen, loadModalTab]);
-
-  const fetchQuantumSignals = useCallback(async () => {
-    setLoadingQuantumSignals(true);
-    try {
-      const res = await apiFetch<{ predictions: typeof quantumSignals }>('/api/quantum/predictions');
-      const now = Date.now();
-      const serverList = (res.predictions || []).filter(
-        (p) => p.expires_at && new Date(p.expires_at).getTime() > now
-      );
-      setQuantumSignals(serverList);
-    } catch {
-      // ignore transient error
-    } finally {
-      setLoadingQuantumSignals(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    if (loadModalOpen && loadModalTab === 'quantum') {
-      fetchQuantumSignals();
-    }
-  }, [loadModalOpen, loadModalTab, fetchQuantumSignals]);
-
-  useEffect(() => {
-    const applyBridgeSignal = (payload: any) => {
-      if (!payload || payload.type !== 'QUANTUM_SIGNAL' || !payload.predictionId) return;
-      if (payload.expiresAt && new Date(payload.expiresAt).getTime() <= Date.now()) return;
-      setQuantumSignals((prev) => {
-        const nextItem = {
-          prediction_id: String(payload.predictionId),
-          instrument: String(payload.symbol || 'R_100'),
-          contract_type: String(payload.contractType || 'CALL'),
-          barrier: payload.barrier ?? null,
-          stake: Number(payload.stake || 1),
-          duration: Number(payload.duration || 1),
-          duration_unit: String(payload.durationUnit || 't'),
-          probability: Number(payload.probability || 0),
-          predicted_condition: String(payload.predictedCondition || ''),
-          expires_at: String(payload.expiresAt),
-        };
-        return [nextItem, ...prev.filter((item) => item.prediction_id !== nextItem.prediction_id)];
-      });
-    };
-
-    try {
-      const cached = localStorage.getItem('td_quantum_dbot_bridge');
-      if (cached) applyBridgeSignal(JSON.parse(cached));
-    } catch {
-      // ignore
-    }
-
-    let ch: BroadcastChannel | null = null;
-    if (typeof BroadcastChannel !== 'undefined') {
-      ch = new BroadcastChannel('td_quantum_dbot_bridge');
-      ch.onmessage = (ev) => applyBridgeSignal(ev.data);
-    }
-    const onStorage = (ev: StorageEvent) => {
-      if (ev.key === 'td_quantum_dbot_bridge' && ev.newValue) {
-        try {
-          applyBridgeSignal(JSON.parse(ev.newValue));
-        } catch {
-          // ignore
-        }
-      }
-    };
-    window.addEventListener('storage', onStorage);
-    return () => {
-      if (ch) ch.close();
-      window.removeEventListener('storage', onStorage);
-    };
-  }, []);
-
-  const loadQuantumSignalIntoWorkspace = (sig: (typeof quantumSignals)[number]) => {
-    if (sig.expires_at && new Date(sig.expires_at).getTime() <= Date.now()) {
-      showToast('Quantum signal expired (120s). Scan again in Quantum Analyser.', 'error');
-      return;
-    }
-    const ct = String(sig.contract_type || 'CALL').toUpperCase();
-    const infCat = inferTradeCategoryFromContract(ct);
-    const sub = resolveSubtypeDef(infCat.tradeCategory, infCat.tradeSubtype);
-    const infMkt = inferMarketFromSymbol(sig.instrument || 'R_100');
-    const isDirectDigit = ['DIGITMATCH', 'DIGITDIFF', 'DIGITOVER', 'DIGITUNDER'].includes(ct);
-
-    updateXmlState((prev) => {
-      let assignments = setAssignmentVal(prev.assignments, 'initialStake', String(sig.stake || 1));
-      assignments = setAssignmentVal(assignments, 'tradeSide', ct);
-      return {
-        ...prev,
-        quantumPredictionId: sig.prediction_id,
-        quantumExpiresAt: sig.expires_at,
-        strategyName: `Quantum_${sig.prediction_id}`,
-        strategyType: 'quantum_minimal_loss',
-        market: infMkt.market,
-        submarket: infMkt.submarket,
-        symbol: sig.instrument || prev.symbol,
-        tradeCategory: infCat.tradeCategory,
-        tradeSubtype: infCat.tradeSubtype,
-        contractTypeSelection: ct,
-        thenPurchase: ct,
-        elsePurchase: sub.legs.find((l) => l.value !== ct)?.value || ct,
-        beforeHasIf: isDirectDigit ? false : prev.beforeHasIf,
-        prediction: sig.barrier !== null && sig.barrier !== undefined ? String(sig.barrier) : prev.prediction,
-        duration: String(sig.duration || prev.duration || 1),
-        durationUnit: String(sig.duration_unit || prev.durationUnit || 't'),
-        assignments,
-      };
-    });
-    setLoadModalOpen(false);
-    setBotView('builder');
-    showToast(`Synced Quantum ${ct} signal (${sig.instrument}) into DBOT`, 'success');
-  };
+    if (!importToast) return;
+    const t = setTimeout(() => setImportToast(null), 4000);
+    return () => clearTimeout(t);
+  }, [importToast]);
 
   const pollStatus = useCallback(async () => {
     try {
@@ -659,10 +524,15 @@ export const BotBuilderPage: React.FC = () => {
   }, [botView, ticks, symbol, candles.length]);
 
   const handleResetDefaults = () => {
+    setResetConfirmOpen(true);
+  };
+
+  const confirmResetWorkspace = () => {
     setXmlState(createDefaultXmlWorkspaceState());
     setUndoStack([]);
     setRedoStack([]);
-    showToast('Workspace reset to default XML blocks', 'info');
+    setResetConfirmOpen(false);
+    setImportToast('Bot blocks have been reset.');
   };
 
   const handleSwitchAccount = (mode: 'demo' | 'real') => {
@@ -677,14 +547,6 @@ export const BotBuilderPage: React.FC = () => {
 
   const handleRunBot = async (e?: React.FormEvent, overrides?: Partial<Record<string, any>>) => {
     if (e) e.preventDefault();
-    const activeQId = overrides?.quantumPredictionId !== undefined ? overrides.quantumPredictionId : xmlState.quantumPredictionId;
-    if (activeQId && xmlState.quantumExpiresAt) {
-      const qSecs = Math.floor((new Date(xmlState.quantumExpiresAt).getTime() - Date.now()) / 1000);
-      if (qSecs <= 0) {
-        showToast('Quantum prediction expired after 120 seconds. Re-scan in standalone Quantum Analyser.', 'error');
-        return;
-      }
-    }
     setSubmitting(true);
     try {
       // Trade with REAL Deriv account balances (Demo OR Real) when connected & NOT altered/locked by admin
@@ -716,8 +578,7 @@ export const BotBuilderPage: React.FC = () => {
         maxLosses: resolvedMaxLosses,
         maxTrades: Number(overrides?.maxTrades ?? xmlState.maxTrades) || 50,
         growthRate: overrides?.growthRate ?? xmlState.growthRate,
-        analyserSync: false,
-        quantumPredictionId: activeQId || null,
+        analyserSync: true,
         accountMode,
         executionSpeed: 'fast',
         executionMode: isLiveDerivUnlocked ? 'deriv' : 'virtual',
@@ -762,13 +623,6 @@ export const BotBuilderPage: React.FC = () => {
       try {
         const validation = await apiFetch<{
           valid: boolean;
-          isQuantum: boolean;
-          quantumPrediction?: {
-            prediction_id: string;
-            expires_at: string;
-            probability?: number;
-            remainingSeconds?: number;
-          } | null;
           summary?: {
             symbol: string;
             contractType: string;
@@ -784,14 +638,10 @@ export const BotBuilderPage: React.FC = () => {
 
         const parsed = parseBotWorkspaceXml(xml, xmlState);
         const parsedAssignments = parsed.assignments || xmlState.assignments;
-        if (validation.quantumPrediction) {
-          parsed.quantumPredictionId = validation.quantumPrediction.prediction_id;
-          parsed.quantumExpiresAt = validation.quantumPrediction.expires_at;
-        } else {
-          parsed.quantumPredictionId = null;
-          parsed.quantumExpiresAt = null;
-        }
+        parsed.quantumPredictionId = null;
+        parsed.quantumExpiresAt = null;
 
+        setPreviewZoom(55);
         setPendingXmlImport({
           fileName: file.name,
           symbol: validation.summary?.symbol || parsed.symbol,
@@ -803,14 +653,11 @@ export const BotBuilderPage: React.FC = () => {
           takeProfit: getAssignmentVal(parsedAssignments, 'profitThreshold', takeProfit),
           stopLoss: getAssignmentVal(parsedAssignments, 'lossThreshold', stopLoss),
           parsedState: parsed,
-          isQuantum: validation.isQuantum,
-          quantumPrediction: validation.quantumPrediction || null,
         });
       } catch (err) {
-        const msg = err instanceof Error ? err.message : 'XML validation failed.';
+        const msg = err instanceof Error ? err.message : 'Invalid XML file.';
         setPendingXmlImport(null);
         setXmlImportError(msg);
-        showToast(msg, 'error');
       } finally {
         setValidatingXml(false);
       }
@@ -822,14 +669,6 @@ export const BotBuilderPage: React.FC = () => {
   const confirmOpenPendingXml = () => {
     if (!pendingXmlImport) return;
     const p = pendingXmlImport;
-    if (p.quantumPrediction?.expires_at) {
-      const rem = Math.floor((new Date(p.quantumPrediction.expires_at).getTime() - Date.now()) / 1000);
-      if (rem <= 0) {
-        setXmlImportError('Quantum prediction expired after 120 seconds. Re-scan in Quantum Analyser.');
-        setPendingXmlImport(null);
-        return;
-      }
-    }
     const cleanName = p.fileName.replace(/\.xml$/i, '');
 
     const nextSnapshot: BotXmlWorkspaceState = {
@@ -840,10 +679,10 @@ export const BotBuilderPage: React.FC = () => {
       hasSellConditions: false,
       sellByCountdown: false,
       ...(p.parsedState || {}),
-      quantumPredictionId: p.quantumPrediction?.prediction_id || null,
-      quantumExpiresAt: p.quantumPrediction?.expires_at || null,
+      quantumPredictionId: null,
+      quantumExpiresAt: null,
       strategyName: cleanName,
-      strategyType: p.isQuantum ? 'quantum_minimal_loss' : p.parsedState?.strategyType || 'xml_block_flow',
+      strategyType: p.parsedState?.strategyType || 'xml_block_flow',
     };
 
     updateXmlState(() => nextSnapshot);
@@ -881,7 +720,7 @@ export const BotBuilderPage: React.FC = () => {
     setPendingXmlImport(null);
     setLoadModalOpen(false);
     setBotView('builder');
-    showToast(`Verified & loaded ${cleanName} XML blocks into Bot Builder`, 'success');
+    setImportToast("You've successfully imported a bot.");
   };
 
   const handleSaveAndExportXml = () => {
@@ -1278,17 +1117,6 @@ export const BotBuilderPage: React.FC = () => {
               </button>
             </div>
 
-            {/* Strategy Lab Quick Row */}
-            <div className="flex flex-wrap items-center gap-2 pt-1">
-              <button
-                type="button"
-                onClick={() => setActiveTab('trading-bots')}
-                className="px-3 py-1.5 rounded-lg text-[11px] font-semibold bg-[#F8F9FA] dark:bg-[#181C25] border border-slate-200 dark:border-white/10 text-[#374151] dark:text-slate-300 cursor-pointer"
-              >
-                Prebuilt Bots Lab
-              </button>
-            </div>
-
             {/* Your bots: table matching Screenshot 152836 */}
             <div className="pt-1">
               <h2 className="text-[14px] font-bold text-[#111319] dark:text-white mb-2.5">Your bots:</h2>
@@ -1644,12 +1472,9 @@ export const BotBuilderPage: React.FC = () => {
                       </div>
                     </>
                   ) : (
-                    <div className="py-12 px-4 text-center space-y-2">
-                      <p className="text-[13px] font-semibold text-[#525866] dark:text-slate-300">
-                        No open or recent contract summary yet
-                      </p>
-                      <p className="text-[11px] text-[#8E95A2]">
-                        Tap Run below to start live {accountMode.toUpperCase()} execution.
+                    <div className="py-14 px-4 text-center">
+                      <p className="text-[13px] font-medium text-[#525866] dark:text-slate-300">
+                        You have no open positions.
                       </p>
                     </div>
                   )}
@@ -2065,7 +1890,7 @@ export const BotBuilderPage: React.FC = () => {
               </button>
             </div>
 
-            <div className="grid grid-cols-3 border-b border-slate-200 dark:border-white/[0.08] text-[13px] shrink-0">
+            <div className="grid grid-cols-2 border-b border-slate-200 dark:border-white/[0.08] text-[13px] shrink-0">
               <button
                 type="button"
                 onClick={() => setLoadModalTab('local')}
@@ -2088,26 +1913,15 @@ export const BotBuilderPage: React.FC = () => {
               >
                 Google Drive
               </button>
-              <button
-                type="button"
-                onClick={() => setLoadModalTab('quantum')}
-                className={`py-2.5 border-b-2 cursor-pointer ${
-                  loadModalTab === 'quantum'
-                    ? 'border-[#FF444F] font-bold text-[#111319] dark:text-white'
-                    : 'border-transparent text-[#6B7280]'
-                }`}
-              >
-                Quantum Sync
-              </button>
             </div>
 
             <input ref={fileRef} type="file" accept=".xml,text/xml,application/xml" onChange={handleImportXmlFile} className="hidden" />
 
             <div className="flex-1 overflow-y-auto p-3.5 flex flex-col gap-3">
-              {/* Warm amber notice matching Screenshot 152508 */}
+              {/* Warm amber notice matching official Deriv Bot */}
               <div className="rounded-md bg-[#FFF9E6] dark:bg-amber-500/10 border border-[#FDE68A] dark:border-amber-500/30 px-3 py-2.5 flex items-start gap-2.5 text-[12px] text-[#374151] dark:text-amber-100">
                 <Info className="w-4 h-4 text-[#D99B26] shrink-0 mt-0.5" />
-                <span>All uploaded Bot XML files undergo server-side structure, contract parameter, and 120s Quantum HMAC validation.</span>
+                <span>Importing XML files from Binary Bot and other third-party platforms may take longer.</span>
               </div>
 
               {xmlImportError && (
@@ -2118,71 +1932,75 @@ export const BotBuilderPage: React.FC = () => {
 
               {loadModalTab === 'local' ? (
                 pendingXmlImport ? (
-                  <div className="flex-1 flex flex-col justify-between gap-4">
-                    <div className="rounded-xl border border-slate-200 dark:border-white/10 p-4 bg-[#F8F9FA] dark:bg-[#181C25] space-y-3">
-                      <div className="flex items-center justify-between gap-2">
-                        <span className="font-bold text-sm truncate">{pendingXmlImport.fileName}</span>
-                        {pendingXmlImport.quantumPrediction ? (() => {
-                          const remSecs = Math.max(0, Math.floor((new Date(pendingXmlImport.quantumPrediction!.expires_at).getTime() - quantumNowMs) / 1000));
-                          return remSecs > 0 ? (
-                            <span className="px-2 py-0.5 rounded bg-[#00A878]/15 text-[#00A878] text-[11px] font-bold font-mono shrink-0">
-                              Quantum Verified · {Math.floor(remSecs / 60)}:{String(remSecs % 60).padStart(2, '0')}
-                            </span>
-                          ) : (
-                            <span className="px-2 py-0.5 rounded bg-[#FF444F]/15 text-[#FF444F] text-[11px] font-bold shrink-0">
-                              Expired (120s)
-                            </span>
-                          );
-                        })() : (
-                          <span className="px-2 py-0.5 rounded bg-[#00A878]/15 text-[#00A878] text-[11px] font-bold shrink-0">
-                            Verified Ready
-                          </span>
-                        )}
-                      </div>
-                      <div className="grid grid-cols-2 gap-2 text-xs">
-                        <div>
-                          <span className="text-slate-500">Market:</span>{' '}
-                          <strong>{pendingXmlImport.symbol || symbol}</strong>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Contract:</span>{' '}
-                          <strong>{pendingXmlImport.contractType || contractType}</strong>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Stake:</span>{' '}
-                          <strong>${pendingXmlImport.stake || baseStake}</strong>
-                        </div>
-                        <div>
-                          <span className="text-slate-500">Duration:</span>{' '}
-                          <strong>
-                            {pendingXmlImport.duration || xmlState.duration}{' '}
-                            {pendingXmlImport.parsedState?.durationUnit || xmlState.durationUnit}
-                          </strong>
+                  <div className="flex-1 flex flex-col justify-between gap-3 min-h-0">
+                    <div className="flex-1 flex flex-col min-h-0 gap-1.5">
+                      <span className="text-[13px] font-medium text-[#111319] dark:text-slate-200">Preview</span>
+                      <div className="relative flex-1 min-h-[340px] border border-slate-200 dark:border-white/15 rounded-[4px] overflow-hidden bg-white dark:bg-[#0B0E14] flex flex-col">
+                        <button
+                          type="button"
+                          aria-label="Clear preview"
+                          onClick={() => {
+                            setPendingXmlImport(null);
+                            setXmlImportError(null);
+                          }}
+                          className="absolute top-2.5 right-2.5 z-20 w-7 h-7 rounded-full bg-white/90 dark:bg-[#181C25]/90 flex items-center justify-center text-[#111319] dark:text-white hover:bg-slate-100 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                        </button>
+
+                        <BotBlocklyCanvas
+                          state={{
+                            ...xmlState,
+                            importedGroups: [],
+                            customBlocks: [],
+                            blockPositions: {},
+                            hasSellConditions: false,
+                            sellByCountdown: false,
+                            ...(pendingXmlImport.parsedState || {}),
+                          }}
+                          onChange={() => {}}
+                          instruments={instruments}
+                          canvasZoom={previewZoom}
+                          onOpenQuickStrategy={() => {}}
+                          previewOnly
+                        />
+
+                        <div className="absolute right-3 bottom-3 z-20 bg-white dark:bg-[#151820] border border-slate-200 dark:border-white/15 rounded-full shadow-md flex flex-col items-center py-1 px-1">
+                          <button
+                            type="button"
+                            aria-label="Zoom in preview"
+                            onClick={() => setPreviewZoom((z) => Math.min(110, z + 10))}
+                            className="w-7 h-7 flex items-center justify-center text-[#374151] dark:text-slate-200 hover:text-[#111319] cursor-pointer"
+                          >
+                            +
+                          </button>
+                          <button
+                            type="button"
+                            aria-label="Zoom out preview"
+                            onClick={() => setPreviewZoom((z) => Math.max(35, z - 10))}
+                            className="w-7 h-7 flex items-center justify-center text-[#374151] dark:text-slate-200 hover:text-[#111319] cursor-pointer"
+                          >
+                            −
+                          </button>
                         </div>
                       </div>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3 pt-2">
+                    <div className="flex items-center justify-end gap-3 pt-1 shrink-0">
                       <button
                         type="button"
                         onClick={() => {
                           setPendingXmlImport(null);
                           setXmlImportError(null);
                         }}
-                        className="py-2.5 rounded-[4px] border border-[#111319] dark:border-white/30 text-[13px] font-bold cursor-pointer"
+                        className="px-6 py-2.5 rounded-[4px] border border-[#111319] dark:border-white/30 text-[13px] font-bold cursor-pointer"
                       >
                         Cancel
                       </button>
                       <button
                         type="button"
-                        disabled={
-                          Boolean(
-                            pendingXmlImport.quantumPrediction &&
-                              new Date(pendingXmlImport.quantumPrediction.expires_at).getTime() <= quantumNowMs
-                          )
-                        }
                         onClick={confirmOpenPendingXml}
-                        className="py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed"
+                        className="px-7 py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer"
                       >
                         Open
                       </button>
@@ -2200,106 +2018,22 @@ export const BotBuilderPage: React.FC = () => {
                       onClick={() => fileRef.current?.click()}
                       className="px-5 py-2.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer disabled:opacity-50"
                     >
-                      {validatingXml ? 'Validating XML...' : 'Select an XML file from your device'}
+                      {validatingXml ? 'Loading XML...' : 'Select an XML file from your device'}
                     </button>
                   </div>
                 )
-              ) : loadModalTab === 'drive' ? (
+              ) : (
                 <div className="flex-1 border-2 border-dashed border-slate-300 dark:border-white/15 rounded-lg flex flex-col items-center justify-center p-6 text-center gap-4">
                   <p className="text-[13px] text-[#525866] dark:text-slate-300 max-w-xs">
-                    Import saved strategies from your device storage or browse Prebuilt Bots Lab templates.
+                    Select a saved XML strategy from your device storage.
                   </p>
-                  <div className="flex flex-wrap items-center justify-center gap-2.5">
-                    <button
-                      type="button"
-                      onClick={() => fileRef.current?.click()}
-                      className="px-4 py-2 rounded-[4px] bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
-                    >
-                      Select XML from device
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setLoadModalOpen(false);
-                        setActiveTab('trading-bots');
-                      }}
-                      className="px-4 py-2 rounded-[4px] border border-slate-300 dark:border-white/20 text-xs font-bold cursor-pointer"
-                    >
-                      Open Prebuilt Bots
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <div className="flex-1 flex flex-col gap-3">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="text-[12px] font-semibold text-[#525866] dark:text-slate-300">
-                      Live Quantum Analyser Predictions (120s TTL)
-                    </span>
-                    <button
-                      type="button"
-                      onClick={fetchQuantumSignals}
-                      disabled={loadingQuantumSignals}
-                      className="px-2.5 py-1 rounded border border-slate-300 dark:border-white/15 text-[11px] font-semibold cursor-pointer disabled:opacity-50"
-                    >
-                      {loadingQuantumSignals ? 'Refreshing...' : 'Refresh'}
-                    </button>
-                  </div>
-                  {quantumSignals.length === 0 ? (
-                    <div className="flex-1 border-2 border-dashed border-slate-300 dark:border-white/15 rounded-lg flex flex-col items-center justify-center p-6 text-center gap-3">
-                      <p className="text-[13px] text-[#525866] dark:text-slate-300 max-w-xs">
-                        No active Quantum signals right now. Run a scan in standalone Quantum Analyser to push directly to DBOT.
-                      </p>
-                      <a
-                        href="/quantum-analyser"
-                        target="_blank"
-                        rel="noopener noreferrer"
-                        className="px-4 py-2 rounded-[4px] bg-[#FF444F] text-white text-xs font-bold inline-flex items-center gap-1.5"
-                      >
-                        Open Quantum Analyser
-                      </a>
-                    </div>
-                  ) : (
-                    <div className="space-y-2.5">
-                      {quantumSignals.map((sig) => {
-                        const rem = Math.max(0, Math.floor((new Date(sig.expires_at).getTime() - quantumNowMs) / 1000));
-                        const expired = rem <= 0;
-                        return (
-                          <div
-                            key={sig.prediction_id}
-                            className="rounded-lg border border-slate-200 dark:border-white/10 bg-[#F8F9FA] dark:bg-[#181C25] p-3 flex items-center justify-between gap-3"
-                          >
-                            <div className="min-w-0 space-y-1">
-                              <div className="flex items-center gap-2">
-                                <span className="text-[13px] font-bold text-[#111319] dark:text-white truncate">
-                                  {sig.instrument} · {sig.contract_type}
-                                </span>
-                                {sig.barrier !== null && sig.barrier !== undefined && sig.barrier !== '' && (
-                                  <span className="px-1.5 py-0.5 rounded bg-slate-200 dark:bg-white/10 text-[10px] font-bold">
-                                    Digit {sig.barrier}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="text-[11px] text-[#525866] dark:text-slate-400 flex items-center gap-2 font-mono-num">
-                                <span>{Number(sig.probability || 0).toFixed(2)}% conf</span>
-                                <span>•</span>
-                                <span className={expired ? 'text-[#FF444F]' : 'text-[#00A878] font-semibold'}>
-                                  {expired ? 'Expired' : `${Math.floor(rem / 60)}:${String(rem % 60).padStart(2, '0')} left`}
-                                </span>
-                              </div>
-                            </div>
-                            <button
-                              type="button"
-                              disabled={expired}
-                              onClick={() => loadQuantumSignalIntoWorkspace(sig)}
-                              className="px-3 py-1.5 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[12px] font-bold shrink-0 cursor-pointer disabled:opacity-40"
-                            >
-                              Load into DBOT
-                            </button>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
+                  <button
+                    type="button"
+                    onClick={() => fileRef.current?.click()}
+                    className="px-4 py-2 rounded-[4px] bg-[#FF444F] text-white text-xs font-bold cursor-pointer"
+                  >
+                    Select XML from your device
+                  </button>
                 </div>
               )}
             </div>
@@ -2319,26 +2053,6 @@ export const BotBuilderPage: React.FC = () => {
             <ChevronUp className="w-4 h-4" />
           </button>
         )}
-
-        {xmlState.quantumPredictionId && xmlState.quantumExpiresAt && (() => {
-          const qRem = Math.max(0, Math.floor((new Date(xmlState.quantumExpiresAt).getTime() - quantumNowMs) / 1000));
-          const qValid = qRem > 0;
-          return (
-            <div
-              className={`px-3 py-1.5 border-b text-[11px] font-semibold flex items-center justify-between gap-2 ${
-                qValid
-                  ? 'bg-[#00A878]/10 border-[#00A878]/25 text-[#008C64] dark:text-[#2A9D8F]'
-                  : 'bg-[#FF444F]/10 border-[#FF444F]/25 text-[#FF444F]'
-              }`}
-            >
-              <span className="truncate font-mono-num">
-                {qValid
-                  ? `Quantum Signed XML · ${Math.floor(qRem / 60)}:${String(qRem % 60).padStart(2, '0')} remaining`
-                  : 'Quantum Signal Expired (120s) — Import a fresh Quantum XML'}
-              </span>
-            </div>
-          );
-        })()}
 
         <div className="px-3.5 py-2 flex items-center gap-0">
           {!telemetry?.running ? (
@@ -2932,6 +2646,65 @@ export const BotBuilderPage: React.FC = () => {
               </div>
             </div>
           )}
+        </div>
+      )}
+
+      {/* RESET CONFIRMATION MODAL (Matches official Deriv Bot Reset dialog) */}
+      {resetConfirmOpen && (
+        <div
+          onClick={() => setResetConfirmOpen(false)}
+          className="fixed inset-0 z-[90] bg-black/50 flex items-center justify-center p-5"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-[340px] bg-white dark:bg-[#181C25] rounded-[8px] p-6 shadow-2xl border border-slate-200 dark:border-white/10"
+          >
+            <div className="flex items-center justify-between mb-3">
+              <h3 className="text-[16px] font-bold text-[#111319] dark:text-white">Are you sure?</h3>
+              <button
+                type="button"
+                aria-label="Close reset confirmation"
+                onClick={() => setResetConfirmOpen(false)}
+                className="p-1 text-[#525866] dark:text-slate-400 hover:text-[#111319] dark:hover:text-white cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <p className="text-[13.5px] text-[#374151] dark:text-slate-300 mb-6">
+              Any unsaved changes will be lost.
+            </p>
+            <div className="flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setResetConfirmOpen(false)}
+                className="px-4 py-2 rounded-[4px] border border-[#111319] dark:border-white/30 text-[13px] font-bold text-[#111319] dark:text-white cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={confirmResetWorkspace}
+                className="px-5 py-2 rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold cursor-pointer"
+              >
+                OK
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* OFFICIAL DARK PILL IMPORT / RESET TOAST */}
+      {importToast && (
+        <div className="fixed bottom-[120px] left-1/2 -translate-x-1/2 z-[95] bg-[#1F242D] text-white px-4 py-2.5 rounded-[6px] shadow-xl flex items-center gap-3 text-[13px] font-medium whitespace-nowrap">
+          <span>{importToast}</span>
+          <button
+            type="button"
+            aria-label="Dismiss notification"
+            onClick={() => setImportToast(null)}
+            className="text-white/75 hover:text-white cursor-pointer"
+          >
+            <X className="w-3.5 h-3.5" />
+          </button>
         </div>
       )}
 

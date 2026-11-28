@@ -2,7 +2,6 @@ import { query, queryOne, execute, addNotification } from './db.ts';
 import { derivWs, type TickData } from './deriv-client.ts';
 import { placeUnifiedOrder, closeOrderById, bulkCloseOrders, settleVirtualDigitalOrder } from './trade-execution.ts';
 import { computeLiveAnalyserSignal } from './routes/intelligence.ts';
-import { verifyAndConsumeQuantumPrediction } from './routes/quantum.ts';
 
 export interface BotSessionConfig {
   userId: number;
@@ -521,46 +520,88 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
   session.isExecutingTrade = true;
   session.runState = 'buying';
   try {
-    if (session.quantumPredictionId) {
-      const qCheck = await verifyAndConsumeQuantumPrediction(
-        session.userId,
-        session.quantumPredictionId,
-        true
-      );
-      if (!qCheck.valid) {
-        session.isExecutingTrade = false;
-        appendJournal(session, 'error', qCheck.reason || 'Quantum prediction expired after 120s window.');
-        await stopBotSession(
-          session.userId,
-          qCheck.reason || 'Quantum 2-minute prediction validity window expired (120s)',
-          session.accountMode
-        );
-        return;
-      }
-    }
-
-    let targetSymbol = session.symbol;
+    const targetSymbol = session.symbol;
     let decision = decideBotSide(session, tick.quote, tick.pipSize);
-    let duration = session.duration;
-    let durationUnit = session.durationUnit;
+    const duration = session.duration;
+    const durationUnit = session.durationUnit;
 
-    if (session.analyserSync && !session.quantumPredictionId) {
+    // Silent behind-the-scenes analyser guidance (never surfaced in DBOT UI or journal)
+    let linkedPredictionId: string | null = session.quantumPredictionId;
+    try {
+      const activeQp = await queryOne<{
+        prediction_id: string;
+        instrument: string;
+        contract_type: string;
+        barrier: string | null;
+      }>(
+        `SELECT prediction_id, instrument, contract_type, barrier
+         FROM quantum_predictions
+         WHERE user_id = $1 AND validity_status = 'VALID' AND expires_at > NOW()
+         ORDER BY CASE WHEN instrument = $2 THEN 0 ELSE 1 END, generated_at DESC
+         LIMIT 1`,
+        [session.userId, session.symbol]
+      );
+      if (activeQp) {
+        linkedPredictionId = activeQp.prediction_id;
+      }
+
       const sig = await computeLiveAnalyserSignal(session.symbol);
-      targetSymbol = sig.symbol;
-      session.contractType = sig.contractType;
-      session.currentTradeSide = sig.contractType;
-      session.barrier = sig.barrier;
-      duration = sig.duration;
-      durationUnit = sig.durationUnit;
-      decision = {
-        contractType: sig.contractType,
-        side: sig.side,
-        barrier: sig.barrier,
-        reason: `[Analyser ${sig.confidence}%] ${sig.reason}`,
-      };
+      const currCt = decision.contractType.toUpperCase();
+
+      if (session.contractSideMode === 'both') {
+        const qpCt = activeQp && activeQp.instrument === session.symbol
+          ? String(activeQp.contract_type || '').toUpperCase()
+          : '';
+        const guideCt = qpCt || sig.contractType.toUpperCase();
+
+        if (currCt === 'CALL' || currCt === 'PUT') {
+          const picked = guideCt === 'PUT' || sig.direction === 'BEARISH' ? 'PUT' : 'CALL';
+          decision = { ...decision, contractType: picked, side: picked };
+        } else if (currCt === 'HIGHER' || currCt === 'LOWER') {
+          const picked = guideCt === 'PUT' || guideCt === 'LOWER' || sig.direction === 'BEARISH' ? 'LOWER' : 'HIGHER';
+          decision = { ...decision, contractType: picked, side: picked };
+        } else if (currCt === 'DIGITEVEN' || currCt === 'DIGITODD') {
+          const picked = qpCt === 'DIGITODD' || (!qpCt && sig.oddPct > sig.evenPct) ? 'DIGITODD' : 'DIGITEVEN';
+          decision = {
+            ...decision,
+            contractType: picked,
+            side: picked === 'DIGITEVEN' ? 'EVEN' : 'ODD',
+          };
+        } else if (currCt === 'DIGITOVER' || currCt === 'DIGITUNDER') {
+          const picked = qpCt === 'DIGITUNDER' || (!qpCt && sig.under7Pct > sig.over2Pct) ? 'DIGITUNDER' : 'DIGITOVER';
+          const defaultBarrier = picked === 'DIGITUNDER' ? '7' : '2';
+          decision = {
+            ...decision,
+            contractType: picked,
+            side: picked === 'DIGITUNDER' ? 'UNDER' : 'OVER',
+            barrier:
+              activeQp && activeQp.instrument === session.symbol && activeQp.barrier
+                ? String(activeQp.barrier)
+                : decision.barrier || defaultBarrier,
+          };
+        } else if (currCt === 'DIGITMATCH' || currCt === 'DIGITDIFF') {
+          if (activeQp && activeQp.instrument === session.symbol && (qpCt === 'DIGITMATCH' || qpCt === 'DIGITDIFF')) {
+            decision = {
+              ...decision,
+              contractType: qpCt,
+              side: qpCt === 'DIGITMATCH' ? 'MATCH' : 'DIFF',
+              barrier: activeQp.barrier ? String(activeQp.barrier) : decision.barrier,
+            };
+          }
+        } else if (currCt === 'MULTUP' || currCt === 'MULTDOWN') {
+          const picked = guideCt === 'PUT' || guideCt === 'MULTDOWN' || sig.direction === 'BEARISH' ? 'MULTDOWN' : 'MULTUP';
+          decision = {
+            ...decision,
+            contractType: picked,
+            side: picked === 'MULTUP' ? 'BUY' : 'SELL',
+          };
+        }
+      }
+    } catch {
+      // Keep running seamlessly with XML decision on transient analyser read error
     }
 
-    session.lastSignal = decision.reason;
+    session.lastSignal = `${decision.contractType} @ ${tick.quote.toFixed(2)}`;
     appendJournal(session, 'stake', 'Trade info');
     derivWs.emitUserEvent(session.userId, 'bot_status', serializeTelemetry(session));
 
@@ -587,8 +628,8 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
       connectedAccountId: session.connectedAccountId,
       accountMode: session.accountMode,
       strategyKey: session.strategyType,
-      isAnalyserSynced: session.analyserSync || Boolean(session.quantumPredictionId),
-      quantumPredictionId: session.quantumPredictionId,
+      isAnalyserSynced: true,
+      quantumPredictionId: linkedPredictionId,
       notes: `run:${session.runId}`,
       source: 'bot',
     });
@@ -727,15 +768,6 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     throw new Error('Trading is currently frozen on your account by Administrator controls.');
   }
 
-  let verifiedQuantum: any = null;
-  if (cfg.quantumPredictionId) {
-    const qCheck = await verifyAndConsumeQuantumPrediction(cfg.userId, cfg.quantumPredictionId, false);
-    if (!qCheck.valid || !qCheck.prediction) {
-      throw new Error(qCheck.reason || 'Quantum prediction expired after 120 seconds. Generate a fresh scan.');
-    }
-    verifiedQuantum = qCheck.prediction;
-  }
-
   const targetMode: 'real' | 'demo' = cfg.accountMode === 'real' ? 'real' : 'demo';
   const sKey = sessionKey(cfg.userId, targetMode);
   if (activeSessions.has(sKey)) {
@@ -820,9 +852,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     losses: 0,
     realizedPnl: 0,
     startedAt: new Date().toISOString(),
-    lastSignal: cfg.analyserSync
-      ? 'Analyser Sync connected: scanning highest-confidence entry'
-      : 'Zero-delay startup: evaluating immediate entry',
+    lastSignal: 'Evaluating entry signal',
     recentPrices: seedPrices.slice(-20),
     barrier: cfg.barrier ?? '2',
     duration: Number(cfg.duration || 1),
@@ -833,7 +863,7 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     connectedAccountId: resolvedConnectedAccountId,
     accountMode: targetMode,
     executionSpeed: cfg.executionSpeed === 'normal' ? 'normal' : 'fast',
-    analyserSync: Boolean(cfg.analyserSync),
+    analyserSync: true,
     unsubscribeTick: null,
     isExecutingTrade: false,
     lastTradeAt: 0,
@@ -849,8 +879,8 @@ export async function startBotSession(cfg: BotSessionConfig): Promise<BotTelemet
     currentTradeSide: initialTradeSide,
     conditionType: cfg.conditionType || 'any_tick',
     conditionDigit: Number(cfg.conditionDigit ?? 2),
-    quantumPredictionId: verifiedQuantum ? String(verifiedQuantum.prediction_id) : null,
-    quantumExpiresAt: verifiedQuantum ? new Date(verifiedQuantum.expires_at).toISOString() : null,
+    quantumPredictionId: cfg.quantumPredictionId || null,
+    quantumExpiresAt: null,
     runState: 'idle',
     journal: [],
   };

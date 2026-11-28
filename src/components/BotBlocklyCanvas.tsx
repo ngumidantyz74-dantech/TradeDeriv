@@ -5,6 +5,8 @@ import {
   Minus,
   X,
   RotateCcw,
+  ChevronDown,
+  ChevronRight,
 } from 'lucide-react';
 import {
   BLOCK_MARKETS,
@@ -50,6 +52,7 @@ interface BotBlocklyCanvasProps {
   instruments: MarketInstrument[];
   canvasZoom: number;
   onOpenQuickStrategy: () => void;
+  previewOnly?: boolean;
 }
 
 const OP_LABELS: Record<BotXmlWorkspaceState['ifOperator'], string> = {
@@ -74,18 +77,6 @@ const ALL_TRADE_CATEGORIES: TradeCategoryName[] = [
   'Accumulators',
 ];
 
-const BLOCK_TRAY_ITEMS: Array<{
-  kind: AddedVisualBlock['kind'];
-  label: string;
-  defaultSection: AddedVisualBlock['section'];
-}> = [
-  { kind: 'if', label: 'Logic condition', defaultSection: 'purchase' },
-  { kind: 'set', label: 'Set variable', defaultSection: 'purchase' },
-  { kind: 'purchase', label: 'Purchase contract', defaultSection: 'purchase' },
-  { kind: 'notify', label: 'Notify', defaultSection: 'purchase' },
-  { kind: 'stop', label: 'Stop bot', defaultSection: 'restart' },
-];
-
 const BlockHeaderBadge: React.FC = () => (
   <span
     aria-hidden="true"
@@ -103,11 +94,18 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   instruments,
   canvasZoom,
   onOpenQuickStrategy,
+  previewOnly = false,
 }) => {
   const [popupMenu, setPopupMenu] = useState<ActivePopupMenu | null>(null);
   const [valuePrompt, setValuePrompt] = useState<ActiveValuePrompt | null>(null);
   const [promptInput, setPromptInput] = useState('');
   const [selectedBlockId, setSelectedBlockId] = useState<string>('market');
+  const [collapsedGroups, setCollapsedGroups] = useState<Record<string, boolean>>({});
+
+  const toggleGroupCollapse = (groupId: string) => {
+    if (previewOnly) return;
+    setCollapsedGroups((prev) => ({ ...prev, [groupId]: !prev[groupId] }));
+  };
 
   // Drag offset state for repositioning block groups smoothly
   const dragRef = useRef<{
@@ -154,6 +152,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   }, [canvasZoom, onChange]);
 
   const startGroupDrag = (e: React.PointerEvent<HTMLDivElement>, groupId: string) => {
+    if (previewOnly) return;
     if ((e.target as HTMLElement).closest('button,input,select')) return;
     e.stopPropagation();
     const pos = state.blockPositions?.[groupId] || { x: 0, y: 0 };
@@ -184,6 +183,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     choices: DropdownChoice[],
     onSelect: (v: string) => void
   ) => {
+    if (previewOnly) return;
     e.stopPropagation();
     setSelectedBlockId(id);
     const rect = e.currentTarget.getBoundingClientRect();
@@ -205,6 +205,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   };
 
   const openValuePrompt = (initialValue: string, onConfirm: (val: string) => void) => {
+    if (previewOnly) return;
     setPopupMenu(null);
     setPromptInput(initialValue);
     setValuePrompt({ initialValue, onConfirm });
@@ -276,37 +277,8 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
     return val;
   };
 
-  const addTrayBlock = (kind: AddedVisualBlock['kind'], section?: AddedVisualBlock['section']) => {
-    const targetSection: AddedVisualBlock['section'] =
-      section || (kind === 'stop' ? 'restart' : 'purchase');
-    const newBlock: AddedVisualBlock = {
-      id: `blk-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      section: targetSection,
-      kind,
-      label:
-        kind === 'if'
-          ? 'Logic condition'
-          : kind === 'set'
-            ? 'Set variable'
-            : kind === 'purchase'
-              ? 'Purchase contract'
-              : kind === 'notify'
-                ? 'Notify'
-                : 'Stop bot',
-      left: 'lossStreak',
-      op: 'LT',
-      right: 'lossThreshold',
-      value: '0',
-      contract: state.thenPurchase || 'CALL',
-    };
-    onChange((prev) => ({
-      ...prev,
-      customBlocks: [...(prev.customBlocks || []), newBlock],
-    }));
-    setSelectedBlockId(newBlock.id);
-  };
-
   const removeCustomBlock = (id: string) => {
+    if (previewOnly) return;
     onChange((prev) => ({
       ...prev,
       customBlocks: (prev.customBlocks || []).filter((b) => b.id !== id),
@@ -349,7 +321,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
   );
 
   const selOutline = (blockId: string) =>
-    selectedBlockId === blockId
+    !previewOnly && selectedBlockId === blockId
       ? 'ring-[3px] ring-[#f3c54e] shadow-[0_0_0_1px_#f8e5a7] relative z-20'
       : 'border border-[#c8cacc] dark:border-white/10';
 
@@ -491,34 +463,33 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
       {/* Scrollable Dotted Blockly Workspace */}
       <div
         onClick={() => setPopupMenu(null)}
-        onDragOver={(e) => e.preventDefault()}
-        onDrop={(e) => {
-          const kind = e.dataTransfer.getData('text/block-kind') as AddedVisualBlock['kind'];
-          if (kind) addTrayBlock(kind);
-        }}
-        className="relative flex-1 overflow-auto bg-[radial-gradient(#e4e7e9_1px,transparent_1px)] dark:bg-[radial-gradient(#1f2634_1px,transparent_1px)] [background-size:22px_22px] px-4 py-4"
+        className={`relative flex-1 overflow-auto bg-[radial-gradient(#e4e7e9_1px,transparent_1px)] dark:bg-[radial-gradient(#1f2634_1px,transparent_1px)] [background-size:22px_22px] ${
+          previewOnly ? 'px-2.5 py-2.5' : 'px-4 py-4'
+        }`}
       >
         {/* Top-Left Quick Strategy Red Button + Optional Reset Layout */}
-        <div className="mb-6 flex items-center justify-between gap-3">
-          <button
-            type="button"
-            onClick={onOpenQuickStrategy}
-            className="px-4 py-[9px] rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold shadow-xs cursor-pointer"
-          >
-            Quick strategy
-          </button>
-
-          {hasCustomPositions && (
+        {!previewOnly && (
+          <div className="mb-6 flex items-center justify-between gap-3">
             <button
               type="button"
-              onClick={() => onChange((prev) => ({ ...prev, blockPositions: {} }))}
-              className="px-2.5 py-1.5 rounded-[4px] bg-white/90 dark:bg-[#151820] border border-slate-200 dark:border-white/15 text-[11px] font-semibold text-[#525866] dark:text-slate-300 inline-flex items-center gap-1 cursor-pointer"
+              onClick={onOpenQuickStrategy}
+              className="px-4 py-[9px] rounded-[4px] bg-[#FF444F] hover:bg-[#E63946] text-white text-[13px] font-bold shadow-xs cursor-pointer"
             >
-              <RotateCcw className="w-3 h-3" />
-              Align blocks
+              Quick strategy
             </button>
-          )}
-        </div>
+
+            {hasCustomPositions && (
+              <button
+                type="button"
+                onClick={() => onChange((prev) => ({ ...prev, blockPositions: {} }))}
+                className="px-2.5 py-1.5 rounded-[4px] bg-white/90 dark:bg-[#151820] border border-slate-200 dark:border-white/15 text-[11px] font-semibold text-[#525866] dark:text-slate-300 inline-flex items-center gap-1 cursor-pointer"
+              >
+                <RotateCcw className="w-3 h-3" />
+                Align blocks
+              </button>
+            )}
+          </div>
+        )}
 
         {/* Horizontal Blockly Workspace Canvas */}
         <div
@@ -531,21 +502,44 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
             <div className="relative" style={getGroupTransform('group-trade-def')}>
               <div
                 onPointerDown={(e) => startGroupDrag(e, 'group-trade-def')}
-                className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
-                  selectedBlockId === 'group-trade-def' ? 'ring-[3px] ring-[#f3c54e]' : ''
-                }`}
+                className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center justify-between gap-2 text-[13px] font-normal w-[258px] shadow-xs ${
+                  previewOnly ? '' : 'cursor-grab active:cursor-grabbing'
+                } select-none ${
+                  !previewOnly && selectedBlockId === 'group-trade-def' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                } ${collapsedGroups['group-trade-def'] ? 'rounded-b-[5px]' : ''}`}
               >
-                <BlockHeaderBadge />
-                <span>1. Trade parameters</span>
-                {/* Bottom curved puzzle tab notch matching screenshot */}
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
-                />
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <BlockHeaderBadge />
+                  <span className="truncate">1. Trade parameters</span>
+                </div>
+                {!previewOnly && (
+                  <button
+                    type="button"
+                    aria-label="Collapse or expand Trade parameters"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleGroupCollapse('group-trade-def');
+                    }}
+                    className="p-0.5 rounded hover:bg-white/15 text-white/85 cursor-pointer shrink-0"
+                  >
+                    {collapsedGroups['group-trade-def'] ? (
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
+                {!collapsedGroups['group-trade-def'] && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                  />
+                )}
               </div>
 
               {/* C-Block Body */}
-              <div className="border-l-[10px] border-[#07516b] bg-transparent pt-[2px]">
+              {!collapsedGroups['group-trade-def'] && (
+                <div className="border-l-[10px] border-[#07516b] bg-transparent pt-[2px]">
                 <div className="space-y-[3px]">
                   {/* Market: Market > Submarket > Symbol */}
                   <div
@@ -736,76 +730,41 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                     />
                   </div>
                   <div className="border-l-[10px] border-[#07516b] space-y-[3px] pb-1 pt-[2px]">
-                    {state.assignments.map((row) => {
-                      const isCoreVar = ['initialStake', 'profitThreshold', 'lossThreshold'].includes(row.variable);
-                      return (
-                        <div
-                          key={row.id}
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setSelectedBlockId(`assign-row-${row.id}`);
-                          }}
-                          className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[5px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline(`assign-row-${row.id}`)}`}
-                        >
-                          <span>set</span>
-                          {renderPillBtn(
-                            `assign-${row.id}`,
-                            row.variable,
-                            row.variable,
-                            availableVariables.map((v) => ({ value: v, label: v })),
-                            (nextVar) =>
-                              onChange((prev) => ({
-                                ...prev,
-                                assignments: prev.assignments.map((item) =>
-                                  item.id === row.id ? { ...item, variable: nextVar } : item
-                                ),
-                              }))
-                          )}
-                          <span>to</span>
-                          {renderValuePill(row.value, (nextVal) =>
+                    {state.assignments.map((row) => (
+                      <div
+                        key={row.id}
+                        onClick={(e) => {
+                          if (previewOnly) return;
+                          e.stopPropagation();
+                          setSelectedBlockId(`assign-row-${row.id}`);
+                        }}
+                        className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[5px] flex items-center gap-1.5 text-[12px] text-[#374151] dark:text-slate-200 w-fit cursor-pointer ${selOutline(`assign-row-${row.id}`)}`}
+                      >
+                        <span>set</span>
+                        {renderPillBtn(
+                          `assign-${row.id}`,
+                          row.variable,
+                          row.variable,
+                          availableVariables.map((v) => ({ value: v, label: v })),
+                          (nextVar) =>
                             onChange((prev) => ({
                               ...prev,
                               assignments: prev.assignments.map((item) =>
-                                item.id === row.id ? { ...item, value: nextVal } : item
+                                item.id === row.id ? { ...item, variable: nextVar } : item
                               ),
                             }))
-                          )}
-                          {!isCoreVar && (
-                            <button
-                              type="button"
-                              title="Remove variable"
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                onChange((prev) => ({
-                                  ...prev,
-                                  assignments: prev.assignments.filter((item) => item.id !== row.id),
-                                }));
-                              }}
-                              className="ml-0.5 w-4 h-4 rounded-full bg-black/15 hover:bg-black/25 dark:bg-white/15 flex items-center justify-center cursor-pointer"
-                            >
-                              <X className="w-2.5 h-2.5" />
-                            </button>
-                          )}
-                        </div>
-                      );
-                    })}
-                    <button
-                      type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        const nextName = `var${state.assignments.length + 1}`;
-                        const nextId = `assign-${Date.now()}-${Math.random().toString(36).slice(2, 5)}`;
-                        onChange((prev) => ({
-                          ...prev,
-                          discoveredVariables: Array.from(new Set([...(prev.discoveredVariables || []), nextName])),
-                          assignments: [...prev.assignments, { id: nextId, variable: nextName, value: '0' }],
-                        }));
-                      }}
-                      className="ml-1 mt-0.5 px-2.5 py-[3px] rounded-full bg-[#e2e3e5] hover:bg-[#d5d7da] dark:bg-[#1E2532] border border-[#c8cacc] dark:border-white/15 text-[11px] font-medium text-[#374151] dark:text-slate-200 inline-flex items-center gap-1 cursor-pointer"
-                    >
-                      <Plus className="w-3 h-3" />
-                      Add variable
-                    </button>
+                        )}
+                        <span>to</span>
+                        {renderValuePill(row.value, (nextVal) =>
+                          onChange((prev) => ({
+                            ...prev,
+                            assignments: prev.assignments.map((item) =>
+                              item.id === row.id ? { ...item, value: nextVal } : item
+                            ),
+                          }))
+                        )}
+                      </div>
+                    ))}
                   </div>
                 </div>
 
@@ -890,29 +849,57 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                     </div>
                   </div>
                 </div>
-              </div>
+                </div>
+              )}
 
               {/* Bottom C-Block Footer Cap */}
-              <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+              {!collapsedGroups['group-trade-def'] && (
+                <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+              )}
             </div>
 
             {/* BLOCK 2: 2. Purchase conditions (with exact #D99B26 gold top highlight) */}
             <div className="relative" style={getGroupTransform('group-before-purchase')}>
               <div
                 onPointerDown={(e) => startGroupDrag(e, 'group-before-purchase')}
-                className={`relative bg-[#07516b] border-t-[3px] border-t-[#D99B26] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
-                  selectedBlockId === 'group-before-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
-                }`}
+                className={`relative bg-[#07516b] border-t-[3px] border-t-[#D99B26] text-white rounded-t-[5px] px-3 py-2 flex items-center justify-between gap-2 text-[13px] font-normal w-[258px] shadow-xs ${
+                  previewOnly ? '' : 'cursor-grab active:cursor-grabbing'
+                } select-none ${
+                  !previewOnly && selectedBlockId === 'group-before-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                } ${collapsedGroups['group-before-purchase'] ? 'rounded-b-[5px]' : ''}`}
               >
-                <BlockHeaderBadge />
-                <span>2. Purchase conditions</span>
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
-                />
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <BlockHeaderBadge />
+                  <span className="truncate">2. Purchase conditions</span>
+                </div>
+                {!previewOnly && (
+                  <button
+                    type="button"
+                    aria-label="Collapse or expand Purchase conditions"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleGroupCollapse('group-before-purchase');
+                    }}
+                    className="p-0.5 rounded hover:bg-white/15 text-white/85 cursor-pointer shrink-0"
+                  >
+                    {collapsedGroups['group-before-purchase'] ? (
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
+                {!collapsedGroups['group-before-purchase'] && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                  />
+                )}
               </div>
 
-              <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+              {!collapsedGroups['group-before-purchase'] && (
+                <>
+                  <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
                 {/* set [msgInfo ▾] to create text with (+) */}
                 <div
                   onClick={(e) => {
@@ -1043,6 +1030,7 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                 {state.beforeHasIf === false ? (
                   <div
                     onClick={(e) => {
+                      if (previewOnly) return;
                       e.stopPropagation();
                       setSelectedBlockId('directPurchase');
                     }}
@@ -1056,17 +1044,6 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                       legChoices,
                       (v) => onChange((prev) => ({ ...prev, thenPurchase: v }))
                     )}
-                    <button
-                      type="button"
-                      title="Add if/else condition"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        onChange((prev) => ({ ...prev, beforeHasIf: true }));
-                      }}
-                      className="ml-1 px-2 py-[2px] rounded-full bg-white/80 hover:bg-white dark:bg-[#151820] border border-[#c8cacc] dark:border-white/20 text-[10.5px] font-medium text-[#525866] dark:text-slate-300 cursor-pointer"
-                    >
-                      + Condition
-                    </button>
                   </div>
                 ) : (
                   /* if [tradeSide ▾] [= ▾] (CALL) then Purchase [Rise ▾] else Purchase [Fall ▾] */
@@ -1162,9 +1139,11 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                 )}
 
                 {renderCustomBlocksForSection('purchase')}
-              </div>
+                  </div>
 
-              <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+                  <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+                </>
+              )}
             </div>
 
             {/* BLOCK 3: 3. Sell conditions (during_purchase) */}
@@ -1172,60 +1151,88 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
               <div className="relative" style={getGroupTransform('group-during-purchase')}>
                 <div
                   onPointerDown={(e) => startGroupDrag(e, 'group-during-purchase')}
-                  className={`relative bg-[#07516b] border-t-[3px] border-t-[#D99B26] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
-                    selectedBlockId === 'group-during-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
-                  }`}
+                  className={`relative bg-[#07516b] border-t-[3px] border-t-[#D99B26] text-white rounded-t-[5px] px-3 py-2 flex items-center justify-between gap-2 text-[13px] font-normal w-[258px] shadow-xs ${
+                    previewOnly ? '' : 'cursor-grab active:cursor-grabbing'
+                  } select-none ${
+                    !previewOnly && selectedBlockId === 'group-during-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                  } ${collapsedGroups['group-during-purchase'] ? 'rounded-b-[5px]' : ''}`}
                 >
-                  <BlockHeaderBadge />
-                  <span>3. Sell conditions</span>
-                  <span
-                    aria-hidden="true"
-                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
-                  />
-                </div>
-                <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
-                  <div
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      setSelectedBlockId('sellCond');
-                    }}
-                    className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('sellCond')}`}
-                  >
-                    <div className="flex items-center gap-1.5 whitespace-nowrap">
-                      <span>if</span>
-                      <span className="px-2.5 py-[3px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15">
-                        Sell is available
-                      </span>
-                      <span>&amp;</span>
-                      {renderPillBtn(
-                        'sellMode',
-                        state.sellByCountdown ? 'Count Down' : 'Take Profit',
-                        state.sellByCountdown ? 'countdown' : 'tp',
-                        [
-                          { value: 'tp', label: 'Take Profit' },
-                          { value: 'countdown', label: 'Count Down' },
-                        ],
-                        (v) => onChange((prev) => ({ ...prev, sellByCountdown: v === 'countdown' }))
-                      )}
-                      {state.sellByCountdown && (
-                        <>
-                          <span>Tick Count &gt;</span>
-                          {renderValuePill(state.sellTickCount || '0', (nextTicks) =>
-                            onChange((prev) => ({ ...prev, sellTickCount: nextTicks }))
-                          )}
-                        </>
-                      )}
-                      <span>then</span>
-                    </div>
-                    <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
-                      <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 w-fit font-medium">
-                        Sell at market
-                      </div>
-                    </div>
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <BlockHeaderBadge />
+                    <span className="truncate">3. Sell conditions</span>
                   </div>
-                  {renderCustomBlocksForSection('sell')}
+                  {!previewOnly && (
+                    <button
+                      type="button"
+                      aria-label="Collapse or expand Sell conditions"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        toggleGroupCollapse('group-during-purchase');
+                      }}
+                      className="p-0.5 rounded hover:bg-white/15 text-white/85 cursor-pointer shrink-0"
+                    >
+                      {collapsedGroups['group-during-purchase'] ? (
+                        <ChevronRight className="w-3.5 h-3.5" />
+                      ) : (
+                        <ChevronDown className="w-3.5 h-3.5" />
+                      )}
+                    </button>
+                  )}
+                  {!collapsedGroups['group-during-purchase'] && (
+                    <span
+                      aria-hidden="true"
+                      className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                    />
+                  )}
                 </div>
-                <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+                {!collapsedGroups['group-during-purchase'] && (
+                  <>
+                    <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+                      <div
+                        onClick={(e) => {
+                          if (previewOnly) return;
+                          e.stopPropagation();
+                          setSelectedBlockId('sellCond');
+                        }}
+                        className={`bg-[#e2e3e5] dark:bg-[#1E2532] rounded-r-[4px] px-3 py-[6px] text-[12px] text-[#374151] dark:text-slate-200 w-fit space-y-2 cursor-pointer ${selOutline('sellCond')}`}
+                      >
+                        <div className="flex items-center gap-1.5 whitespace-nowrap">
+                          <span>if</span>
+                          <span className="px-2.5 py-[3px] rounded-full bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C6CBD2] dark:border-white/15">
+                            Sell is available
+                          </span>
+                          <span>&amp;</span>
+                          {renderPillBtn(
+                            'sellMode',
+                            state.sellByCountdown ? 'Count Down' : 'Take Profit',
+                            state.sellByCountdown ? 'countdown' : 'tp',
+                            [
+                              { value: 'tp', label: 'Take Profit' },
+                              { value: 'countdown', label: 'Count Down' },
+                            ],
+                            (v) => onChange((prev) => ({ ...prev, sellByCountdown: v === 'countdown' }))
+                          )}
+                          {state.sellByCountdown && (
+                            <>
+                              <span>Tick Count &gt;</span>
+                              {renderValuePill(state.sellTickCount || '0', (nextTicks) =>
+                                onChange((prev) => ({ ...prev, sellTickCount: nextTicks }))
+                              )}
+                            </>
+                          )}
+                          <span>then</span>
+                        </div>
+                        <div className="pl-3 border-l-4 border-[#C5CAD2] dark:border-white/15">
+                          <div className="bg-[#ECEEF1] dark:bg-[#171C26] border border-[#C5CAD2] dark:border-white/10 rounded-[4px] px-2.5 py-1.5 w-fit font-medium">
+                            Sell at market
+                          </div>
+                        </div>
+                      </div>
+                      {renderCustomBlocksForSection('sell')}
+                    </div>
+                    <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+                  </>
+                )}
               </div>
             )}
           </div>
@@ -1235,19 +1242,44 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
             <div className="relative" style={getGroupTransform('group-after-purchase')}>
               <div
                 onPointerDown={(e) => startGroupDrag(e, 'group-after-purchase')}
-                className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[13px] font-normal w-[258px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
-                  selectedBlockId === 'group-after-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
-                }`}
+                className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center justify-between gap-2 text-[13px] font-normal w-[258px] shadow-xs ${
+                  previewOnly ? '' : 'cursor-grab active:cursor-grabbing'
+                } select-none ${
+                  !previewOnly && selectedBlockId === 'group-after-purchase' ? 'ring-[3px] ring-[#f3c54e]' : ''
+                } ${collapsedGroups['group-after-purchase'] ? 'rounded-b-[5px]' : ''}`}
               >
-                <BlockHeaderBadge />
-                <span>4. Restart trading conditions</span>
-                <span
-                  aria-hidden="true"
-                  className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
-                />
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <BlockHeaderBadge />
+                  <span className="truncate">4. Restart trading conditions</span>
+                </div>
+                {!previewOnly && (
+                  <button
+                    type="button"
+                    aria-label="Collapse or expand Restart trading conditions"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      toggleGroupCollapse('group-after-purchase');
+                    }}
+                    className="p-0.5 rounded hover:bg-white/15 text-white/85 cursor-pointer shrink-0"
+                  >
+                    {collapsedGroups['group-after-purchase'] ? (
+                      <ChevronRight className="w-3.5 h-3.5" />
+                    ) : (
+                      <ChevronDown className="w-3.5 h-3.5" />
+                    )}
+                  </button>
+                )}
+                {!collapsedGroups['group-after-purchase'] && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                  />
+                )}
               </div>
 
-              <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+              {!collapsedGroups['group-after-purchase'] && (
+                <>
+                  <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
                 {/* Update Stake And Side On Result with: resultIsWin (Result is [Win ▾]) */}
                 <div
                   onClick={(e) => {
@@ -1342,65 +1374,82 @@ export const BotBlocklyCanvas: React.FC<BotBlocklyCanvasProps> = ({
                 </div>
 
                 {renderCustomBlocksForSection('restart')}
-              </div>
+                  </div>
 
-              <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+                  <div className="bg-[#07516b] h-5 w-[258px] rounded-b-[6px]" />
+                </>
+              )}
             </div>
 
             {/* Render Imported Procedure / Function Groups from uploaded DBot XMLs */}
-            {(state.importedGroups || []).map((grp) => (
-              <div
-                key={grp.id}
-                style={getGroupTransform(`proc-${grp.id}`)}
-                className="relative"
-              >
+            {(state.importedGroups || []).map((grp) => {
+              const procKey = `proc-${grp.id}`;
+              const isCollapsed = Boolean(collapsedGroups[procKey]);
+              return (
                 <div
-                  onPointerDown={(e) => startGroupDrag(e, `proc-${grp.id}`)}
-                  className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center gap-2.5 text-[12.5px] font-normal min-w-[258px] max-w-[360px] shadow-xs cursor-grab active:cursor-grabbing select-none ${
-                    selectedBlockId === `proc-${grp.id}` ? 'ring-[3px] ring-[#f3c54e]' : ''
-                  }`}
+                  key={grp.id}
+                  style={getGroupTransform(procKey)}
+                  className="relative"
                 >
-                  <BlockHeaderBadge />
-                  <span className="truncate">{grp.title}</span>
-                  <span
-                    aria-hidden="true"
-                    className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
-                  />
-                </div>
-                <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
-                  {grp.lines.map((line, i) => (
-                    <div
-                      key={`${grp.id}-${i}`}
-                      className="bg-[#e2e3e5] dark:bg-[#1E2532] border border-[#c8cacc] dark:border-white/10 rounded-r-[4px] px-3 py-[5px] text-[11.5px] text-[#374151] dark:text-slate-200 max-w-[340px] truncate"
-                    >
-                      {line}
+                  <div
+                    onPointerDown={(e) => startGroupDrag(e, procKey)}
+                    className={`relative bg-[#07516b] text-white rounded-t-[5px] px-3 py-2 flex items-center justify-between gap-2 text-[12.5px] font-normal min-w-[258px] max-w-[360px] shadow-xs ${
+                      previewOnly ? '' : 'cursor-grab active:cursor-grabbing'
+                    } select-none ${
+                      !previewOnly && selectedBlockId === procKey ? 'ring-[3px] ring-[#f3c54e]' : ''
+                    } ${isCollapsed ? 'rounded-b-[5px]' : ''}`}
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <BlockHeaderBadge />
+                      <span className="truncate">{grp.title}</span>
                     </div>
-                  ))}
+                    {!previewOnly && (
+                      <button
+                        type="button"
+                        aria-label={`Collapse or expand ${grp.title}`}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          toggleGroupCollapse(procKey);
+                        }}
+                        className="p-0.5 rounded hover:bg-white/15 text-white/85 cursor-pointer shrink-0"
+                      >
+                        {isCollapsed ? (
+                          <ChevronRight className="w-3.5 h-3.5" />
+                        ) : (
+                          <ChevronDown className="w-3.5 h-3.5" />
+                        )}
+                      </button>
+                    )}
+                    {!isCollapsed && (
+                      <span
+                        aria-hidden="true"
+                        className="pointer-events-none absolute left-[28px] -bottom-[8px] w-[38px] h-[10px] bg-[#07516b] rounded-b-[14px] z-10"
+                      />
+                    )}
+                  </div>
+                  {!isCollapsed && (
+                    <>
+                      <div className="border-l-[10px] border-[#07516b] space-y-[3px] pt-[2px]">
+                        {grp.lines.map((line, i) => (
+                          <div
+                            key={`${grp.id}-${i}`}
+                            className="bg-[#e2e3e5] dark:bg-[#1E2532] border border-[#c8cacc] dark:border-white/10 rounded-r-[4px] px-3 py-[5px] text-[11.5px] text-[#374151] dark:text-slate-200 max-w-[340px] truncate"
+                          >
+                            {line}
+                          </div>
+                        ))}
+                      </div>
+                      <div className="bg-[#07516b] h-4 w-[258px] rounded-b-[6px]" />
+                    </>
+                  )}
                 </div>
-                <div className="bg-[#07516b] h-4 w-[258px] rounded-b-[6px]" />
-              </div>
-            ))}
+              );
+            })}
             {(state.customBlocks || []).some((b) => b.section === 'canvas') && (
               <div className="space-y-2">{renderCustomBlocksForSection('canvas')}</div>
             )}
           </div>
         </div>
-      </div>
-
-      {/* Bottom Interactive Block Tray matching .dragbank in deriv_bot_visual_replica_editable_xml_upgraded.html */}
-      <div className="shrink-0 bg-[#f6f7f8] dark:bg-[#151820] border-t border-[#e5e7eb] dark:border-white/[0.08] px-3 py-2 flex items-center gap-2 overflow-x-auto no-scrollbar">
-        {BLOCK_TRAY_ITEMS.map((item) => (
-          <button
-            key={item.kind}
-            type="button"
-            draggable
-            onDragStart={(e) => e.dataTransfer.setData('text/block-kind', item.kind)}
-            onClick={() => addTrayBlock(item.kind, item.defaultSection)}
-            className="px-3 py-1.5 rounded-[5px] bg-[#07516b] hover:bg-[#096281] text-white text-[12px] font-normal whitespace-nowrap shrink-0 cursor-grab active:cursor-grabbing shadow-xs"
-          >
-            + {item.label}
-          </button>
-        ))}
       </div>
 
       {/* BLOCKLY FLAT #e6e6e6 POPUP DROPDOWN MENU (Matches Screenshot 210512 (1)) */}

@@ -352,7 +352,7 @@ export const OptionsHub: React.FC = () => {
             {
               code: 'DB',
               title: 'Deriv Bot',
-              desc: 'Quick strategy bots, XML builder & Analyser auto-sync.',
+              desc: 'Automated trading strategies with visual blocks and XML bots.',
               color: 'bg-[#FF444F]',
               tab: 'bot-builder',
             },

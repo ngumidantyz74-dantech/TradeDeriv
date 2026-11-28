@@ -435,44 +435,15 @@ export const AppProvider: React.FC<{ children: React.ReactNode }> = ({ children 
     }
   }, [loginWithToken, setActiveTab, showToast]);
 
-  // Consume deep link query params (?tab=bot-builder&quantum=QP-...) when opening DBOT from standalone Quantum Analyser
+  // Consume deep link query params (?tab=bot-builder) cleanly without exposing Quantum UI inside main site
   useEffect(() => {
     if (!user || !token) return;
     const params = new URLSearchParams(window.location.search || '');
     const tabParam = params.get('tab') as NavTab | null;
-    const quantumId = params.get('quantum');
-    if (!tabParam && !quantumId) return;
-
-    if (tabParam) {
-      setActiveTab(tabParam);
-    }
-
-    if (quantumId) {
-      apiFetch<{ predictions: any[] }>('/api/quantum/predictions')
-        .then((res) => {
-          const match = (res.predictions || []).find((p) => p.prediction_id === quantumId);
-          if (match) {
-            setSelectedSymbol(match.instrument);
-            setTradePreset({
-              symbol: match.instrument,
-              contractType: match.contract_type,
-              barrier: match.barrier,
-              stake: Number(match.stake || 1),
-              duration: Number(match.duration || 1),
-              durationUnit: match.duration_unit || 't',
-              strategyType: 'quantum_minimal_loss',
-              analyserSync: true,
-              quantumPredictionId: match.prediction_id,
-              quantumExpiresAt: match.expires_at,
-            });
-            showToast(`Synced Quantum signal ${match.prediction_id} into DBOT`, 'success');
-          }
-        })
-        .catch(() => {});
-    }
-
+    if (!tabParam) return;
+    setActiveTab(tabParam);
     window.history.replaceState({}, '', window.location.pathname || '/');
-  }, [user, token, setActiveTab, setSelectedSymbol, showToast]);
+  }, [user, token, setActiveTab]);
 
   // Listen for popup postMessage from /api/deriv/oauth/callback
   useEffect(() => {

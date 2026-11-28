@@ -932,76 +932,41 @@ router.post('/quantum/validate-xml', requireDb, requireAuth, async (req: AuthReq
     return;
   }
 
-  // If XML contains Quantum Analyser metadata, strictly verify DB record, HMAC integrity, untampered fields, and 120s window
+  // If XML contains Quantum Analyser metadata and it is still valid & untampered, attach it silently; otherwise allow normal DBOT XML execution
   if (parsed.quantumMeta) {
     const qm = parsed.quantumMeta;
     const predictionId = qm.prediction_id || '';
-    const check = await verifyAndConsumeQuantumPrediction(userId, predictionId, false);
-    if (!check.valid || !check.prediction) {
-      res.status(check.prediction ? 410 : 403).json({
-        valid: false,
-        error: check.reason || 'Quantum XML prediction expired or unauthorized.',
-        code: 'QUANTUM_EXPIRED',
+    const check = await verifyAndConsumeQuantumPrediction(userId, predictionId, false).catch(() => null);
+    if (check?.valid && check.prediction && timingSafeHexEqual(qm.signature_hmac || '', check.prediction.signature_hmac)) {
+      const row = check.prediction;
+      res.json({
+        valid: true,
+        isQuantum: true,
+        quantumPrediction: {
+          prediction_id: row.prediction_id,
+          instrument: row.instrument,
+          contract_type: row.contract_type,
+          predicted_condition: row.predicted_condition,
+          barrier: row.barrier,
+          stake: row.stake,
+          probability: row.probability,
+          loss_risk_score: row.loss_risk_score,
+          generated_at: row.generated_at,
+          expires_at: row.expires_at,
+          validity_status: row.validity_status,
+          remainingSeconds: check.remainingSeconds,
+        },
+        summary: {
+          symbol,
+          contractType: resolvedContract,
+          stake,
+          duration,
+          durationUnit,
+          barrier,
+        },
       });
       return;
     }
-
-    const row = check.prediction;
-    if (!timingSafeHexEqual(qm.signature_hmac || '', row.signature_hmac)) {
-      res.status(400).json({
-        valid: false,
-        error: 'Quantum XML HMAC signature verification failed. File appears tampered.',
-        code: 'TAMPERED_XML',
-      });
-      return;
-    }
-
-    // Verify block fields inside XML match signed DB prediction (prevent editing <block> values while keeping <quantum_meta>)
-    const metaMismatch =
-      String(qm.instrument || '').trim() !== row.instrument ||
-      String(qm.contract_type || '').trim().toUpperCase() !== String(row.contract_type).toUpperCase() ||
-      String(symbol).trim() !== row.instrument ||
-      String(resolvedContract).trim().toUpperCase() !== String(row.contract_type).toUpperCase() ||
-      Number(stake).toFixed(2) !== Number(row.stake).toFixed(2) ||
-      Number(duration) !== Number(row.duration) ||
-      String(durationUnit).toLowerCase() !== String(row.duration_unit).toLowerCase();
-
-    if (metaMismatch) {
-      res.status(400).json({
-        valid: false,
-        error: 'Quantum XML parameters do not match the signed prediction record.',
-        code: 'TAMPERED_XML',
-      });
-      return;
-    }
-
-    res.json({
-      valid: true,
-      isQuantum: true,
-      quantumPrediction: {
-        prediction_id: row.prediction_id,
-        instrument: row.instrument,
-        contract_type: row.contract_type,
-        predicted_condition: row.predicted_condition,
-        barrier: row.barrier,
-        stake: row.stake,
-        probability: row.probability,
-        loss_risk_score: row.loss_risk_score,
-        generated_at: row.generated_at,
-        expires_at: row.expires_at,
-        validity_status: row.validity_status,
-        remainingSeconds: check.remainingSeconds,
-      },
-      summary: {
-        symbol,
-        contractType: resolvedContract,
-        stake,
-        duration,
-        durationUnit,
-        barrier,
-      },
-    });
-    return;
   }
 
   res.json({

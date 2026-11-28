@@ -4,7 +4,7 @@ import { execute, pool } from './db.ts';
 export async function sendTransactionalEmail(params: {
   to: string;
   toName?: string;
-  template: 'welcome_verification' | 'connection_status' | 'password_reset' | 'system_alert';
+  template: 'welcome_verification' | 'connection_status' | 'password_reset' | 'system_alert' | 'daily_pnl_summary';
   subject: string;
   htmlContent: string;
 }): Promise<{ delivered: boolean; status: 'sent' | 'queued_local' | 'failed' | 'error'; messageId?: string; errorMessage?: string }> {
