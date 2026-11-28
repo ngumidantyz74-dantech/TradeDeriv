@@ -206,6 +206,15 @@ function handleBotTradeSettled(session: InternalBotSession, pnl: number): void {
     queueMicrotask(() => {
       stopBotSession(session.userId, finalReason, session.accountMode).catch(() => {});
     });
+  } else if (session.running) {
+    const nextDelayMs = session.executionSpeed === 'fast' ? 160 : 850;
+    setTimeout(() => {
+      if (!session.running || session.isExecutingTrade) return;
+      const latest = derivWs.getLatestTick(session.symbol);
+      if (latest) {
+        evaluateAndExecuteBotTick(session, latest).catch(() => {});
+      }
+    }, nextDelayMs);
   }
 }
 
@@ -414,9 +423,9 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
 
     if (oct === 'ACCU') {
       const growthRate = Math.min(0.05, Math.max(0.01, Number(order.barrier || session.growthRate || 0.02)));
-      const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / 1500));
-      // Realistic mock barrier knockout chance per tick calibrated to growth rate (1%..5%)
-      const knockoutChance = Math.min(0.14, growthRate * 1.6);
+      const tickMs = order.execution_mode === 'virtual' ? 650 : 1500;
+      const elapsedTicks = Math.max(1, Math.floor((Date.now() - new Date(order.opened_at).getTime()) / tickMs));
+      const knockoutChance = Math.min(0.12, growthRate * 1.4);
       if (elapsedTicks >= 2 && Math.random() < knockoutChance) {
         closingOrderLocks.add(order.id);
         botLastPersistAt.delete(order.id);
@@ -451,9 +460,10 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
         pnl: accruedPnl,
       });
 
+      const targetTicks = order.execution_mode === 'virtual' ? 3 : 5;
       if (
         (session.sellTickCount > 0 && elapsedTicks >= session.sellTickCount) ||
-        elapsedTicks >= 5 ||
+        elapsedTicks >= targetTicks ||
         accruedPnl >= Number(order.tp_usd || order.stake * 0.15)
       ) {
         closingOrderLocks.add(order.id);
@@ -523,7 +533,7 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     if (Date.now() - session.executingStartedAt < 18000) return;
     session.isExecutingTrade = false;
   }
-  if (session.executionSpeed === 'normal' && Date.now() - session.lastTradeAt < 1800) {
+  if (session.executionSpeed === 'normal' && Date.now() - session.lastTradeAt < 1200) {
     return;
   }
   if (openBotOrders.length > 0) return;
@@ -672,10 +682,17 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
     });
 
     if (order.execution_mode === 'deriv' || !['MULTUP', 'MULTDOWN', 'ACCU'].includes(decision.contractType)) {
-      const expectedMs =
-        durationUnit.toLowerCase() === 't'
-          ? Math.max(1200, duration * 1200)
-          : Math.max(2000, duration * (durationUnit === 'm' ? 60000 : durationUnit === 'h' ? 3600000 : 1000));
+      const isVirtualOrder = order.execution_mode === 'virtual';
+      const unitSec = durationUnit === 'm' ? 60 : durationUnit === 'h' ? 3600 : 1;
+      const expectedMs = isVirtualOrder
+        ? durationUnit.toLowerCase() === 't'
+          ? Math.max(450, Math.min(2500, duration * 550))
+          : Math.max(700, Math.min(2500, duration * unitSec * 150))
+        : durationUnit.toLowerCase() === 't'
+          ? Math.max(1100, duration * 1100)
+          : Math.max(2000, duration * unitSec * 1000);
+      const pollMs = isVirtualOrder || durationUnit.toLowerCase() === 't' ? 350 : 800;
+      const maxAttempts = Math.max(240, Math.ceil(expectedMs / pollMs) + 60);
       const startedAtMs = Date.now();
       let attempts = 0;
       const checkInterval = setInterval(async () => {
@@ -692,15 +709,18 @@ async function evaluateAndExecuteBotTick(session: InternalBotSession, tick: Tick
             }
             return;
           }
-          if (row.execution_mode === 'virtual' && Date.now() - startedAtMs >= expectedMs + 2500) {
+          if (row.execution_mode === 'virtual' && Date.now() - startedAtMs >= expectedMs + 900) {
             await settleVirtualDigitalOrder(Number(order.id)).catch(() => {});
-          } else if (attempts >= 180 || !session.running) {
+          } else if (attempts >= maxAttempts || !session.running) {
+            if (row.execution_mode === 'virtual') {
+              await settleVirtualDigitalOrder(Number(order.id)).catch(() => {});
+            }
             clearInterval(checkInterval);
           }
         } catch {
           clearInterval(checkInterval);
         }
-      }, 900);
+      }, pollMs);
     }
   } catch (err) {
     const rawMsg = err instanceof Error ? err.message : 'Execution paused';

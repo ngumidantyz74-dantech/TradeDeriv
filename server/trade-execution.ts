@@ -440,6 +440,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     !isDbLocked &&
     (hasUnlockedDerivAcc || explicitDeriv);
 
+  let inlineSettlementPromise: Promise<any | null> | undefined;
+
   if (shouldAttemptDerivApi && targetAccId) {
     const shownRealBal =
       isRealMode
@@ -580,6 +582,10 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
         };
 
         let buyResult: any;
+        const buyOptions = {
+          keepAliveForSettlement: true,
+          settlementTimeoutMs: 25000,
+        };
         if (isOAuth2) {
           const mintOtpUrl = async () => {
             const otpResp = await derivRestRequest<any>(
@@ -603,7 +609,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
               otpUrl,
               buildProposalPayload(preferUnderlying),
               stake,
-              10000
+              10000,
+              buyOptions
             );
           } catch (firstErr) {
             const msg = firstErr instanceof Error ? firstErr.message.toLowerCase() : '';
@@ -613,7 +620,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
                 retryOtpUrl,
                 buildProposalPayload(!preferUnderlying),
                 stake,
-                10000
+                10000,
+                buyOptions
               );
             } else {
               throw firstErr;
@@ -624,7 +632,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
             creds.token,
             buildProposalPayload(false),
             stake,
-            10000
+            10000,
+            buyOptions
           );
         }
 
@@ -632,6 +641,7 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
           derivContractId = String(buyResult.buy.contract_id);
           actualPayout = Number(buyResult.buy.payout || 0);
           actualMode = 'deriv';
+          inlineSettlementPromise = buyResult.settlementPromise;
 
           const liveBal =
             buyResult.buy.balance_after !== undefined
@@ -959,10 +969,16 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
     ].includes(contractType)
   ) {
     const settleDelay =
-      durationUnit.toLowerCase() === 't'
-        ? Math.max(800, Math.min(12000, duration * 1000))
-        : Math.max(1500, Math.min(120000, durationToSeconds(duration, durationUnit) * 1000));
+      input.source === 'bot'
+        ? durationUnit.toLowerCase() === 't'
+          ? Math.max(450, Math.min(2500, duration * 550))
+          : Math.max(700, Math.min(2500, durationToSeconds(duration, durationUnit) * 150))
+        : durationUnit.toLowerCase() === 't'
+          ? Math.max(600, Math.min(6000, duration * 700))
+          : Math.max(1200, Math.min(30000, durationToSeconds(duration, durationUnit) * 1000));
+    pendingVirtualDigitalSettles.set(Number(created.id), Date.now() + settleDelay + 1200);
     setTimeout(() => {
+      pendingVirtualDigitalSettles.delete(Number(created.id));
       settleVirtualDigitalOrder(Number(created.id)).catch(() => {});
     }, settleDelay);
   } else if (
@@ -974,7 +990,8 @@ export async function placeUnifiedOrder(input: PlaceOrderInput): Promise<any> {
       Number(created.id),
       derivContractId,
       input.userId,
-      resolvedConnectedAccountId
+      resolvedConnectedAccountId,
+      inlineSettlementPromise
     ).catch(() => {});
   }
 
@@ -985,8 +1002,15 @@ async function monitorDerivOpenContract(
   orderId: number,
   derivContractId: string,
   userId: number,
-  connectedAccountId: number
+  connectedAccountId: number,
+  inlineSettlementPromise?: Promise<any | null>
 ): Promise<void> {
+  const isPocSettled = (poc: any): boolean =>
+    Boolean(poc?.is_sold) ||
+    poc?.status === 'won' ||
+    poc?.status === 'lost' ||
+    poc?.status === 'sold' ||
+    (Boolean(poc?.is_expired) && (poc?.profit !== undefined || poc?.sell_price !== undefined));
   const finalizeSettlement = async (order: any, creds: NonNullable<Awaited<ReturnType<typeof getDecryptedAccountToken>>>, isOAuth2: boolean, poc: any) => {
     const currentSpot = Number(poc.current_spot ?? poc.exit_tick ?? order.current_price ?? order.entry_price);
     const livePnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(order.stake) : 0)).toFixed(2));
@@ -1089,14 +1113,21 @@ async function monitorDerivOpenContract(
     }
   };
 
-  // Fast single-socket OAuth2 streaming settlement first (avoids minting many OTPs on short tick contracts)
+  // Fast single-socket streaming settlement first (uses the already-open buy socket if available)
   try {
     const initialOrder = await queryOne<any>(`SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1`, [orderId]);
     if (!initialOrder || initialOrder.status !== 'OPEN') return;
     const initialCreds = await getDecryptedAccountToken(connectedAccountId, userId);
     if (!initialCreds) return;
     const isOAuth2 = initialCreds.token.startsWith('ory_at_') || initialCreds.token.length > 40;
-    if (isOAuth2) {
+
+    if (inlineSettlementPromise) {
+      const streamedPoc = await inlineSettlementPromise.catch(() => null);
+      if (streamedPoc && isPocSettled(streamedPoc)) {
+        await finalizeSettlement(initialOrder, initialCreds, isOAuth2, streamedPoc);
+        return;
+      }
+    } else if (isOAuth2) {
       const otpResp = await derivRestRequest<any>(
         `/trading/v1/options/accounts/${initialCreds.account.deriv_login_id}/otp`,
         initialCreds.token,
@@ -1109,8 +1140,7 @@ async function monitorDerivOpenContract(
           otpUrl,
           derivContractId,
           (poc) => {
-            const settled = Boolean(poc.is_sold) || poc.status === 'won' || poc.status === 'lost' || poc.status === 'sold';
-            if (!settled && Date.now() - lastEmitAt >= 650) {
+            if (!isPocSettled(poc) && Date.now() - lastEmitAt >= 450) {
               lastEmitAt = Date.now();
               const spot = Number(poc.current_spot ?? poc.exit_tick ?? initialOrder.current_price ?? initialOrder.entry_price);
               const pnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(initialOrder.stake) : 0)).toFixed(2));
@@ -1119,16 +1149,9 @@ async function monitorDerivOpenContract(
           },
           20000
         );
-        if (streamedPoc) {
-          const settled =
-            Boolean(streamedPoc.is_sold) ||
-            streamedPoc.status === 'won' ||
-            streamedPoc.status === 'lost' ||
-            streamedPoc.status === 'sold';
-          if (settled) {
-            await finalizeSettlement(initialOrder, initialCreds, true, streamedPoc);
-            return;
-          }
+        if (streamedPoc && isPocSettled(streamedPoc)) {
+          await finalizeSettlement(initialOrder, initialCreds, true, streamedPoc);
+          return;
         }
       }
     }
@@ -1138,8 +1161,9 @@ async function monitorDerivOpenContract(
 
   const maxAttempts = 120;
   let consecutiveFailures = 0;
+  let sentSellExpired = false;
   for (let attempt = 0; attempt < maxAttempts; attempt++) {
-    await new Promise((r) => setTimeout(r, attempt === 0 ? 900 : 1300));
+    await new Promise((r) => setTimeout(r, attempt === 0 ? 450 : attempt < 5 ? 700 : 1200));
     try {
       const order = await queryOne<any>(
         `SELECT ${ORDER_SELECT_COLS} FROM virtual_orders WHERE id = $1`,
@@ -1151,24 +1175,24 @@ async function monitorDerivOpenContract(
       if (!creds) return;
 
       const isOAuth2 = creds.token.startsWith('ory_at_') || creds.token.length > 40;
-      const pocResp = isOAuth2
-        ? await (async () => {
-            const otpResp = await derivRestRequest<any>(
-              `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
-              creds.token,
-              { method: 'POST' }
-            );
-            const otpUrl = extractDerivOtpWsUrl(otpResp);
-            if (!otpUrl) return null;
-            return OtpDerivClient.requestOnOtpUrl(otpUrl, {
-              proposal_open_contract: 1,
-              contract_id: Number(derivContractId),
-            });
-          })()
-        : await derivWs.requestWithToken(creds.token, {
-            proposal_open_contract: 1,
-            contract_id: Number(derivContractId),
-          });
+      const sendCredsRequest = async (payload: Record<string, unknown>) => {
+        if (!isOAuth2) {
+          return derivWs.requestWithToken(creds.token, payload);
+        }
+        const otpResp = await derivRestRequest<any>(
+          `/trading/v1/options/accounts/${creds.account.deriv_login_id}/otp`,
+          creds.token,
+          { method: 'POST' }
+        );
+        const otpUrl = extractDerivOtpWsUrl(otpResp);
+        if (!otpUrl) return null;
+        return OtpDerivClient.requestOnOtpUrl(otpUrl, payload);
+      };
+
+      const pocResp = await sendCredsRequest({
+        proposal_open_contract: 1,
+        contract_id: Number(derivContractId),
+      });
 
       const poc = pocResp?.proposal_open_contract;
       if (!poc) continue;
@@ -1176,9 +1200,13 @@ async function monitorDerivOpenContract(
 
       const currentSpot = Number(poc.current_spot ?? poc.exit_tick ?? order.current_price ?? order.entry_price);
       const livePnl = Number((poc.profit ?? (poc.bid_price !== undefined ? Number(poc.bid_price) - Number(order.stake) : 0)).toFixed(2));
-      const settled = Boolean(poc.is_sold) || poc.status === 'won' || poc.status === 'lost' || poc.status === 'sold';
+      const settled = isPocSettled(poc);
 
       if (!settled) {
+        if (Boolean(poc.is_expired) && !sentSellExpired) {
+          sentSellExpired = true;
+          await sendCredsRequest({ sell_expired: 1 }).catch(() => {});
+        }
         await execute('UPDATE virtual_orders SET current_price = $1, pnl = $2 WHERE id = $3', [
           currentSpot,
           livePnl,
@@ -1196,7 +1224,7 @@ async function monitorDerivOpenContract(
       return;
     } catch {
       consecutiveFailures += 1;
-      if (consecutiveFailures >= 8) {
+      if (consecutiveFailures >= 12) {
         return;
       }
     }
@@ -1463,34 +1491,31 @@ function computeCalibratedMockWinProbability(
   isAnalyserSynced: boolean
 ): number {
   const ct = String(contractType || '').toUpperCase();
-  const safeCfg = Math.min(96, Math.max(5, Number.isFinite(configuredWinPct) ? configuredWinPct : 65));
-  // Bias around 50%: e.g. 76% setting -> +0.26 gentle tilt; never breaks high-payout contract math
+  const safeCfg = Math.min(96, Math.max(5, Number.isFinite(configuredWinPct) ? configuredWinPct : 72));
   const bias = (safeCfg - 50) / 100;
-  const analyserBoost = isAnalyserSynced ? 0.04 : 0;
+  const analyserBoost = isAnalyserSynced ? 0.05 : 0;
 
   if (ct === 'DIGITMATCH') {
-    // 9.09x payout (~10% fair probability): allow ~11%–24% win chance so losses occur naturally and streaks feel authentic
-    return Math.min(0.24, Math.max(0.09, 0.11 + Math.max(0, bias) * 0.35 + analyserBoost));
+    return Math.min(0.28, Math.max(0.11, 0.13 + Math.max(0, bias) * 0.40 + analyserBoost));
   }
   if (ct === 'DIGITDIFF') {
-    // 1.11x payout (~90% fair probability): keep genuine occasional digit match losses (~12–18% loss rate)
-    return Math.min(0.89, Math.max(0.74, 0.84 + bias * 0.14 + analyserBoost * 0.4));
+    return Math.min(0.92, Math.max(0.78, 0.86 + Math.max(0, bias) * 0.14 + analyserBoost * 0.4));
   }
   if (ct === 'DIGITOVER') {
     const cleanB = Math.min(8, Math.max(0, Number.isFinite(barrier) ? barrier : 2));
     const fairOdds = (9 - cleanB) / 10;
-    return Math.min(0.78, Math.max(0.12, fairOdds + bias * 0.22 + analyserBoost));
+    return Math.min(0.82, Math.max(0.20, fairOdds + Math.max(0, bias) * 0.42 + analyserBoost));
   }
   if (ct === 'DIGITUNDER') {
     const cleanB = Math.min(9, Math.max(1, Number.isFinite(barrier) ? barrier : 7));
     const fairOdds = cleanB / 10;
-    return Math.min(0.78, Math.max(0.12, fairOdds + bias * 0.22 + analyserBoost));
+    return Math.min(0.82, Math.max(0.20, fairOdds + Math.max(0, bias) * 0.42 + analyserBoost));
   }
   if (ct === 'ONETOUCH') {
-    return Math.min(0.58, Math.max(0.25, 0.42 + bias * 0.25 + analyserBoost));
+    return Math.min(0.66, Math.max(0.32, 0.48 + Math.max(0, bias) * 0.35 + analyserBoost));
   }
-  // CALL, PUT, DIGITEVEN, DIGITODD (~50% fair): calibrated around ~52%–65% so natural random losses & Martingale recovery happen
-  return Math.min(0.66, Math.max(0.36, 0.50 + bias * 0.42 + analyserBoost));
+  // CALL, PUT, DIGITEVEN, DIGITODD (~1.95x): calibrated for reliable positive expectancy when bot/analyser-synced
+  return Math.min(0.78, Math.max(0.45, 0.54 + Math.max(0, bias) * 0.65 + analyserBoost));
 }
 
 export async function settleVirtualDigitalOrder(orderId: number): Promise<any> {
@@ -1862,6 +1887,7 @@ const mtmClosingLocks = new Set<number>();
 const lastOrderEmitAt = new Map<number, number>();
 const lastMtmPersistAt = new Map<number, number>();
 const openMtmOrdersCache = new Map<number, any>();
+const pendingVirtualDigitalSettles = new Map<number, number>();
 let openMtmHydrated = false;
 let openMtmLastSyncAt = 0;
 let openMtmHydratePromise: Promise<void> | null = null;
@@ -2067,9 +2093,24 @@ async function evaluateMtmOrder(order: any, quotePrice: number): Promise<void> {
 }
 
 export function startMtmPositionMonitor(): void {
-  // Initial one-time hydration after startup
-  setTimeout(() => {
-    ensureOpenMtmCacheHydrated(true).catch(() => {});
+  // Initial one-time hydration after startup + recover any orphaned virtual digital orders
+  setTimeout(async () => {
+    await ensureOpenMtmCacheHydrated(true).catch(() => {});
+    try {
+      const staleVirtual = await query<{ id: number }>(
+        `SELECT id FROM virtual_orders
+         WHERE status = 'OPEN'
+           AND execution_mode = 'virtual'
+           AND contract_type NOT IN ('MULTUP','MULTDOWN','BUY','SELL','ACCU')
+           AND opened_at < NOW() - INTERVAL '8 seconds'
+         LIMIT 25`
+      );
+      for (const row of staleVirtual) {
+        settleVirtualDigitalOrder(Number(row.id)).catch(() => {});
+      }
+    } catch {
+      // ignore while DB is waking up
+    }
   }, 3000);
 
   derivWs.onTick((tick) => {
@@ -2082,11 +2123,18 @@ export function startMtmPositionMonitor(): void {
     }
   });
 
-  // Periodic sweep guarantees MTM + SL/TP checks stay alive with zero DB queries when no orders are open
+  // Periodic sweep guarantees MTM + SL/TP checks stay alive and rescues overdue virtual digital orders with zero idle DB queries
   setInterval(async () => {
     if (mtmSweepBusy) return;
     mtmSweepBusy = true;
     try {
+      const now = Date.now();
+      for (const [oid, deadlineMs] of pendingVirtualDigitalSettles.entries()) {
+        if (now >= deadlineMs) {
+          pendingVirtualDigitalSettles.delete(oid);
+          settleVirtualDigitalOrder(oid).catch(() => {});
+        }
+      }
       await ensureOpenMtmCacheHydrated(false);
       if (openMtmOrdersCache.size === 0) return;
       for (const order of openMtmOrdersCache.values()) {

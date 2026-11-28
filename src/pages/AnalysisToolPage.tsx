@@ -25,6 +25,7 @@ import {
   Plus,
   Clock,
   ShieldCheck,
+  Shuffle,
 } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 import {
@@ -161,7 +162,7 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
   const [executingTrade, setExecutingTrade] = useState<boolean>(false);
 
   const scanTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const autoScannedRef = useRef<boolean>(false);
+  const lastAutoKeyRef = useRef<string>('');
 
   const activeInst = instruments.find((i) => i.symbol === selectedSymbol) || instruments[0];
   const decimals =
@@ -435,12 +436,13 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
     [selectedSymbol, quantumStake, analysisMode, autoBroadcast, broadcastSignalToDbot, showToast]
   );
 
-  // Trigger an initial background scan once prices arrive if user has no active prediction
+  // Trigger an automatic scan on mount and whenever the selected instrument or analysisMode changes
   useEffect(() => {
-    if (autoScannedRef.current || prices.length < 15) return;
-    autoScannedRef.current = true;
+    const key = `${selectedSymbol}:${analysisMode}`;
+    if (lastAutoKeyRef.current === key || prices.length < 5) return;
+    lastAutoKeyRef.current = key;
     executeQuantumScan(selectedDigit, true);
-  }, [prices.length, selectedDigit, executeQuantumScan]);
+  }, [selectedSymbol, analysisMode, prices.length, selectedDigit, executeQuantumScan]);
 
   useEffect(() => {
     return () => {
@@ -451,6 +453,13 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
   const handleDigitSelect = (digit: number) => {
     setSelectedDigit(digit);
     executeQuantumScan(digit, true);
+  };
+
+  const handleRandomDigitScan = () => {
+    const others = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9].filter((d) => d !== selectedDigit);
+    const randomDigit = others[Math.floor(Math.random() * others.length)];
+    setSelectedDigit(randomDigit);
+    executeQuantumScan(randomDigit, false);
   };
 
   const handleScanNextDigit = () => {
@@ -583,14 +592,24 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
   const displayedContract = displayedPred
     ? displayedPred.contract_type === 'DIGITDIFF'
       ? `DIFFERS ${displayedPred.barrier}`
-      : displayedPred.contract_type === 'DIGITOVER'
-        ? `OVER ${displayedPred.barrier}`
-        : displayedPred.contract_type === 'DIGITUNDER'
-          ? `UNDER ${displayedPred.barrier}`
-          : displayedPred.contract_type
+      : displayedPred.contract_type === 'DIGITMATCH'
+        ? `MATCHES ${displayedPred.barrier}`
+        : displayedPred.contract_type === 'DIGITOVER'
+          ? `OVER ${displayedPred.barrier}`
+          : displayedPred.contract_type === 'DIGITUNDER'
+            ? `UNDER ${displayedPred.barrier}`
+            : displayedPred.contract_type === 'DIGITEVEN'
+              ? 'EVEN'
+              : displayedPred.contract_type === 'DIGITODD'
+                ? 'ODD'
+                : displayedPred.contract_type === 'CALL'
+                  ? 'RISE'
+                  : displayedPred.contract_type === 'PUT'
+                    ? 'FALL'
+                    : displayedPred.contract_type
     : liveAnalytics.trend === 'Downtrend'
-      ? 'PUT'
-      : 'CALL';
+      ? 'FALL'
+      : 'RISE';
   const confidenceLabel =
     Number(displayedPct) >= 85 ? 'High Confidence' : Number(displayedPct) >= 65 ? 'Moderate Confidence' : 'Balanced Signal';
 
@@ -881,9 +900,20 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
                 {/* CARD 1: Select Digit to Analyse */}
                 <section className="lg:col-span-5 rounded-2xl bg-[#0B111E]/95 border border-[#1B2438] p-4 sm:p-5 flex flex-col justify-between gap-4 shadow-xl">
                   <div>
-                    <div className="inline-block">
-                      <h2 className="text-[15px] font-semibold text-white">Select Digit to Analyse</h2>
-                      <div className="h-[2.5px] w-16 bg-[#FF243B] rounded-full mt-1.5" />
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="inline-block">
+                        <h2 className="text-[15px] font-semibold text-white">Select Digit to Analyse</h2>
+                        <div className="h-[2.5px] w-16 bg-[#FF243B] rounded-full mt-1.5" />
+                      </div>
+                      <button
+                        type="button"
+                        disabled={isScanning}
+                        onClick={handleRandomDigitScan}
+                        className="px-2.5 py-1 rounded-lg bg-[#121A2D] hover:bg-[#19243D] border border-[#24304B] text-[11px] font-semibold text-slate-200 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-60"
+                      >
+                        <Shuffle className="w-3 h-3 text-[#FF4D64]" />
+                        <span>Random</span>
+                      </button>
                     </div>
 
                     <div className="grid grid-cols-5 gap-2.5 mt-4">
@@ -1042,7 +1072,9 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
                       <Check className="w-6 h-6" strokeWidth={3} />
                     </span>
                     <div>
-                      <p className="text-xs sm:text-sm font-medium text-emerald-100">Analysis Result</p>
+                      <p className="text-xs sm:text-sm font-medium text-emerald-100">
+                        Analysis Result · {activeInst?.display_name || selectedSymbol}
+                      </p>
                       <p className="font-display text-3xl sm:text-[42px] font-bold leading-none text-white mt-1 font-mono-num">
                         {displayedPct}%
                       </p>
@@ -1054,7 +1086,7 @@ export const AnalysisToolPage: React.FC<{ standalone?: boolean }> = ({ standalon
                   <div className="flex flex-col sm:items-end gap-2">
                     <div className="flex items-center gap-2.5">
                       <span className="text-[#22C55E] text-2xl leading-none" aria-hidden="true">
-                        {displayedContract.includes('PUT') ? '▼' : '▲'}
+                        {['FALL', 'PUT', 'UNDER', 'ODD'].some((k) => displayedContract.includes(k)) ? '▼' : '▲'}
                       </span>
                       <span className="font-display text-2xl sm:text-[32px] font-bold tracking-tight text-[#22C55E]">
                         {displayedContract}

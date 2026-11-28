@@ -257,6 +257,17 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
       return Number(s[s.length - 1] || 0);
     });
     const total = Math.max(1, digits.length);
+    const digitCounts = Array(10).fill(0);
+    for (const d of digits) digitCounts[d]++;
+    let minDigit = 0;
+    let minCount = Number.POSITIVE_INFINITY;
+    for (let d = 0; d <= 9; d++) {
+      if (digitCounts[d] < minCount) {
+        minCount = digitCounts[d];
+        minDigit = d;
+      }
+    }
+
     const evenCount = digits.filter((d) => d % 2 === 0).length;
     const over2Count = digits.filter((d) => d > 2).length;
     const under7Count = digits.filter((d) => d < 7).length;
@@ -278,46 +289,75 @@ export async function computeLiveAnalyserSignal(preferredSymbol?: string): Promi
         else losses += Math.abs(diff);
       }
     }
-    const risePct = Number(((rises / Math.max(1, rises + falls)) * 100).toFixed(1));
+    const ema5Slice = buf.slice(-5);
+    const ema15Slice = buf.slice(-15);
+    const ema5 = ema5Slice.reduce((a, b) => a + b, 0) / Math.max(1, ema5Slice.length);
+    const ema15 = ema15Slice.reduce((a, b) => a + b, 0) / Math.max(1, ema15Slice.length);
+    const rawRisePct = (rises / Math.max(1, rises + falls)) * 100;
+    const emaBoost = ema5 > ema15 ? 4 : ema5 < ema15 ? -4 : 0;
+    const risePct = Number(Math.min(95, Math.max(5, rawRisePct + emaBoost)).toFixed(1));
     const fallPct = Number((100 - risePct).toFixed(1));
     const rs = losses === 0 ? 75 : gains / losses;
     const rsi14 = Number((100 - 100 / (1 + rs)).toFixed(1));
     const lastDigit = digits[digits.length - 1] ?? 0;
 
+    const isBullishMomentum = ema5 >= ema15 && risePct >= fallPct;
+    const directionalBias: 'BULLISH' | 'BEARISH' = isBullishMomentum || risePct >= 52 ? 'BULLISH' : 'BEARISH';
+
     // Pick highest statistical confluence edge
     let contractType = 'DIGITOVER';
     let side = 'OVER';
     let barrier = '2';
-    let direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE' = 'DIGIT_EDGE';
+    let direction: 'BULLISH' | 'BEARISH' | 'DIGIT_EDGE' = directionalBias;
     let confidence = 78;
     let reason = `Over 2 probability ${over2Pct}% across last ${total} ticks`;
 
-    if (under7Pct >= over2Pct && under7Pct >= 66) {
+    const coldDiffPct = Number((((total - minCount) / total) * 100).toFixed(1));
+
+    if (Math.abs(risePct - fallPct) >= 14 && (rsi14 >= 58 || rsi14 <= 42)) {
+      const bullish = risePct >= fallPct;
+      contractType = bullish ? 'CALL' : 'PUT';
+      side = bullish ? 'CALL' : 'PUT';
+      barrier = '';
+      direction = bullish ? 'BULLISH' : 'BEARISH';
+      confidence = Math.min(92, Math.round(68 + Math.abs(risePct - fallPct) * 0.65));
+      reason = `${bullish ? 'Bullish' : 'Bearish'} EMA momentum (${Math.max(risePct, fallPct)}% · RSI ${rsi14})`;
+    } else if (under7Pct >= over2Pct && under7Pct >= 66) {
       contractType = 'DIGITUNDER';
       side = 'UNDER';
       barrier = '7';
-      confidence = Math.min(93, Math.round(62 + (under7Pct - 55) * 0.9));
+      direction = directionalBias;
+      confidence = Math.min(93, Math.round(64 + (under7Pct - 55) * 0.9));
       reason = `Under 7 bias at ${under7Pct}% with RSI(14) ${rsi14}`;
     } else if (over2Pct >= 66) {
       contractType = 'DIGITOVER';
       side = 'OVER';
       barrier = '2';
-      confidence = Math.min(93, Math.round(62 + (over2Pct - 55) * 0.9));
+      direction = directionalBias;
+      confidence = Math.min(93, Math.round(64 + (over2Pct - 55) * 0.9));
       reason = `Over 2 strength at ${over2Pct}% (last digit ${lastDigit})`;
     } else if (Math.abs(evenPct - oddPct) >= 12) {
       const pickEven = evenPct >= oddPct;
       contractType = pickEven ? 'DIGITEVEN' : 'DIGITODD';
       side = pickEven ? 'EVEN' : 'ODD';
       barrier = '';
-      confidence = Math.min(90, Math.round(68 + Math.abs(evenPct - oddPct) * 0.6));
+      direction = directionalBias;
+      confidence = Math.min(90, Math.round(68 + Math.abs(evenPct - oddPct) * 0.65));
       reason = `${pickEven ? 'Even' : 'Odd'} parity cluster (${Math.max(evenPct, oddPct)}%)`;
+    } else if (coldDiffPct >= 92) {
+      contractType = 'DIGITDIFF';
+      side = 'DIFF';
+      barrier = String(minDigit);
+      direction = 'DIGIT_EDGE';
+      confidence = Math.min(94, Math.round(coldDiffPct));
+      reason = `Digit ${minDigit} cold (${minCount}/${total} ticks · ${coldDiffPct}% non-match)`;
     } else {
       const bullish = risePct >= fallPct;
       contractType = bullish ? 'CALL' : 'PUT';
       side = bullish ? 'CALL' : 'PUT';
       barrier = '';
       direction = bullish ? 'BULLISH' : 'BEARISH';
-      confidence = Math.min(89, Math.round(66 + Math.abs(risePct - fallPct) * 0.5));
+      confidence = Math.min(89, Math.round(66 + Math.abs(risePct - fallPct) * 0.55));
       reason = `${bullish ? 'Bullish' : 'Bearish'} tick momentum (${Math.max(risePct, fallPct)}% directional)`;
     }
 

@@ -591,52 +591,84 @@ function selectMinimalLossSetup(
 
   let minDigit = 0;
   let minFreq = Number.POSITIVE_INFINITY;
+  let hotDigit = 0;
+  let maxFreq = -1;
   for (let d = 0; d <= 9; d++) {
     if (counts[d] < minFreq) {
       minFreq = counts[d];
       minDigit = d;
     }
+    if (counts[d] > maxFreq) {
+      maxFreq = counts[d];
+      hotDigit = d;
+    }
   }
   const n = Math.max(1, digits.length);
-  const chosenDigit =
-    typeof targetDigit === 'number' && Number.isInteger(targetDigit) && targetDigit >= 0 && targetDigit <= 9
-      ? targetDigit
-      : minDigit;
+  const hasExplicitDigit =
+    typeof targetDigit === 'number' && Number.isInteger(targetDigit) && targetDigit >= 0 && targetDigit <= 9;
+  const chosenDigit = hasExplicitDigit ? targetDigit! : minDigit;
   const chosenFreq = counts[chosenDigit] || 0;
   const chosenDigitPct = Number(((chosenFreq / n) * 100).toFixed(1));
   const diffChosenWinPct = ((n - chosenFreq) / n) * 100;
   const diffObservedWinPct = ((n - minFreq) / n) * 100;
 
-  const overBarrier = Math.min(8, Math.max(1, chosenDigit <= 2 ? chosenDigit : 1));
+  const overBarrier = chosenDigit <= 4 ? chosenDigit : 2;
   const overPct = (digits.filter((d) => d > overBarrier).length / n) * 100;
-  const underBarrier = Math.max(1, Math.min(8, chosenDigit >= 7 ? chosenDigit : 8));
+  const underBarrier = chosenDigit >= 5 ? chosenDigit : 7;
   const underPct = (digits.filter((d) => d < underBarrier).length / n) * 100;
   const evenCount = digits.filter((d) => d % 2 === 0).length;
   const evenPct = (evenCount / n) * 100;
   const oddPct = 100 - evenPct;
 
-  // Market regime stats from real tick prices
+  // Market regime stats & directional EMA/RSI from live tick prices
   const last10 = recent.slice(-10);
   const prev10 = recent.slice(-20, -10);
   const avg10 = last10.reduce((a, b) => a + b, 0) / Math.max(1, last10.length);
   const avgPrev10 = prev10.length
     ? prev10.reduce((a, b) => a + b, 0) / prev10.length
     : avg10;
+  const ema5Slice = recent.slice(-5);
+  const ema15Slice = recent.slice(-15);
+  const ema5 = ema5Slice.reduce((a, b) => a + b, 0) / Math.max(1, ema5Slice.length);
+  const ema15 = ema15Slice.reduce((a, b) => a + b, 0) / Math.max(1, ema15Slice.length);
   const lastSpot = recent[recent.length - 1] || avg10;
   const firstSpot = recent[0] || lastSpot;
   const priceDiffs = recent.slice(1).map((v, i) => Math.abs(v - recent[i]));
   const avgStep = priceDiffs.reduce((a, b) => a + b, 0) / Math.max(1, priceDiffs.length);
   const volRatio = lastSpot > 0 ? (avgStep / lastSpot) * 10000 : 0;
 
-  const trend = avg10 > avgPrev10 * 1.0001 ? 'Uptrend' : avg10 < avgPrev10 * 0.9999 ? 'Downtrend' : 'Sideways';
+  let rises = 0;
+  let falls = 0;
+  let gains = 0;
+  let losses = 0;
+  for (let i = 1; i < recent.length; i++) {
+    const diff = recent[i] - recent[i - 1];
+    if (diff >= 0) rises++;
+    else falls++;
+    if (i >= recent.length - 14) {
+      if (diff > 0) gains += diff;
+      else losses += Math.abs(diff);
+    }
+  }
+  const risePct = (rises / Math.max(1, rises + falls)) * 100;
+  const fallPct = 100 - risePct;
+  const rs = losses === 0 ? 75 : gains / losses;
+  const rsi14 = 100 - 100 / (1 + rs);
+
+  const trend =
+    ema5 > ema15 * 1.00005 || avg10 > avgPrev10 * 1.0001
+      ? 'Uptrend'
+      : ema5 < ema15 * 0.99995 || avg10 < avgPrev10 * 0.9999
+        ? 'Downtrend'
+        : 'Sideways';
   const momentumDiff = Math.abs(lastSpot - avg10);
   const momentum =
     momentumDiff > avgStep * 1.6 ? 'Strong' : momentumDiff > avgStep * 0.7 ? 'Moderate' : 'Steady';
   const volatility = volRatio > 8 ? 'High' : volRatio > 2.5 ? 'Moderate' : 'Low';
   const pattern =
-    lastSpot >= firstSpot && evenPct >= 50
+    lastSpot >= firstSpot && (risePct >= 52 || evenPct >= 50)
       ? 'Bullish'
-      : lastSpot < firstSpot && oddPct > 50
+      : lastSpot < firstSpot && (fallPct >= 52 || oddPct > 50)
         ? 'Bearish'
         : avg10 >= avgPrev10
           ? 'Accumulation'
@@ -659,74 +691,143 @@ function selectMinimalLossSetup(
     pattern,
   };
 
-  const isSyntheticDigit = /^(1HZ|R_|JD|BOOM|CRASH|STPIDX|RDBULL|RDBEAR)/i.test(symbol);
+  // Continuous Volatility / Jump / Daily Reset indices support Deriv digit contracts; Boom/Crash/Step/Forex/Crypto/Commodities are directional
+  const supportsDigitContracts = /^(1HZ|R_|JD|RDBULL|RDBEAR)/i.test(symbol);
+  const isBull = ema5 > ema15 || (ema5 === ema15 && risePct >= fallPct);
+  const dirDominance = Math.max(risePct, fallPct);
+  const dirProb = Number(
+    Math.min(
+      93.4,
+      Math.max(
+        59.0,
+        dirDominance + (momentum === 'Strong' ? 12 : momentum === 'Moderate' ? 7 : 3) + (isBull ? rsi14 - 50 : 50 - rsi14) * 0.25
+      )
+    ).toFixed(2)
+  );
 
-  if (isSyntheticDigit && analysisMode !== 'directional') {
-    const hasExplicitDigit =
-      typeof targetDigit === 'number' && Number.isInteger(targetDigit) && targetDigit >= 0 && targetDigit <= 9;
+  if (supportsDigitContracts && analysisMode !== 'directional') {
+    const diffDigit = hasExplicitDigit ? chosenDigit : minDigit;
+    const diffPct = hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct;
+    const diffScore = Number(Math.min(95.2, Math.max(72.0, diffPct * 0.96)).toFixed(2));
 
-    const candidates = [
+    const matchDigit = hasExplicitDigit ? chosenDigit : hotDigit;
+    const matchFreq = counts[matchDigit] || 0;
+    const matchPct = (matchFreq / n) * 100;
+    const matchScore = Number(
+      Math.min(91.5, Math.max(42.0, matchPct >= 14 ? 54 + (matchPct - 10) * 3.0 : 42 + matchPct)).toFixed(2)
+    );
+
+    const overFair = (9 - overBarrier) * 10;
+    const overEdge = overPct - overFair;
+    const overScore = Number(Math.min(93.8, Math.max(55.0, overPct + Math.max(-4, overEdge * 0.85))).toFixed(2));
+
+    const underFair = underBarrier * 10;
+    const underEdge = underPct - underFair;
+    const underScore = Number(Math.min(93.8, Math.max(55.0, underPct + Math.max(-4, underEdge * 0.85))).toFixed(2));
+
+    const pickEven = evenPct >= oddPct;
+    const parityDominance = Math.max(evenPct, oddPct);
+    const parityScore = Number(
+      Math.min(90.8, Math.max(52.0, parityDominance >= 54 ? 62 + (parityDominance - 50) * 1.4 : parityDominance)).toFixed(2)
+    );
+
+    const candidates: Array<{
+      contractType: string;
+      predictedCondition: string;
+      barrier: string;
+      duration: number;
+      durationUnit: string;
+      probability: number;
+      lossRiskScore: number;
+      rationale: string;
+    }> = [
       {
         contractType: 'DIGITDIFF',
-        predictedCondition: `Exit last digit DIFFERS from ${hasExplicitDigit ? chosenDigit : minDigit}`,
-        barrier: String(hasExplicitDigit ? chosenDigit : minDigit),
-        probability: Number(
-          Math.min(
-            94.8,
-            Math.max(85.2, (hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct) * 0.45 + 49)
-          ).toFixed(2)
-        ),
-        lossRiskScore: Number(
-          (
-            100 -
-            Math.min(
-              94.8,
-              Math.max(85.2, (hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct) * 0.45 + 49)
-            )
-          ).toFixed(2)
-        ),
-        rationale: `Minimal-loss profile: digit ${hasExplicitDigit ? chosenDigit : minDigit} appeared ${hasExplicitDigit ? chosenFreq : minFreq}/${n} recent ticks on ${symbol}. Observed non-match rate ${(hasExplicitDigit ? diffChosenWinPct : diffObservedWinPct).toFixed(1)}%.`,
+        predictedCondition: `Exit last digit DIFFERS from ${diffDigit}`,
+        barrier: String(diffDigit),
+        duration: 1,
+        durationUnit: 't',
+        probability: diffScore,
+        lossRiskScore: Number((100 - diffScore).toFixed(2)),
+        rationale: `Digit ${diffDigit} appeared ${counts[diffDigit] || 0}/${n} recent ticks on ${symbol}. Observed non-match rate ${diffPct.toFixed(1)}%.`,
       },
       {
         contractType: 'DIGITOVER',
         predictedCondition: `Exit last digit OVER ${overBarrier}`,
         barrier: String(overBarrier),
-        probability: Number(Math.min(86.5, Math.max(74.0, overPct * 0.5 + 40)).toFixed(2)),
-        lossRiskScore: Number((100 - Math.min(86.5, Math.max(74.0, overPct * 0.5 + 40))).toFixed(2)),
-        rationale: `Minimal-loss profile: digits over ${overBarrier} occurred ${overPct.toFixed(1)}% over ${n} ticks on ${symbol}. Designed for conservative small-gain consistency.`,
+        duration: 1,
+        durationUnit: 't',
+        probability: overScore,
+        lossRiskScore: Number((100 - overScore).toFixed(2)),
+        rationale: `Digits OVER ${overBarrier} hit ${overPct.toFixed(1)}% vs ${overFair.toFixed(0)}% baseline over ${n} ticks on ${symbol}.`,
       },
       {
         contractType: 'DIGITUNDER',
         predictedCondition: `Exit last digit UNDER ${underBarrier}`,
         barrier: String(underBarrier),
-        probability: Number(Math.min(86.5, Math.max(74.0, underPct * 0.5 + 40)).toFixed(2)),
-        lossRiskScore: Number((100 - Math.min(86.5, Math.max(74.0, underPct * 0.5 + 40))).toFixed(2)),
-        rationale: `Minimal-loss profile: digits under ${underBarrier} occurred ${underPct.toFixed(1)}% over ${n} ticks on ${symbol}. Lower loss variance compared to directional guesses.`,
+        duration: 1,
+        durationUnit: 't',
+        probability: underScore,
+        lossRiskScore: Number((100 - underScore).toFixed(2)),
+        rationale: `Digits UNDER ${underBarrier} hit ${underPct.toFixed(1)}% vs ${underFair.toFixed(0)}% baseline over ${n} ticks on ${symbol}.`,
+      },
+      {
+        contractType: pickEven ? 'DIGITEVEN' : 'DIGITODD',
+        predictedCondition: `Exit last digit is ${pickEven ? 'EVEN' : 'ODD'}`,
+        barrier: '',
+        duration: 1,
+        durationUnit: 't',
+        probability: parityScore,
+        lossRiskScore: Number((100 - parityScore).toFixed(2)),
+        rationale: `${pickEven ? 'Even' : 'Odd'} parity skew at ${parityDominance.toFixed(1)}% over ${n} ticks on ${symbol}.`,
       },
     ];
 
-    candidates.sort((a, b) => a.lossRiskScore - b.lossRiskScore);
+    if (matchPct >= 14) {
+      candidates.push({
+        contractType: 'DIGITMATCH',
+        predictedCondition: `Exit last digit MATCHES ${matchDigit}`,
+        barrier: String(matchDigit),
+        duration: 1,
+        durationUnit: 't',
+        probability: matchScore,
+        lossRiskScore: Number((100 - matchScore).toFixed(2)),
+        rationale: `Observed digit ${matchDigit} spike ${matchPct.toFixed(1)}% vs 10% baseline across ${n} ticks on ${symbol}.`,
+      });
+    }
+
+    if (analysisMode === 'auto' && dirDominance >= 58) {
+      candidates.push({
+        contractType: isBull ? 'CALL' : 'PUT',
+        predictedCondition: isBull ? 'Spot closes HIGHER than entry (Rise)' : 'Spot closes LOWER than entry (Fall)',
+        barrier: '',
+        duration: 1,
+        durationUnit: 't',
+        probability: dirProb,
+        lossRiskScore: Number((100 - dirProb).toFixed(2)),
+        rationale: `${isBull ? 'Bullish' : 'Bearish'} EMA5/EMA15 + RSI(${rsi14.toFixed(0)}) confluence on ${symbol} (${dirDominance.toFixed(1)}% directional ticks).`,
+      });
+    }
+
+    candidates.sort((a, b) => b.probability - a.probability);
     const best = candidates[0];
     return {
       ...best,
-      duration: 1,
-      durationUnit: 't',
       telemetry,
     };
   }
 
-  // Forex / Commodities / Crypto or directional mode -> directional Rise/Fall
-  const isBull = lastSpot >= avg10;
-  const dirProb = Number(Math.min(93.4, Math.max(58.0, Math.max(evenPct, oddPct, 62) + (momentum === 'Strong' ? 14 : 6))).toFixed(2));
+  // Forex / Commodities / Crypto / Boom & Crash / Step / Directional mode -> Rise/Fall prediction
+  const isSynthetic = /^(1HZ|R_|JD|BOOM|CRASH|STPIDX|RDBULL|RDBEAR)/i.test(symbol);
   return {
     contractType: isBull ? 'CALL' : 'PUT',
     predictedCondition: isBull ? 'Spot closes HIGHER than entry (Rise)' : 'Spot closes LOWER than entry (Fall)',
-    barrier: String(chosenDigit),
-    duration: isSyntheticDigit ? 5 : 15,
-    durationUnit: isSyntheticDigit ? 't' : 'm',
+    barrier: '',
+    duration: isSynthetic ? 5 : 15,
+    durationUnit: isSynthetic ? 't' : 'm',
     probability: dirProb,
     lossRiskScore: Number((100 - dirProb).toFixed(2)),
-    rationale: `Directional momentum scan on ${symbol}: spot ${lastSpot.toFixed(decimals)} vs 10-tick mean ${avg10.toFixed(decimals)} (${isBull ? 'bullish' : 'bearish'} tilt, digit ${chosenDigit} inspected). Stake $${stake.toFixed(2)}.`,
+    rationale: `Directional momentum scan on ${symbol}: spot ${lastSpot.toFixed(decimals)} vs EMA5 ${ema5.toFixed(decimals)} / EMA15 ${ema15.toFixed(decimals)} (${isBull ? 'Rise' : 'Fall'} · RSI ${rsi14.toFixed(1)}). Stake $${stake.toFixed(2)}.`,
     telemetry,
   };
 }
@@ -752,7 +853,14 @@ router.post('/quantum/scan', requireDb, requireAuth, async (req: AuthRequest, re
   await expireStaleQuantumPredictions(userId);
 
   await derivWs.ensureSymbolSubscribed(validInstrument).catch(() => {});
-  const prices = await derivWs.fetchTickHistory(validInstrument, 100);
+  const buffered = derivWs.getSparkline(validInstrument, 100);
+  const prices =
+    buffered.length >= 40
+      ? buffered
+      : await Promise.race([
+          derivWs.fetchTickHistory(validInstrument, 100).catch(() => buffered),
+          new Promise<number[]>((resolve) => setTimeout(() => resolve(buffered), 1400)),
+        ]);
   const latest = derivWs.getLatestTick(validInstrument);
   const spotPrice = latest?.quote ?? prices[prices.length - 1] ?? 1000;
   const pipSize = latest?.pipSize ?? 0.01;

@@ -392,8 +392,45 @@ export class DerivWebSocketClient {
     await this.ensureSymbolSubscribed(symbol);
     const existing = this.latestTicks.get(symbol);
     const nowEpoch = Math.floor(Date.now() / 1000);
-    if (existing && (existing.source === 'deriv_ws' || existing.source === 'live_pulse') && nowEpoch - existing.epoch <= 4) {
-      if (existing.source === 'deriv_ws' || !this.isConnected) {
+    if (existing && (existing.source === 'deriv_ws' || existing.source === 'live_pulse')) {
+      const ageSec = nowEpoch - existing.epoch;
+      if (ageSec <= 12) {
+        if (ageSec > 4 && this.isConnected) {
+          // Refresh asynchronously without blocking fast virtual/bot execution
+          this.request<{ history?: { prices?: Array<string | number>; times?: Array<number> } }>(
+            {
+              ticks_history: symbol,
+              adjust_start_time: 1,
+              count: 1,
+              end: 'latest',
+              style: 'ticks',
+            },
+            1500
+          )
+            .then((resp) => {
+              const prices = resp?.history?.prices;
+              const times = resp?.history?.times;
+              if (prices && prices.length > 0) {
+                const quote = Number(prices[prices.length - 1]);
+                const epoch = Number(times?.[times.length - 1] || Math.floor(Date.now() / 1000));
+                const instMeta = CURATED_DERIV_INSTRUMENTS.find((i) => i.symbol === symbol);
+                const pip = instMeta?.pip_size ?? existing?.pipSize ?? 0.01;
+                const spread = instMeta?.spread ?? 0.2;
+                const dec = pip < 0.0001 ? 5 : pip < 0.001 ? 4 : 2;
+                this.marketClosedSymbols.delete(symbol);
+                this.broadcastTick({
+                  symbol,
+                  quote,
+                  bid: Number((quote - spread / 2).toFixed(dec)),
+                  ask: Number((quote + spread / 2).toFixed(dec)),
+                  epoch,
+                  pipSize: pip,
+                  source: 'deriv_ws',
+                });
+              }
+            })
+            .catch(() => {});
+        }
         return existing;
       }
     }
@@ -408,7 +445,7 @@ export class DerivWebSocketClient {
           end: 'latest',
           style: 'ticks',
         },
-        existing ? 1800 : 4000
+        existing ? 1200 : 3000
       );
       const prices = resp?.history?.prices;
       const times = resp?.history?.times;
@@ -779,8 +816,13 @@ export class DerivWebSocketClient {
     token: string,
     proposalPayload: Record<string, unknown>,
     stake: number,
-    timeoutMs = 10000
-  ): Promise<{ proposal: any; buy: any }> {
+    timeoutMs = 10000,
+    options?: {
+      keepAliveForSettlement?: boolean;
+      settlementTimeoutMs?: number;
+      onPocUpdate?: (poc: any) => void;
+    }
+  ): Promise<{ proposal: any; buy: any; settlementPromise?: Promise<any | null> }> {
     const appId = getWsFeedAppId();
     const base = this.lastWorkingEndpoint || config.derivWsUrl;
     const url = `${base}?app_id=${encodeURIComponent(appId)}&l=EN&brand=deriv`;
@@ -790,9 +832,12 @@ export class DerivWebSocketClient {
       let settled = false;
       let authorized = false;
       let proposalData: any = null;
+      let watchingSettlement = false;
+      let latestPoc: any = null;
+      let settleTimer: ReturnType<typeof setTimeout> | null = null;
+      let resolveSettlement: ((poc: any | null) => void) | null = null;
 
-      const cleanup = () => {
-        clearTimeout(timer);
+      const closeSocket = () => {
         try {
           if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
             socket.close();
@@ -801,16 +846,41 @@ export class DerivWebSocketClient {
           // ignore
         }
       };
+
+      const finishSettlement = (poc: any | null) => {
+        if (!watchingSettlement) return;
+        watchingSettlement = false;
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+          settleTimer = null;
+        }
+        closeSocket();
+        if (resolveSettlement) {
+          const fn = resolveSettlement;
+          resolveSettlement = null;
+          fn(poc);
+        }
+      };
+
       const fail = (err: Error) => {
+        if (watchingSettlement) {
+          finishSettlement(latestPoc);
+          return;
+        }
         if (settled) return;
         settled = true;
-        cleanup();
+        clearTimeout(timer);
+        closeSocket();
         reject(err);
       };
-      const succeed = (val: { proposal: any; buy: any }) => {
+
+      const succeed = (val: { proposal: any; buy: any; settlementPromise?: Promise<any | null> }) => {
         if (settled) return;
         settled = true;
-        cleanup();
+        clearTimeout(timer);
+        if (!watchingSettlement) {
+          closeSocket();
+        }
         resolve(val);
       };
 
@@ -860,19 +930,67 @@ export class DerivWebSocketClient {
               fail(new Error(data.error.message || 'Deriv contract purchase rejected'));
               return;
             }
-            succeed({ proposal: proposalData, buy: data.buy });
+            const contractId = data?.buy?.contract_id;
+            if (options?.keepAliveForSettlement && contractId) {
+              watchingSettlement = true;
+              const settlementPromise = new Promise<any | null>((resSettle) => {
+                resolveSettlement = resSettle;
+              });
+              settleTimer = setTimeout(
+                () => finishSettlement(latestPoc),
+                options.settlementTimeoutMs ?? 25000
+              );
+              socket.send(
+                JSON.stringify({
+                  proposal_open_contract: 1,
+                  contract_id: Number(contractId),
+                  subscribe: 1,
+                  req_id: 4,
+                })
+              );
+              succeed({ proposal: proposalData, buy: data.buy, settlementPromise });
+            } else {
+              succeed({ proposal: proposalData, buy: data.buy });
+            }
+            return;
+          }
+          if (watchingSettlement && data?.proposal_open_contract) {
+            const poc = data.proposal_open_contract;
+            latestPoc = poc;
+            if (options?.onPocUpdate) options.onPocUpdate(poc);
+            const isClosed =
+              Boolean(poc.is_sold) ||
+              poc.status === 'won' ||
+              poc.status === 'lost' ||
+              poc.status === 'sold' ||
+              (Boolean(poc.is_expired) && (poc.profit !== undefined || poc.sell_price !== undefined));
+            if (isClosed) {
+              finishSettlement(poc);
+            }
           }
         } catch (err) {
-          fail(err instanceof Error ? err : new Error('Failed to parse Deriv trade response'));
+          if (watchingSettlement) {
+            finishSettlement(latestPoc);
+          } else {
+            fail(err instanceof Error ? err : new Error('Failed to parse Deriv trade response'));
+          }
         }
       });
 
       socket.on('close', (code) => {
-        fail(new Error(`Deriv trading socket closed (${code})`));
+        if (watchingSettlement) {
+          finishSettlement(latestPoc);
+        } else {
+          fail(new Error(`Deriv trading socket closed (${code})`));
+        }
       });
 
       socket.on('error', (err) => {
-        fail(err instanceof Error ? err : new Error('Deriv socket error'));
+        if (watchingSettlement) {
+          finishSettlement(latestPoc);
+        } else {
+          fail(err instanceof Error ? err : new Error('Deriv socket error'));
+        }
       });
     });
   }
@@ -1153,15 +1271,23 @@ export class OtpDerivClient {
     otpWsUrl: string,
     proposalPayload: Record<string, unknown>,
     stake: number,
-    timeoutMs = 10000
-  ): Promise<{ proposal: any; buy: any }> {
+    timeoutMs = 10000,
+    options?: {
+      keepAliveForSettlement?: boolean;
+      settlementTimeoutMs?: number;
+      onPocUpdate?: (poc: any) => void;
+    }
+  ): Promise<{ proposal: any; buy: any; settlementPromise?: Promise<any | null> }> {
     return new Promise((resolve, reject) => {
       const socket = new WebSocket(otpWsUrl);
       let settled = false;
       let proposalData: any = null;
+      let watchingSettlement = false;
+      let latestPoc: any = null;
+      let settleTimer: ReturnType<typeof setTimeout> | null = null;
+      let resolveSettlement: ((poc: any | null) => void) | null = null;
 
-      const cleanup = () => {
-        clearTimeout(timer);
+      const closeSocket = () => {
         try {
           if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
             socket.close();
@@ -1170,16 +1296,41 @@ export class OtpDerivClient {
           // ignore
         }
       };
+
+      const finishSettlement = (poc: any | null) => {
+        if (!watchingSettlement) return;
+        watchingSettlement = false;
+        if (settleTimer) {
+          clearTimeout(settleTimer);
+          settleTimer = null;
+        }
+        closeSocket();
+        if (resolveSettlement) {
+          const fn = resolveSettlement;
+          resolveSettlement = null;
+          fn(poc);
+        }
+      };
+
       const fail = (err: Error) => {
+        if (watchingSettlement) {
+          finishSettlement(latestPoc);
+          return;
+        }
         if (settled) return;
         settled = true;
-        cleanup();
+        clearTimeout(timer);
+        closeSocket();
         reject(err);
       };
-      const succeed = (val: { proposal: any; buy: any }) => {
+
+      const succeed = (val: { proposal: any; buy: any; settlementPromise?: Promise<any | null> }) => {
         if (settled) return;
         settled = true;
-        cleanup();
+        clearTimeout(timer);
+        if (!watchingSettlement) {
+          closeSocket();
+        }
         resolve(val);
       };
 
@@ -1220,19 +1371,67 @@ export class OtpDerivClient {
               fail(new Error(data.error.message || 'Deriv contract purchase rejected'));
               return;
             }
-            succeed({ proposal: proposalData, buy: data.buy });
+            const contractId = data?.buy?.contract_id;
+            if (options?.keepAliveForSettlement && contractId) {
+              watchingSettlement = true;
+              const settlementPromise = new Promise<any | null>((resSettle) => {
+                resolveSettlement = resSettle;
+              });
+              settleTimer = setTimeout(
+                () => finishSettlement(latestPoc),
+                options.settlementTimeoutMs ?? 25000
+              );
+              socket.send(
+                JSON.stringify({
+                  proposal_open_contract: 1,
+                  contract_id: Number(contractId),
+                  subscribe: 1,
+                  req_id: 103,
+                })
+              );
+              succeed({ proposal: proposalData, buy: data.buy, settlementPromise });
+            } else {
+              succeed({ proposal: proposalData, buy: data.buy });
+            }
+            return;
+          }
+          if (watchingSettlement && data?.proposal_open_contract) {
+            const poc = data.proposal_open_contract;
+            latestPoc = poc;
+            if (options?.onPocUpdate) options.onPocUpdate(poc);
+            const isClosed =
+              Boolean(poc.is_sold) ||
+              poc.status === 'won' ||
+              poc.status === 'lost' ||
+              poc.status === 'sold' ||
+              (Boolean(poc.is_expired) && (poc.profit !== undefined || poc.sell_price !== undefined));
+            if (isClosed) {
+              finishSettlement(poc);
+            }
           }
         } catch (err) {
-          fail(err instanceof Error ? err : new Error('Invalid OTP trade response'));
+          if (watchingSettlement) {
+            finishSettlement(latestPoc);
+          } else {
+            fail(err instanceof Error ? err : new Error('Invalid OTP trade response'));
+          }
         }
       });
 
       socket.on('close', (code) => {
-        fail(new Error(`OTP trading socket closed (${code})`));
+        if (watchingSettlement) {
+          finishSettlement(latestPoc);
+        } else {
+          fail(new Error(`OTP trading socket closed (${code})`));
+        }
       });
 
       socket.on('error', (err) => {
-        fail(err instanceof Error ? err : new Error('OTP WebSocket error'));
+        if (watchingSettlement) {
+          finishSettlement(latestPoc);
+        } else {
+          fail(err instanceof Error ? err : new Error('OTP WebSocket error'));
+        }
       });
     });
   }
@@ -1286,7 +1485,12 @@ export class OtpDerivClient {
           if (!poc) return;
           latestPoc = poc;
           if (onUpdate) onUpdate(poc);
-          const settled = Boolean(poc.is_sold) || poc.status === 'won' || poc.status === 'lost' || poc.status === 'sold';
+          const settled =
+            Boolean(poc.is_sold) ||
+            poc.status === 'won' ||
+            poc.status === 'lost' ||
+            poc.status === 'sold' ||
+            (Boolean(poc.is_expired) && (poc.profit !== undefined || poc.sell_price !== undefined));
           if (settled) {
             finish(poc);
           }
